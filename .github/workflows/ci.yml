@@ -88,14 +88,32 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.target }}
-          path: dist/*.whl
+          # Only the platform wheel: the model wheel is built here for the
+          # install test, but it is the same file on every runner, and five
+          # artifacts carrying one name corrupt each other when merged.
+          path: dist/ocrust-*.whl
+
+  models-wheel:
+    name: model wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Pure data, identical everywhere, so it is built once and shared.
+      - run: python scripts/build_models_wheel.py --models-dir models/ppocrv6 -o dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: models-wheel
+          path: dist/ocrust_models-*.whl
 
   publish:
     name: publish to PyPI
     # A pushed tag is the normal path; the dispatch input is the one that works
     # from a phone, where creating a tag is the awkward part.
     if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
-    needs: [rust, python-lint, wheels]
+    needs: [rust, python-lint, wheels, models-wheel]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -118,23 +136,30 @@ jobs:
               core.info(`created ${tag} at ${context.sha}`);
             } catch (error) {
               if (error.status !== 422) throw error;
-              core.info(`${tag} already exists, leaving it alone`);
+              // A tag left behind by a release that failed before publishing
+              // anything should follow the commit that gets released instead of
+              // pointing at the attempt.
+              await github.rest.git.updateRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: tag.replace('refs/', ''),
+                sha: context.sha,
+                force: true,
+              });
+              core.info(`moved ${tag} to ${context.sha}`);
             }
+      # Trusted publishing mints a token for one project at a time, so the two
+      # distributions are kept apart from the start.
       - uses: actions/download-artifact@v4
         with:
           pattern: wheel-*
           merge-multiple: true
-          path: dist
-      # Two distributions come out of the matrix, and trusted publishing mints a
-      # token for one project at a time — uploading them together would be
-      # rejected. The model wheel is identical on every runner, so the merge
-      # leaves exactly one copy.
-      - name: Separate the two distributions
-        run: |
-          mkdir -p upload/engine upload/models
-          mv dist/ocrust_models-*.whl upload/models/
-          mv dist/ocrust-*.whl upload/engine/
-          ls -l upload/engine upload/models
+          path: upload/engine
+      - uses: actions/download-artifact@v4
+        with:
+          name: models-wheel
+          path: upload/models
+      - run: ls -l upload/engine upload/models
       # Models first, deliberately: `ocrust[models]` depends on them, so if the
       # second upload fails the world still makes sense. The other way round it
       # would leave an engine on PyPI asking for a package that is not there.
