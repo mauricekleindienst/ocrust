@@ -33,11 +33,25 @@ pub struct EngineConfig {
     pub fix_orientation: bool,
     /// Compute per-word boxes from the recognizer's character positions.
     pub word_boxes: bool,
-    /// Pages scanned in parallel. `0` means "one per CPU core".
+    /// Pages scanned in parallel. `0` picks the default, which is 1.
+    ///
+    /// ONNX Runtime already spreads one inference across every core, so workers
+    /// share the cores rather than adding any. Measured on four cores with a
+    /// 12-page scan: one worker took 7.8 s, four workers 5.8 s — but a
+    /// single-page document is about twice as slow with four workers, because
+    /// each one only gets a quarter of the cores. So: leave it at 1 for
+    /// interactive, page-at-a-time work and raise it for batches and long PDFs.
     pub page_workers: usize,
     /// Keep the preprocessed page image on each [`Page`], which
     /// [`crate::export::pdf`] needs to write a searchable PDF.
     pub keep_page_images: bool,
+    /// Detect pages that are rotated by a quarter turn and straighten them.
+    ///
+    /// Sideways scans are common — a viewer applies `/Rotate`, a feeder pulled
+    /// the sheet in landscape — and the recognizer reads such lines but the page
+    /// comes out in column order. Box geometry decides the quarter turn; the
+    /// 180-degree line classifier then sorts out upside-down text.
+    pub auto_page_orientation: bool,
     /// Languages the documents are expected to be in.
     ///
     /// [`Engine::new`] refuses to build when the recognition model cannot spell
@@ -51,6 +65,7 @@ impl EngineConfig {
     pub fn new() -> Self {
         Self {
             fix_orientation: true,
+            auto_page_orientation: true,
             word_boxes: true,
             page_workers: 0,
             ..Default::default()
@@ -122,14 +137,24 @@ impl Engine {
     /// Loads models and prepares inference sessions.
     pub fn new(mut config: EngineConfig) -> Result<Self> {
         let model_set = models::resolve(&config.models)?;
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         if config.page_workers == 0 {
-            config.page_workers = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-                .min(8);
+            // One worker with all cores is the fastest setting for a single page,
+            // which is the common case. Batches and long PDFs benefit from more,
+            // so this is a knob rather than a guess.
+            config.page_workers = 1;
+        }
+        config.page_workers = config.page_workers.clamp(1, cores.max(1) * 2);
+        let mut session = config.session.clone();
+        // Split the cores between page workers rather than letting each worker
+        // ask for all of them: that oversubscription is what made naive
+        // page-level parallelism slower than a single worker.
+        if session.intra_threads == 0 && config.page_workers > 1 {
+            session.intra_threads = (cores / config.page_workers).max(1);
         }
         // Give each worker its own session so page-level parallelism is real.
-        let mut session = config.session.clone();
         if session.replicas <= 1 {
             session.replicas = config.page_workers.clamp(1, 4);
         }
@@ -321,13 +346,28 @@ impl Engine {
         pdf: &[u8],
         options: &crate::export::overlay::OverlayOptions,
     ) -> Result<(Vec<u8>, crate::export::overlay::OverlayReport)> {
+        // The text layer is placed in the rendered page's coordinate system, so
+        // this scan must not move the pixels: no deskew, no rescaling and no
+        // quarter turns. Pixel-only clean-up (inversion, contrast) is kept.
+        // Measurements on the test corpus show deskewing does not improve
+        // recognition anyway, so nothing is given up here.
+        let page_options = PageOptions {
+            keep_image: false,
+            auto_page_orientation: false,
+            preprocess: PreprocessConfig {
+                deskew: false,
+                upscale_below: 0,
+                max_pixels: 0,
+                ..self.config.preprocess.clone()
+            },
+        };
         crate::export::overlay::add_text_layer(pdf, options, |index, image| {
             let raw = RawPage {
                 index,
                 image,
                 origin: crate::doc::PageOrigin::PdfPage,
             };
-            self.scan_page(raw)
+            self.scan_page_inner(raw, page_options.clone())
         })
     }
 
@@ -355,7 +395,11 @@ impl Engine {
         let mut doc = Document::new(source.name());
         // Page images are needed here regardless of how the engine is configured.
         for raw in ingest::load(source, &self.config.ingest)? {
-            doc.pages.push(self.scan_page_inner(raw, true)?);
+            let options = PageOptions {
+                keep_image: true,
+                ..PageOptions::from_config(&self.config)
+            };
+            doc.pages.push(self.scan_page_inner(raw, options)?);
         }
         doc.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
@@ -368,18 +412,55 @@ impl Engine {
         Ok((bytes, doc))
     }
 
-    /// Runs the full per-page pipeline with this engine's configuration.
-    fn scan_page(&self, raw: RawPage) -> Result<Page> {
-        self.scan_page_inner(raw, self.config.keep_page_images)
+    /// Rotates a sideways page upright, when the box geometry says so.
+    ///
+    /// Returns the rotated image and its detections, or `None` when the page was
+    /// already upright or rotating made it no better.
+    fn straighten(
+        &self,
+        image: &RgbImage,
+        detections: &[crate::detect::DetectedBox],
+    ) -> Result<Option<(RgbImage, Vec<crate::detect::DetectedBox>)>> {
+        const MIN_BOXES: usize = 4;
+        const SIDEWAYS: f32 = 0.6;
+
+        if detections.len() < MIN_BOXES || vertical_share(detections) < SIDEWAYS {
+            return Ok(None);
+        }
+        let rotated = image::imageops::rotate90(image);
+        let boxes = self.detector.detect(&rotated)?;
+        if boxes.len() < MIN_BOXES || vertical_share(&boxes) >= vertical_share(detections) {
+            // Rotating did not help: the page really does have vertical text.
+            return Ok(None);
+        }
+        log::debug!(
+            "page rotated 90 degrees: vertical share {:.2} -> {:.2}",
+            vertical_share(detections),
+            vertical_share(&boxes)
+        );
+        Ok(Some((rotated, boxes)))
     }
 
-    /// Runs the full per-page pipeline, optionally retaining the page image.
-    fn scan_page_inner(&self, raw: RawPage, keep_image: bool) -> Result<Page> {
-        let started = Instant::now();
-        let prepared = prepare(raw.image, &self.config.preprocess);
-        let image = prepared.image;
+    /// Runs the full per-page pipeline with this engine's configuration.
+    fn scan_page(&self, raw: RawPage) -> Result<Page> {
+        self.scan_page_inner(raw, PageOptions::from_config(&self.config))
+    }
 
-        let detections = self.detector.detect(&image)?;
+    /// Runs the full per-page pipeline with per-call overrides.
+    fn scan_page_inner(&self, raw: RawPage, options: PageOptions) -> Result<Page> {
+        let started = Instant::now();
+        let prepared = prepare(raw.image, &options.preprocess);
+        let mut image = prepared.image;
+        let mut page_rotation = prepared.rotation;
+
+        let mut detections = self.detector.detect(&image)?;
+        if options.auto_page_orientation {
+            if let Some((upright, boxes)) = self.straighten(&image, &detections)? {
+                image = upright;
+                detections = boxes;
+                page_rotation += 90.0;
+            }
+        }
         let mut crops: Vec<RgbImage> = Vec::with_capacity(detections.len());
         let mut kept: Vec<usize> = Vec::with_capacity(detections.len());
         for (i, det) in detections.iter().enumerate() {
@@ -394,11 +475,26 @@ impl Engine {
             None => vec![0.0; crops.len()],
         };
 
+        // The line classifier just told us something about the whole page: if it
+        // had to turn most lines around, the page itself is upside down. The
+        // crops are already correct, so only the geometry has to follow — which
+        // is what puts the lines back into reading order.
+        let upside_down = options.auto_page_orientation && flipped_share(&angles) > 0.6;
+        if upside_down {
+            let (w, h) = (image.width() as f32, image.height() as f32);
+            for detection in detections.iter_mut() {
+                detection.quad = rotate180_quad(&detection.quad, w, h);
+            }
+            image = image::imageops::rotate180(&image);
+            page_rotation += 180.0;
+            log::debug!("page was upside down: geometry rotated by 180 degrees");
+        }
+
         let recognitions = self.recognizer.recognize(&crops)?;
         let drop_score = self.config.recognizer.drop_score;
 
         let mut lines: Vec<Line> = Vec::with_capacity(recognitions.len());
-        for ((rec, &det_idx), flip) in recognitions.iter().zip(&kept).zip(angles) {
+        for ((rec, &det_idx), flip) in recognitions.iter().zip(&kept).zip(&angles) {
             let text = rec.text.trim();
             if text.is_empty() || rec.confidence < drop_score {
                 continue;
@@ -414,7 +510,7 @@ impl Engine {
                 text: text.to_string(),
                 confidence: rec.confidence,
                 bbox: quad.bounds(),
-                angle: quad.angle_deg() + flip,
+                angle: quad.angle_deg() + *flip,
                 quad,
                 det_score: det.score,
                 words,
@@ -429,13 +525,71 @@ impl Engine {
             index: raw.index,
             width,
             height,
-            rotation: prepared.rotation,
+            rotation: page_rotation,
             origin: raw.origin,
             blocks,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-            image: keep_image.then(|| std::sync::Arc::new(image)),
+            image: options.keep_image.then(|| std::sync::Arc::new(image)),
         })
     }
+}
+
+/// Per-call overrides for one page.
+///
+/// Reading a document and writing a text layer over it want different things:
+/// reading wants every clean-up available, while a text layer must land on the
+/// pixels exactly as they were rendered.
+#[derive(Debug, Clone)]
+struct PageOptions {
+    keep_image: bool,
+    auto_page_orientation: bool,
+    preprocess: PreprocessConfig,
+}
+
+impl PageOptions {
+    fn from_config(config: &EngineConfig) -> Self {
+        Self {
+            keep_image: config.keep_page_images,
+            auto_page_orientation: config.auto_page_orientation,
+            preprocess: config.preprocess.clone(),
+        }
+    }
+}
+
+/// Share of line crops the classifier had to turn around.
+fn flipped_share(angles: &[f32]) -> f32 {
+    if angles.is_empty() {
+        return 0.0;
+    }
+    let flipped = angles.iter().filter(|a| a.abs() >= 90.0).count();
+    flipped as f32 / angles.len() as f32
+}
+
+/// Maps a quad through a 180-degree page rotation.
+fn rotate180_quad(quad: &crate::geom::Quad, width: f32, height: f32) -> crate::geom::Quad {
+    let mut points = quad.points;
+    for p in points.iter_mut() {
+        p.x = width - p.x;
+        p.y = height - p.y;
+    }
+    crate::geom::Quad::new(points).ordered()
+}
+
+/// Share of detected boxes that are taller than they are wide.
+///
+/// Text lines are wide; a page full of tall boxes is a page lying on its side.
+fn vertical_share(detections: &[crate::detect::DetectedBox]) -> f32 {
+    if detections.is_empty() {
+        return 0.0;
+    }
+    let vertical = detections
+        .iter()
+        .filter(|d| {
+            let b = d.quad.bounds();
+            b.height() > b.width() * 1.2
+        })
+        .count();
+    vertical as f32 / detections.len() as f32
 }
 
 /// Scans one file with default settings.
@@ -452,4 +606,70 @@ pub fn scan_file(path: impl AsRef<std::path::Path>) -> Result<Document> {
     }
     let engine = Engine::new(EngineConfig::new())?;
     engine.scan(&Source::path(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detect::DetectedBox;
+    use crate::geom::{Quad, Rect};
+
+    fn boxes(shapes: &[(f32, f32)]) -> Vec<DetectedBox> {
+        shapes
+            .iter()
+            .map(|&(w, h)| DetectedBox {
+                quad: Quad::from_rect(Rect::new(0.0, 0.0, w, h)),
+                score: 0.9,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn upright_pages_have_a_low_vertical_share() {
+        // Ordinary text lines: wide and short.
+        let share = vertical_share(&boxes(&[(300.0, 20.0), (280.0, 22.0), (310.0, 20.0)]));
+        assert_eq!(share, 0.0);
+    }
+
+    #[test]
+    fn sideways_pages_have_a_high_vertical_share() {
+        let share = vertical_share(&boxes(&[(20.0, 300.0), (22.0, 280.0), (300.0, 20.0)]));
+        assert!((share - 2.0 / 3.0).abs() < 1e-6, "{share}");
+    }
+
+    #[test]
+    fn nearly_square_boxes_do_not_count_as_vertical() {
+        // A 1.2x margin keeps single characters and stamps from tipping the vote.
+        assert_eq!(vertical_share(&boxes(&[(100.0, 110.0)])), 0.0);
+        assert_eq!(vertical_share(&boxes(&[(100.0, 130.0)])), 1.0);
+    }
+
+    #[test]
+    fn empty_detections_are_not_sideways() {
+        assert_eq!(vertical_share(&[]), 0.0);
+    }
+
+    #[test]
+    fn flipped_share_counts_turned_lines() {
+        assert_eq!(flipped_share(&[]), 0.0);
+        assert_eq!(flipped_share(&[0.0, 0.0, 0.0]), 0.0);
+        assert_eq!(flipped_share(&[180.0, 180.0, 0.0, 0.0]), 0.5);
+        assert_eq!(flipped_share(&[180.0, 180.0]), 1.0);
+    }
+
+    #[test]
+    fn rotating_a_quad_by_180_reverses_the_page() {
+        // A line near the top of the page ends up near the bottom, and the
+        // corners come back in reading order.
+        let quad = Quad::from_rect(Rect::new(100.0, 50.0, 400.0, 80.0));
+        let flipped = rotate180_quad(&quad, 1000.0, 800.0);
+        let b = flipped.bounds();
+        assert_eq!((b.x0, b.y0, b.x1, b.y1), (600.0, 720.0, 900.0, 750.0));
+        // Flipping twice is the identity.
+        let back = rotate180_quad(&flipped, 1000.0, 800.0).bounds();
+        assert_eq!(
+            (back.x0, back.y0, back.x1, back.y1),
+            (100.0, 50.0, 400.0, 80.0)
+        );
+    }
 }

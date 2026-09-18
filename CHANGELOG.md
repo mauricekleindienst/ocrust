@@ -42,6 +42,42 @@ First release.
   model cannot spell a requested language, naming the missing characters.
 - `ocrust languages` reports covered and nearly covered languages.
 
+### Found by the corpus, fixed
+
+- **Large-format sheets.** An A0 drawing at 300 dpi scored a 96% character error
+  rate: detection scaled the whole sheet to 960 px, leaving 8 pt labels four
+  pixels tall. Detection now runs in overlapping tiles above four times the
+  working size, with each tile owning exactly its half of every overlap
+  (CER 0.96 → 0.04).
+- **Sideways pages.** Pages rotated a quarter turn were recognized but returned
+  in column order. The share of tall boxes now decides the turn, and detection
+  re-runs on the straightened page.
+- **Upside-down pages.** Every line was read correctly but in reverse order. The
+  180-degree line classifier's verdict now rotates the page geometry as well
+  (CER 0.75 → 0.11).
+- **Ruled tables** were read column by column, because a table's cell gaps looked
+  like page columns to the XY-cut. A column split now also has to be at least
+  3.5% of the content width.
+- **Thread oversubscription.** Page workers each asked ONNX Runtime for every
+  core, so eight workers were 20% *slower* than one. Workers now divide the
+  cores; a 12-page scan went from 8.5 s to 5.8 s with four of them. The default
+  is one worker, which is fastest for a single page.
+- **Text-layer alignment.** The PDF overlay assumed OCR coordinates matched the
+  rendered page, which deskewing and rescaling silently broke. The overlay now
+  scans without geometry changes, and rotated lines get a rotated baseline.
+
+### Evaluation
+
+- `scripts/make_corpus.py` generates a torture-test corpus with ground truth:
+  aged and stained scans, 1-bit faxes, A3 technical drawings with title blocks
+  and vertical labels, ruled forms, thermal receipts, three-column newspapers,
+  skewed and `/Rotate`-d pages, dark-mode screenshots, an A0 sheet at 300 dpi,
+  multi-page PDFs and TIFFs, born-digital PDFs and deliberately broken files.
+- `scripts/evaluate_corpus.py` reports character error rate, word error rate and
+  word recall per category and language, plus throughput, worker scaling, a DPI
+  sweep, preprocessing on/off, every export format, the PDF text layer, archive
+  TIFF output and robustness against broken input.
+
 ### Packaging
 
 - Prebuilt abi3 wheel, Python 3.9 and up. No Tesseract, PaddlePaddle, PyTorch,

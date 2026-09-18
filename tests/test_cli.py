@@ -75,3 +75,15 @@ def test_batch_output_rejects_a_file_path(capsys, invoice_pdf, tmp_path):
     code = main(["scan", str(invoice_pdf), str(invoice_pdf), "-o", str(tmp_path / "x.txt")])
     assert code == 2
     assert "must be a directory" in capsys.readouterr().err
+
+
+def test_worker_default_scales_with_the_batch():
+    from argparse import Namespace
+
+    from ocrust.cli import _workers_for
+
+    # A single file keeps all cores on one page; a batch runs pages in parallel.
+    assert _workers_for(Namespace(workers=None), 1) is None
+    assert _workers_for(Namespace(workers=None), 5) == 4
+    # An explicit choice always wins.
+    assert _workers_for(Namespace(workers=2), 9) == 2

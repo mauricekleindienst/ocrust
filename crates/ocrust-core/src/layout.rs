@@ -15,6 +15,13 @@ pub struct LayoutConfig {
     pub line_gap_factor: f32,
     /// Minimum gutter width (in median line heights) to accept a column split.
     pub column_gap_factor: f32,
+    /// Minimum gutter width as a fraction of the content width.
+    ///
+    /// This is what separates a page laid out in columns from a table: a
+    /// newspaper's gutter is several percent of the page, while the gaps between
+    /// table cells are around one percent. Without it, every ruled invoice comes
+    /// back read column by column.
+    pub column_gap_min_fraction: f32,
     /// A line this much taller than the median is treated as a heading.
     pub heading_height_factor: f32,
     /// Join words split across a line break by a trailing hyphen.
@@ -28,6 +35,7 @@ impl Default for LayoutConfig {
         Self {
             line_gap_factor: 0.9,
             column_gap_factor: 1.2,
+            column_gap_min_fraction: 0.035,
             heading_height_factor: 1.45,
             dehyphenate: true,
             detect_columns: true,
@@ -82,9 +90,11 @@ fn xy_cut(mut lines: Vec<Line>, scale: f32, cfg: &LayoutConfig, depth: usize, ou
 
     // Vertical gutter: a column break.
     if cfg.detect_columns {
-        if let Some(split) = find_gap(&lines, scale * cfg.column_gap_factor, |l| {
-            (l.bbox.x0, l.bbox.x1)
-        }) {
+        let content_width = lines.iter().map(|l| l.bbox.x1).fold(f32::MIN, f32::max)
+            - lines.iter().map(|l| l.bbox.x0).fold(f32::MAX, f32::min);
+        let min_gap =
+            (scale * cfg.column_gap_factor).max(content_width * cfg.column_gap_min_fraction);
+        if let Some(split) = find_gap(&lines, min_gap, |l| (l.bbox.x0, l.bbox.x1)) {
             let (left, right): (Vec<Line>, Vec<Line>) =
                 lines.into_iter().partition(|l| l.bbox.center_x() < split);
             if !left.is_empty() && !right.is_empty() {
@@ -352,6 +362,49 @@ mod tests {
         ];
         let ordered = reading_order(lines, &LayoutConfig::default());
         assert_eq!(texts(&ordered), ["L1", "L2", "R1", "R2"]);
+    }
+
+    #[test]
+    fn table_columns_are_not_mistaken_for_page_columns() {
+        // A five-column table: cells are close together, so the page must be
+        // read row by row, not column by column.
+        let mut lines = Vec::new();
+        let columns = [0.0, 120.0, 620.0, 800.0, 1100.0];
+        let widths = [60.0, 460.0, 120.0, 220.0, 200.0];
+        for row in 0..4 {
+            let y = 100.0 + row as f32 * 40.0;
+            for (index, (&x, &w)) in columns.iter().zip(&widths).enumerate() {
+                lines.push(line_at(&format!("r{row}c{index}"), x, y, x + w, y + 24.0));
+            }
+        }
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        let texts = texts(&ordered);
+        // Row-major order: the first row's cells come before the second row's.
+        assert_eq!(
+            &texts[..5],
+            &["r0c0", "r0c1", "r0c2", "r0c3", "r0c4"],
+            "{texts:?}"
+        );
+        assert_eq!(texts[5], "r1c0", "{texts:?}");
+    }
+
+    #[test]
+    fn newspaper_columns_still_split() {
+        // Same page width, but a gutter of 180 px (12% of the width) and the
+        // tight leading real body text has, so no row-wise cut comes first.
+        let mut lines = Vec::new();
+        for row in 0..6 {
+            let y = 100.0 + row as f32 * 30.0;
+            lines.push(line_at(&format!("L{row}"), 0.0, y, 660.0, y + 24.0));
+            lines.push(line_at(&format!("R{row}"), 840.0, y, 1500.0, y + 24.0));
+        }
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        let texts = texts(&ordered);
+        assert_eq!(
+            &texts[..6],
+            &["L0", "L1", "L2", "L3", "L4", "L5"],
+            "{texts:?}"
+        );
     }
 
     #[test]
