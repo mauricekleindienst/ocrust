@@ -143,6 +143,53 @@ tiff, tiff_doc = ocr.to_tiff(work / "invoice.pdf", gray=True)
 print(f"tiff bytes={len(tiff)} pages={len(tiff_doc.pages)}")
 PYCODE
 
+step "Example application"
+"$PY" - "$WORK" <<'PYCODE'
+import json
+import sys
+import urllib.request
+import uuid
+from pathlib import Path
+
+sys.path.insert(0, "examples")
+import app  # noqa: E402  (the example lives outside the package)
+
+work = Path(sys.argv[1])
+server = app.serve("127.0.0.1", 0)
+base = f"http://127.0.0.1:{server.server_port}"
+
+
+def post(path: str, name: str, data: bytes) -> tuple[int, bytes]:
+    boundary = uuid.uuid4().hex
+    body = b"".join([
+        f"--{boundary}\r\n".encode(),
+        f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n\r\n'.encode(),
+        data,
+        f"\r\n--{boundary}--\r\n".encode(),
+    ])
+    request = urllib.request.Request(
+        base + path, data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(request, timeout=300) as response:
+        return response.status, response.read()
+
+try:
+    with urllib.request.urlopen(base + "/health", timeout=30) as response:
+        print("health:", json.load(response))
+    # The generated invoice is German, so search for a word it really contains.
+    status, body = post("/scan?q=rechnung", "invoice.pdf", (work / "invoice.pdf").read_bytes())
+    payload = json.loads(body)
+    hits = payload.get("matches", [])
+    assert hits, "search found nothing in a page that says RECHNUNG"
+    print(f"scan: {status} lines={len(payload['pages'][0]['lines'])} "
+          f"hits={len(hits)} formats={len(payload['exports'])}")
+    status, pdf = post("/pdf", "page.png", (work / "page.png").read_bytes())
+    print(f"pdf: {status} bytes={len(pdf)} invisible={b'3 Tr' in pdf}")
+finally:
+    server.shutdown()
+PYCODE
+
 step "Benchmark"
 if "$PY" -c "import rapidocr_onnxruntime" 2>/dev/null; then
   "$PY" scripts/benchmark.py "$WORK/invoice.pdf" --runs 3

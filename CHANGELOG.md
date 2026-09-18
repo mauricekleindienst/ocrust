@@ -133,6 +133,20 @@ First release.
   needs. The token is sent only to GitHub hosts — never to a mirror URL out of a
   manifest — and that is unit-tested.
 
+### A test application
+
+- `examples/app.py`: a local web app with **no dependencies beyond the library**
+  — standard-library `http.server` and a hand-rolled multipart reader, no Flask,
+  no Streamlit. Drop in a scan, a photo or a PDF and see the text, the line boxes
+  over the image, all six export formats, search with highlighted hits, mean
+  confidence and per-page timing, and a one-click searchable PDF.
+- It doubles as a small HTTP API (`POST /scan`, `POST /scan?q=`, `POST /pdf`,
+  `GET /languages`, `GET /health`), so it is also the quickest way to check an
+  installation. `POST /pdf` returns an `X-Ocrust-Report` header, so a PDF that
+  already had text reads as "nothing added" instead of looking like a failure.
+- Covered by `tests/test_example_app.py` over real HTTP, and exercised by
+  `scripts/dev_e2e.sh`, so the example cannot quietly rot.
+
 ### Documentation
 
 - A logo (`assets/ocrust.svg`) at the top of the README and the wiki.

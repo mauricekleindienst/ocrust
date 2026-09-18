@@ -64,8 +64,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p ocrust-core --lib                                   # no models needed
 OCRUST_MODELS_DIR=$PWD/models/ppocrv6 cargo test -p ocrust-core --test end_to_end
 pytest -q
-ruff check python tests scripts
-ruff format --check python tests scripts
+ruff check python tests scripts examples
+ruff format --check python tests scripts examples
 ```
 
 Do not run `cargo clippy --all-features`: the accelerator features (`cuda`,
@@ -78,9 +78,9 @@ without one. CI runs default features, and so should you.
 |---|---|---|
 | `crates/ocrust-core/src/**` unit tests | geometry, CTC decode, layout, WinAnsi, manifests, language coverage | no |
 | `crates/ocrust-core/tests/end_to_end.rs` | the real pipeline against the bundled models | yes |
-| `tests/test_*.py` | Python API, CLI, formats, languages, PDF layer, TIFF export | yes |
+| `tests/test_*.py` | Python API, CLI, formats, languages, PDF layer, TIFF export, the example app | yes |
 
-Current state: 142 Rust unit tests, 8 Rust end-to-end tests, 58 Python tests.
+Current state: 158 Rust unit tests, 8 Rust end-to-end tests, 77 Python tests.
 
 The unit tests deliberately need neither models nor ONNX Runtime, which is what
 keeps them fast enough to run on every save — and why CI can check three
@@ -92,7 +92,7 @@ platforms cheaply. Keep it that way: a new test that needs a model belongs in
 | Job | Matrix |
 |---|---|
 | `cargo test` | ubuntu, macOS, Windows — fmt, clippy, unit tests |
-| `ruff` | lint and format check over `python tests scripts` |
+| `ruff` | lint and format check over `python tests scripts examples` |
 | `wheel` | linux x86_64/aarch64, macOS arm64/x86_64, Windows x86_64 — builds both wheels, installs them, runs `pytest` |
 | `publish` | on a `v*` tag only: PyPI via trusted publishing |
 

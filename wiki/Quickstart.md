@@ -69,6 +69,17 @@ ocrust tiff scan.pdf --gray --sidecar text   # archive TIFF plus its text
 ocrust languages                             # what the model covers
 ```
 
+## Try it in a browser first
+
+```bash
+python examples/app.py        # http://127.0.0.1:8765
+```
+
+The repository ships a dependency-free web app: drop a file in, see the text, the
+boxes over the image, every export format, search with highlighted hits and a
+one-click searchable PDF. It is also a small HTTP API (`POST /scan`, `POST /pdf`,
+`GET /languages`), which makes it a quick way to check an installation.
+
 ## Declaring a language is a check
 
 ```python
