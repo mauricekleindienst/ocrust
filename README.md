@@ -1,7 +1,8 @@
 # ocrust
 
-**Document OCR for Python, with a Rust core.** Images, multi-page TIFF and PDF in,
-text — or Markdown, JSON, hOCR, ALTO, CSV, searchable PDF — out.
+**Document OCR for Python, with a Rust core.** Images, multi-page TIFF and PDF in
+— text, Markdown, JSON, hOCR, ALTO, CSV, multi-page TIFF or a searchable PDF out.
+27 languages. One `pip install`, no system packages.
 
 ```bash
 pip install "ocrust[models]"
@@ -10,33 +11,36 @@ pip install "ocrust[models]"
 ```python
 import ocrust
 
-print(ocrust.read("invoice.pdf"))
+print(ocrust.read("rechnung.pdf"))
 ```
 
 ```text
-INVOICE 2026-0042
-Total: 199.90 EUR
-Thank you for your business
+RECHNUNG 2026-0042
+Grüße aus München
+Betrag: 1.299,90 EUR
+Français: déjà payé
 ```
 
-## Why another OCR package
+## Why this exists
 
-Installing OCR in Python is usually the hard part, not the OCR:
+Installing OCR in Python is usually harder than the OCR itself. `ocrust` is built
+around three rules:
 
-| | install | native prerequisites | PDF support | first run |
+1. **No native prerequisites.** No Tesseract binary, no PaddlePaddle, no PyTorch,
+   no Poppler, no PDFium. The whole engine is one prebuilt wheel.
+2. **No admin rights and no compiler.** Everything is a wheel; the Rust side has
+   no C, C++ or CMake dependency at all.
+3. **One source for everything.** The models live in this repository and are
+   installed from a wheel or fetched from `raw.githubusercontent.com`. A
+   corporate proxy that allows GitHub and PyPI — and nothing else — is enough.
+   Hugging Face, ModelScope and `bcebos.com` are never contacted.
+
+| | install | native prerequisites | PDF | first run |
 |---|---|---|---|---|
-| **ocrust** | `pip install "ocrust[models]"` | none — the wheel ships the engine, `onnxruntime` ships the runtime | built in (pure-Rust renderer) | offline, models come from the wheel |
+| **ocrust** | `pip install "ocrust[models]"` | none | built in | offline, models ship with it |
 | pytesseract | `pip install` **+** `apt install tesseract-ocr` | Tesseract binary, language packs | via extra tools | needs the system binary |
 | PaddleOCR | `pip install paddleocr paddlepaddle` | PaddlePaddle (~1 GB with deps) | via extra tools | downloads models |
 | EasyOCR | `pip install easyocr` | PyTorch (~2.5 GB with CUDA) | none | downloads models |
-
-Everything else follows from that: one wheel, no `apt`, no CUDA toolkit, no model
-download on first use, and the same behaviour in a container, on a laptop and in CI.
-
-> **Note on `[models]`.** The `ocrust-models` wheel is built from this repo with
-> `python scripts/build_models_wheel.py --models-dir <dir>`; until it is published
-> to PyPI, install it from a local build or point `OCRUST_MODELS_DIR` at a model
-> directory (see [Models](#models)).
 
 ### Measured
 
@@ -49,37 +53,93 @@ Same page, same models, same ONNX Runtime — only the OCR stack differs
 | **ocrust** | **322 ms** | 81 chars, all 4 lines |
 | rapidocr-onnxruntime | 773 ms | 81 chars, all 4 lines |
 
-Identical output, **2.4× the throughput** — the difference is the pipeline around
-the models: no Python in the hot path, crops batched by aspect ratio, and a
-session pool instead of one lock. Run it yourself:
+Identical output, **2.4× the throughput**. The difference is the pipeline around
+the models: no Python in the hot path, crops batched by aspect ratio, a session
+pool instead of one lock, and page-level parallelism with the GIL released.
+
+Numbers depend on the machine and the page; the script skips engines you do not
+have installed.
 
 ```bash
 pip install "ocrust[models]" rapidocr-onnxruntime pypdfium2 pillow
 python scripts/benchmark.py your-page.png --runs 5
 ```
 
-Numbers depend on the machine, the models and the page; the script skips engines
-you do not have installed.
+## Languages
 
-## What it does
+The bundled PP-OCRv6 recognizer has 18 708 classes and covers **27 languages**
+completely:
 
-- **Every common input.** PNG, JPEG, WebP, TIFF (including multi-page), BMP, GIF,
-  PNM, TGA, DDS, HDR, OpenEXR, QOI, ICO — plus PDF, rasterized by
-  [hayro](https://crates.io/crates/hayro), a pure-Rust renderer. EXIF rotation is
-  applied automatically.
-- **Modern models.** PP-OCR family: DB text detection, 180° line-orientation
-  classification and CTC recognition, run through ONNX Runtime. The recognizer's
-  character set is read from the ONNX metadata, so a matching dictionary file is
-  optional.
-- **Pages that read correctly.** Skew is estimated and corrected, dark-mode pages
-  are inverted, columns are detected with an XY-cut, paragraphs are grouped and
-  words hyphenated across line breaks are joined.
-- **Output for real pipelines.** Plain text, Markdown, JSON with every box and
-  score, hOCR, ALTO XML, CSV, and searchable PDFs (the scan with an invisible
-  text layer).
-- **Fast by construction.** Rust, no Python in the hot path, batched recognition
-  grouped by aspect ratio, page-level parallelism, and the GIL released during
-  every scan.
+| script | languages |
+|---|---|
+| Latin | English, German, French, Spanish, Italian, Portuguese, Dutch, Swedish, Danish, Norwegian, Finnish, Icelandic, Polish, Czech, Slovak, Hungarian, Romanian, Turkish, Croatian, Slovenian, Estonian, Latvian, Lithuanian |
+| Greek | Greek |
+| Han / Kana | Chinese (Simplified and Traditional), Japanese |
+
+```bash
+ocrust languages          # what the installed model covers
+ocrust languages --all    # every language ocrust knows about
+```
+
+Declaring the language is not a hint — it is a **check**:
+
+```python
+ocr = ocrust.Ocr(lang="de,fr")     # fine with the bundled model
+ocr = ocrust.Ocr(lang="ru")        # OcrustError: cannot write а б в г д е ж …
+```
+
+That matters because a model without `ö` and `ß` does not fail on German text —
+it quietly returns `Grusse` for `Grüße`. `ocrust` refuses instead, naming the
+characters the model cannot produce. Cyrillic, Arabic and Devanagari need a
+script-specific model; see [`models/README.md`](models/README.md).
+
+## Adding an OCR layer to existing PDFs
+
+The archival workflow: the PDF keeps its pages, its images and its compression,
+and gains an invisible text layer so it becomes searchable and selectable.
+
+```bash
+ocrust ocr scan.pdf                      # -> scan.ocr.pdf
+ocrust ocr scan.pdf --dry-run            # what would happen, page by page
+ocrust ocr archive.pdf --force --dpi 300 # also re-OCR pages that have text
+```
+
+```python
+pdf, report = ocrust.ocr_pdf("scan.pdf")
+print(report)
+# {'pages': 12, 'pages_with_layer': 9, 'pages_skipped': 3, 'lines': 214,
+#  'unmappable_chars': 0}
+```
+
+- Pages that **already contain text** are skipped, so running it over a mixed
+  archive is safe; `--force` overrides that.
+- Page rotation (`/Rotate 90/180/270`) is handled: the text layer is transformed
+  back into page space so selection lines up.
+- Inherited page resources are preserved rather than shadowed, which is where
+  naive implementations corrupt documents.
+- Nothing is re-encoded. Only a content stream and a font object are added.
+
+The text layer uses a base-14 WinAnsi font, which covers Western European text.
+Characters outside it (CJK, Cyrillic) are counted in `unmappable_chars` and
+written as `?` *in the invisible layer only* — the visible page never changes.
+
+Need a searchable PDF from images instead? That builds a new document:
+
+```bash
+ocrust pdf photo.jpg -o photo.pdf
+```
+
+## Every input format
+
+| | formats |
+|---|---|
+| Images | PNG, JPEG, WebP, BMP, GIF, PNM/PBM/PGM/PPM, TGA, DDS, HDR, OpenEXR, QOI, ICO |
+| Multi-page | TIFF (every page), PDF (every page) |
+| In memory | `bytes`, `numpy` arrays, PIL images |
+
+EXIF orientation is applied, and formats without magic bytes (TGA) are resolved
+from the file name. PDFs are rasterized by
+[hayro](https://crates.io/crates/hayro), a pure-Rust renderer.
 
 ## Python API
 
@@ -90,8 +150,8 @@ import ocrust
 text = ocrust.read("scan.jpg")
 doc = ocrust.scan("contract.pdf")
 
-# Reuse an engine when you have more than one document: models load once.
-ocr = ocrust.Ocr(device="auto", page_workers=8, pdf_dpi=240)
+# Reuse an engine for more than one document: the models load once.
+ocr = ocrust.Ocr(lang="de", device="auto", page_workers=8, pdf_dpi=240)
 
 doc = ocr.scan("invoice.pdf", pages=[0, 1])
 doc.text                      # reading order applied
@@ -108,12 +168,13 @@ for line in doc.lines:
 for result in ocr.scan_many(["a.pdf", "b.png", "c.tiff"]):
     print(result.source, len(result.pages))
 
-# numpy arrays and PIL images work too (neither is a dependency).
-import numpy as np
-doc = ocr.scan(np.asarray(pil_image), name="frame")
+# numpy arrays and PIL images (neither is a dependency).
+doc = ocr.scan(numpy_array, name="frame")
 
-# Archive-ready: the original scan, now searchable.
-open("scan.ocr.pdf", "wb").write(ocrust.searchable_pdf("scan.jpg"))
+# Archive outputs.
+pdf, report = ocr.ocr_pdf("scan.pdf")          # text layer over the original
+open("out.pdf", "wb").write(ocrust.searchable_pdf("photo.jpg"))
+tiff, doc = ocr.to_tiff("scan.pdf", gray=True)  # deskewed multi-page TIFF
 ```
 
 ## Command line
@@ -121,27 +182,29 @@ open("scan.ocr.pdf", "wb").write(ocrust.searchable_pdf("scan.jpg"))
 ```bash
 ocrust scan invoice.pdf                      # text on stdout
 ocrust scan page.jpg -f markdown -o page.md
-ocrust scan *.tiff -f json -o results/       # batch; one file per input
-ocrust scan book.pdf --pages 1,4-8 --dpi 300
-ocrust pdf scan.jpg -o scan.ocr.pdf          # searchable PDF
-ocrust doctor                                # runtime + model diagnostics
-ocrust models                                # which model files are in use
+ocrust scan *.tiff -f json -o results/       # batch, one file per input
+ocrust scan book.pdf --pages 1,4-8 --dpi 300 --lang de
+ocrust ocr scan.pdf -o scan.ocr.pdf          # add a text layer
+ocrust pdf photo.jpg -o photo.pdf            # searchable PDF from an image
+ocrust tiff scan.pdf --gray --sidecar text   # archive TIFF plus text
+ocrust languages                             # model coverage
+ocrust models                                # which files are in use
+ocrust install-models                        # fetch them from GitHub
+ocrust doctor                                # what is installed, what is missing
 ```
 
 ## Models
 
-`pip install "ocrust[models]"` brings the PP-OCR bundle along as a wheel, so a
-fresh install works offline. To use your own models, point at a directory
-holding PP-OCR-style ONNX files:
+`pip install "ocrust[models]"` installs them as a wheel — nothing is downloaded
+at runtime. Alternatively:
 
 ```bash
-export OCRUST_MODELS_DIR=/opt/models/ppocrv5
-ocrust models
+ocrust install-models      # from raw.githubusercontent.com, checksum-verified
+export OCRUST_MODELS_DIR=/opt/models/ppocrv6   # or bring your own
 ```
 
 ```python
-ocr = ocrust.Ocr(models_dir="/opt/models/ppocrv5")
-# or name the files explicitly
+ocr = ocrust.Ocr(models_dir="/opt/models/ppocrv6")
 ocr = ocrust.Ocr(
     detection_model="det.onnx",
     recognition_model="rec.onnx",
@@ -151,14 +214,18 @@ ocr = ocrust.Ocr(
 ```
 
 Files are matched by name (`*det*.onnx`, `*rec*.onnx`, `*cls*.onnx`,
-`*dict*.txt`/`*keys*.txt`), which fits bundles from PaddleOCR, RapidOCR and
-custom exports alike. Resolution order: explicit paths → `models_dir` →
-`OCRUST_MODELS_DIR` → per-user cache (`ocrust models` prints it).
+`*dict*.txt`/`*keys*.txt`), so bundles from PaddleOCR, RapidOCR and custom
+exports all work. Resolution order: explicit paths → `models_dir` →
+`OCRUST_MODELS_DIR` → the per-user cache. See
+[`models/README.md`](models/README.md) for provenance and licensing.
+
+Environment knobs: `OCRUST_MODELS_DIR`, `OCRUST_HOME` (cache root),
+`OCRUST_MODEL_REF` (git ref for downloads), `OCRUST_ORT_DYLIB` /
+`ORT_DYLIB_PATH` (a specific ONNX Runtime build).
 
 ## GPU
 
-CPU is the default and needs nothing. For an accelerator, install a matching
-ONNX Runtime build and select the device:
+CPU is the default and needs nothing:
 
 ```bash
 pip install "ocrust[gpu]"     # onnxruntime-gpu
@@ -168,17 +235,18 @@ pip install "ocrust[gpu]"     # onnxruntime-gpu
 ocr = ocrust.Ocr(device="cuda")     # or "auto", "cuda:1", "coreml", "directml"
 ```
 
-Accelerated builds of the extension are published as separate wheels; `device="auto"`
+Accelerated builds of the extension ship as separate wheels; `device="auto"`
 falls back to the CPU whenever a provider is unavailable, so code stays portable.
 
 ## Tuning
 
 | Argument | Default | Effect |
 |---|---|---|
+| `lang` | none | Languages the model must be able to spell |
 | `pdf_dpi` | 200 | PDF rasterization resolution; 300 helps on small print |
 | `det_limit_side` | 960 | Longest side fed to detection; raise for dense pages |
-| `det_box_threshold` | 0.6 | Lower finds more, faint text; raise to cut noise |
-| `det_unclip_ratio` | 1.5 | How far detected boxes are grown before recognition |
+| `det_box_threshold` | 0.6 | Lower finds fainter text; raise to cut noise |
+| `det_unclip_ratio` | 1.5 | How far detected boxes grow before recognition |
 | `rec_batch_size` | 8 | Line crops per recognition call |
 | `drop_score` | 0.5 | Minimum mean confidence for a line to be kept |
 | `preprocess` | `True` | Auto-invert, deskew, rescale |
@@ -187,7 +255,7 @@ falls back to the CPU whenever a provider is unavailable, so code stays portable
 
 ## Rust crate
 
-The engine is usable on its own, without Python:
+The engine works without Python:
 
 ```toml
 [dependencies]
@@ -197,28 +265,39 @@ ocrust-core = "0.1"
 ```rust
 use ocrust_core::{Engine, EngineConfig, Source};
 
-let engine = Engine::new(EngineConfig::new())?;
-let doc = engine.scan(&Source::path("invoice.pdf"))?;
+let engine = Engine::new(EngineConfig::new().with_languages(["de", "fr"])?)?;
+let doc = engine.scan(&Source::path("rechnung.pdf"))?;
 println!("{}", doc.text());
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for the pipeline, and
-[`docs/research.md`](docs/research.md) for the model landscape this build is
+[`docs/architecture.md`](docs/architecture.md) walks the pipeline;
+[`docs/research.md`](docs/research.md) records the model landscape this build is
 based on.
 
 ## Development
 
 ```bash
-cargo test -p ocrust-core                 # 80+ unit tests, no models needed
-OCRUST_MODELS_DIR=/path/to/models \
-  cargo test -p ocrust-core --test end_to_end
-maturin develop --release                 # build the extension into a venv
-pytest                                    # Python API and CLI tests
+./scripts/dev_e2e.sh          # the whole cycle: build, install, test, exercise
 ```
 
-The end-to-end tests generate their own fixtures (a PDF with known text is
-written, rendered and recognized), so there are no binary files in the repo.
+Individually:
+
+```bash
+cargo test -p ocrust-core --lib                       # 112 unit tests, no models needed
+OCRUST_MODELS_DIR=models/ppocrv6 \
+  cargo test -p ocrust-core --test end_to_end         # real models
+maturin build --release -o dist                       # the wheel
+python scripts/build_models_wheel.py \
+  --models-dir models/ppocrv6 -o dist-models          # the model wheel
+pytest                                                # 57 API, format and CLI tests
+ruff check python tests scripts
+```
+
+Test fixtures are generated, not committed: a PDF with known text is written,
+rendered and recognized, so the suite has no binary inputs and the PDF path is
+covered on every run.
 
 ## License
 
-Apache-2.0.
+Apache-2.0. The bundled models are Apache-2.0 releases of the PaddleOCR project;
+see [`models/README.md`](models/README.md).

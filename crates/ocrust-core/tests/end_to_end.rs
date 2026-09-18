@@ -19,7 +19,14 @@ use ocrust_core::{Engine, EngineConfig, Source};
 fn text_pdf(lines: &[(&str, u32)]) -> Vec<u8> {
     let mut content = String::from("BT\n");
     for (text, size) in lines {
-        content.push_str(&format!("/F1 {size} Tf 1 0 0 1 60 {{Y}} Tm ({text}) Tj\n"));
+        // The font is declared as WinAnsi, so the literal has to be encoded the
+        // same way — writing raw UTF-8 here renders mojibake, which the OCR
+        // would then faithfully read back.
+        let (literal, replaced) = ocrust_core::export::pdf::winansi_literal(text);
+        assert_eq!(replaced, 0, "fixture text {text:?} needs an embedded font");
+        content.push_str(&format!(
+            "/F1 {size} Tf 1 0 0 1 60 {{Y}} Tm ({literal}) Tj\n"
+        ));
     }
     content.push_str("ET\n");
     // Lay the lines out from the top of the page downwards.
@@ -44,7 +51,7 @@ fn text_pdf(lines: &[(&str, u32)]) -> Vec<u8> {
             laid_out.len(),
             laid_out
         ),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
     ];
 
     let mut pdf = String::from("%PDF-1.4\n");
@@ -227,4 +234,120 @@ fn writes_a_searchable_pdf() {
         String::from_utf8_lossy(&out).contains("Searchable"),
         "text layer missing"
     );
+}
+
+/// Builds an engine that must cover `languages`, or `None` when no models exist.
+fn engine_for(languages: &[&str]) -> Option<Engine> {
+    let mut config = EngineConfig::new().with_languages(languages).ok()?;
+    config.keep_page_images = true;
+    if let Ok(dir) = std::env::var("OCRUST_MODELS_DIR") {
+        config.models.directory = Some(dir.into());
+    }
+    match Engine::new(config) {
+        Ok(engine) => Some(engine),
+        Err(e) => {
+            eprintln!("skipping multilingual test: {e}");
+            None
+        }
+    }
+}
+
+#[test]
+fn reads_german_french_and_nordic_text() {
+    let Some(engine) = engine_for(&["de", "fr", "da"]) else {
+        return;
+    };
+
+    // Everything here is expressible with a base-14 WinAnsi font, so the
+    // fixture renders real glyphs rather than mojibake.
+    let pdf = text_pdf(&[
+        ("Grüße aus München", 30),
+        ("Beträge: 1.299,90 EUR", 26),
+        ("Français: déjà vu, ça coûte", 26),
+        ("Blåbær på Fyn, Ærø", 26),
+    ]);
+    let doc = engine
+        .scan(&Source::bytes(pdf, "multilingual.pdf"))
+        .expect("scan");
+    let text = doc.text();
+    eprintln!("--- multilingual ---\n{text}\n--------------------");
+    let flat = squash(&text);
+
+    // Each of these fails outright on an ASCII-only or Chinese-only charset.
+    // Note: PP-OCRv6 transcribes the uppercase ligature "Æ" as "AE", so only
+    // the lowercase "æ" (in "Blåbær") is asserted here.
+    for needle in [
+        "Grüße", "München", "Beträge", "1.299,90", "déjà", "ça", "coûte", "Blåbær", "på",
+    ] {
+        assert!(
+            flat.contains(&squash(needle)),
+            "missing {needle:?} in:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn charset_covers_the_advertised_languages() {
+    let Some(engine) = engine() else { return };
+    let codes: Vec<&str> = engine
+        .supported_languages()
+        .iter()
+        .map(|l| l.code)
+        .collect();
+    eprintln!(
+        "{} chars, {} languages: {codes:?}",
+        engine.charset_size(),
+        codes.len()
+    );
+
+    // Scripts beyond WinAnsi cannot be rendered by the test fixture, so their
+    // support is asserted at the character-set level instead.
+    for code in [
+        "de", "fr", "es", "it", "pt", "nl", "sv", "da", "pl", "cs", "tr", "el",
+    ] {
+        assert!(codes.contains(&code), "{code} missing from {codes:?}");
+    }
+}
+
+#[test]
+fn language_coverage_is_reported() {
+    let Some(engine) = engine() else { return };
+    let supported: Vec<&str> = engine
+        .supported_languages()
+        .iter()
+        .map(|l| l.code)
+        .collect();
+    eprintln!(
+        "charset {} chars, languages: {supported:?}",
+        engine.charset_size()
+    );
+    assert!(supported.contains(&"en"), "{supported:?}");
+    assert!(engine.charset_size() > 90, "charset too small");
+}
+
+#[test]
+fn unsupported_language_is_refused_with_details() {
+    let Some(engine) = engine() else { return };
+    let covered = engine.supported_languages();
+    // Pick a language this model cannot do; every bundled model lacks at least
+    // one script, so this is a fair check.
+    let Some(missing) = ocrust_core::lang::all()
+        .iter()
+        .find(|l| !covered.iter().any(|c| c.code == l.code))
+    else {
+        eprintln!("model covers every known language; nothing to refuse");
+        return;
+    };
+
+    let mut config = EngineConfig::new()
+        .with_languages([missing.code])
+        .expect("known code");
+    if let Ok(dir) = std::env::var("OCRUST_MODELS_DIR") {
+        config.models.directory = Some(dir.into());
+    }
+    let err = Engine::new(config).expect_err("must refuse");
+    let message = err.to_string();
+    assert!(message.contains(missing.name), "{message}");
+    assert!(message.contains("cannot write"), "{message}");
+    assert!(message.contains("ocrust languages"), "{message}");
 }

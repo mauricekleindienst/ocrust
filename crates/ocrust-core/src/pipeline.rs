@@ -11,6 +11,7 @@ use crate::doc::{Document, Line, Page};
 use crate::error::{Error, Result};
 use crate::geom::crop_quad;
 use crate::ingest::{self, IngestConfig, RawPage, Source};
+use crate::lang::{self, Coverage, Language};
 use crate::layout::{self, LayoutConfig};
 use crate::models::{self, ModelPaths, ModelSet};
 use crate::preprocess::{prepare, PreprocessConfig};
@@ -37,6 +38,12 @@ pub struct EngineConfig {
     /// Keep the preprocessed page image on each [`Page`], which
     /// [`crate::export::pdf`] needs to write a searchable PDF.
     pub keep_page_images: bool,
+    /// Languages the documents are expected to be in.
+    ///
+    /// [`Engine::new`] refuses to build when the recognition model cannot spell
+    /// one of them — a model that silently drops `ö` and `ß` produces text that
+    /// looks fine and is wrong, which is worse than an error.
+    pub languages: Vec<&'static Language>,
 }
 
 impl EngineConfig {
@@ -60,6 +67,32 @@ impl EngineConfig {
     pub fn with_device(mut self, device: Device) -> Self {
         self.session.device = device;
         self
+    }
+
+    /// Requires the model to cover these languages, given as ISO codes or
+    /// English names (`"de"`, `"deu"`, `"german"`, `"zh-Hant"`).
+    pub fn with_languages<I, S>(mut self, languages: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut parsed = Vec::new();
+        for code in languages {
+            let code = code.as_ref();
+            let language = lang::parse(code).ok_or_else(|| {
+                Error::config(format!(
+                    "unknown language {code:?}; known codes: {}",
+                    lang::all()
+                        .iter()
+                        .map(|l| l.code)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
+            parsed.push(language);
+        }
+        self.languages = parsed;
+        Ok(self)
     }
 }
 
@@ -117,13 +150,74 @@ impl Engine {
             _ => None,
         };
 
-        Ok(Self {
+        let engine = Self {
             detector,
             recognizer,
             orientation,
             config,
             model_set,
-        })
+        };
+        engine.check_languages()?;
+        Ok(engine)
+    }
+
+    /// Fails when the recognizer cannot spell a requested language.
+    fn check_languages(&self) -> Result<()> {
+        let dict = self.recognizer.dict();
+        let unsupported: Vec<Coverage> = self
+            .config
+            .languages
+            .iter()
+            .map(|l| lang::coverage(dict, l))
+            .filter(|c| !c.is_complete())
+            .collect();
+        if unsupported.is_empty() {
+            return Ok(());
+        }
+        let details = unsupported
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} ({}): cannot write {}",
+                    c.language.name,
+                    c.language.code,
+                    c.missing_display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(Error::config(format!(
+            "recognition model {} does not cover the requested language(s): {details}.\n\
+             hint: `ocrust languages` lists what this model covers; install a bundle for the \
+             {} script, or drop the language requirement to accept partial results",
+            self.model_set
+                .recognition
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            unsupported
+                .iter()
+                .map(|c| c.language.script.name())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("/")
+        )))
+    }
+
+    /// Languages the loaded recognition model covers completely.
+    pub fn supported_languages(&self) -> Vec<&'static Language> {
+        lang::supported(self.recognizer.dict())
+    }
+
+    /// Languages the model *almost* covers, best first.
+    pub fn partial_languages(&self, min_ratio: f32) -> Vec<Coverage> {
+        lang::partial(self.recognizer.dict(), min_ratio)
+    }
+
+    /// Number of characters the recognition model can emit.
+    pub fn charset_size(&self) -> usize {
+        self.recognizer.dict().len().saturating_sub(1)
     }
 
     /// The model files in use.
@@ -216,8 +310,71 @@ impl Engine {
         }
     }
 
-    /// Runs the full per-page pipeline.
+    /// Adds an invisible OCR text layer to an existing PDF.
+    ///
+    /// The original pages are preserved byte for byte; only a content stream and
+    /// a font are added. Pages that already contain text are skipped unless the
+    /// options say otherwise.
+    #[cfg(feature = "pdf")]
+    pub fn add_pdf_text_layer(
+        &self,
+        pdf: &[u8],
+        options: &crate::export::overlay::OverlayOptions,
+    ) -> Result<(Vec<u8>, crate::export::overlay::OverlayReport)> {
+        crate::export::overlay::add_text_layer(pdf, options, |index, image| {
+            let raw = RawPage {
+                index,
+                image,
+                origin: crate::doc::PageOrigin::PdfPage,
+            };
+            self.scan_page(raw)
+        })
+    }
+
+    /// Reports what [`Self::add_pdf_text_layer`] would do, without running OCR.
+    #[cfg(feature = "pdf")]
+    pub fn plan_pdf_text_layer(
+        &self,
+        pdf: &[u8],
+        options: &crate::export::overlay::OverlayOptions,
+    ) -> Result<Vec<crate::export::overlay::PagePlan>> {
+        crate::export::overlay::plan(pdf, options)
+    }
+
+    /// Scans `source` and returns its pages as one multi-page TIFF, together
+    /// with the OCR result.
+    ///
+    /// The archived images are the preprocessed ones, so the file is already
+    /// deskewed and upright.
+    pub fn to_tiff(
+        &self,
+        source: &Source,
+        color: crate::export::tiff::TiffColor,
+    ) -> Result<(Vec<u8>, Document)> {
+        let started = Instant::now();
+        let mut doc = Document::new(source.name());
+        // Page images are needed here regardless of how the engine is configured.
+        for raw in ingest::load(source, &self.config.ingest)? {
+            doc.pages.push(self.scan_page_inner(raw, true)?);
+        }
+        doc.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        let pages: Vec<image::RgbImage> = doc
+            .pages
+            .iter()
+            .filter_map(|p| p.image.as_ref().map(|i| i.as_ref().clone()))
+            .collect();
+        let bytes = crate::export::tiff::write_pages(&pages, color)?;
+        Ok((bytes, doc))
+    }
+
+    /// Runs the full per-page pipeline with this engine's configuration.
     fn scan_page(&self, raw: RawPage) -> Result<Page> {
+        self.scan_page_inner(raw, self.config.keep_page_images)
+    }
+
+    /// Runs the full per-page pipeline, optionally retaining the page image.
+    fn scan_page_inner(&self, raw: RawPage, keep_image: bool) -> Result<Page> {
         let started = Instant::now();
         let prepared = prepare(raw.image, &self.config.preprocess);
         let image = prepared.image;
@@ -276,10 +433,7 @@ impl Engine {
             origin: raw.origin,
             blocks,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-            image: self
-                .config
-                .keep_page_images
-                .then(|| std::sync::Arc::new(image)),
+            image: keep_image.then(|| std::sync::Arc::new(image)),
         })
     }
 }

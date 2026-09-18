@@ -22,6 +22,18 @@ GLM-OCR, [LightOnOCR-1B](https://arxiv.org/pdf/2601.14251) and
 [Qwen2.5-VL](https://arxiv.org/pdf/2502.13923) target the same task at different
 sizes.
 
+## What this project ships
+
+**PP-OCRv6 mobile** (detection 9.5 MB, recognition 21 MB, orientation 0.6 MB).
+The recognizer has 18 708 classes and covers 27 languages completely — all of
+Western and Central Europe, Greek, Japanese and both Chinese scripts. Its
+predecessor v5 (18 383 classes) is close but misses a handful of accents
+(`î ï œ À` for French, `ś ź` for Polish, `ď ť ů` for Czech), which is why v6 is
+the default.
+
+The character set is embedded in the ONNX file, so no dictionary file has to be
+shipped or matched.
+
 ## Why this project runs a specialist pipeline
 
 The goal is a library that installs with one `pip install` and runs anywhere,
@@ -45,6 +57,21 @@ per-line confidences, which is what downstream tooling (hOCR, ALTO, searchable
 PDFs, spot-checking) needs. A VLM backend is a natural addition for
 structure-heavy documents; the [architecture](architecture.md) keeps the model
 stage isolated so it can be added without touching ingest, layout or export.
+
+## Distribution: one source, no toolchain
+
+A library is only as installable as its weakest dependency. Three decisions
+follow from that:
+
+- **Models live in this repository** and are installed from a wheel, or fetched
+  from `raw.githubusercontent.com` with SHA-256 verification. Upstream model
+  hosts (`huggingface.co`, `modelscope.cn`, `bcebos.com`) are commonly blocked by
+  corporate proxies, and a first run that cannot download is a failed install.
+- **No C toolchain.** Every dependency is pure Rust, and ONNX Runtime is loaded
+  dynamically from the `onnxruntime` wheel rather than linked. `pip install`
+  therefore needs no compiler, no CMake and no admin rights.
+- **Prebuilt abi3 wheels** for Linux (x86-64, aarch64), macOS (arm64, x86-64) and
+  Windows, one per platform for every Python from 3.9 up.
 
 ## Runtime and PDF choices
 
@@ -70,3 +97,18 @@ stage isolated so it can be added without touching ingest, layout or export.
   optional trailing space class (`use_space_char`).
 - The character set is read from the ONNX metadata key `character` when no
   dictionary file is supplied, which is how recent PP-OCR exports ship.
+- Per-language letter sets were cross-checked against PaddleOCR's own
+  dictionaries (`ppocr/utils/dict/{german,french,it,latin,cyrillic,…}_dict.txt`).
+  Those files are unions of training data and contain stray characters from other
+  scripts, so the tables here are the languages' actual alphabets.
+
+## Observed model behaviour
+
+Worth knowing, and covered by the test suite:
+
+- PP-OCRv6 transcribes the uppercase ligature `Æ` as `AE`. Lowercase `æ` is
+  returned correctly.
+- Vietnamese is at 98% coverage (`ạ ả` are missing), so it is reported as a near
+  miss rather than as supported.
+- Cyrillic, Arabic and Devanagari are not covered by this bundle at all and need
+  a script-specific recognition model.

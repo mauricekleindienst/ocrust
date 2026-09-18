@@ -17,6 +17,7 @@ hayro = { workspace = true, optional = true }
 image.workspace = true
 imageproc.workspace = true
 log.workspace = true
+lopdf = { workspace = true, optional = true }
 ndarray.workspace = true
 ort.workspace = true
 rayon.workspace = true
@@ -30,7 +31,7 @@ ureq = { workspace = true, optional = true }
 [features]
 default = ["pdf", "download"]
 # Rasterize and read PDFs with the pure-Rust `hayro` renderer.
-pdf = ["dep:hayro"]
+pdf = ["dep:hayro", "dep:lopdf"]
 # Fetch model files over HTTPS into the local model cache.
 download = ["dep:ureq", "dep:sha2"]
 # ONNX Runtime execution providers. Each needs the matching runtime build.

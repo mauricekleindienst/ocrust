@@ -157,7 +157,7 @@ fn load_bytes(data: &[u8], name: &str, cfg: &IngestConfig) -> Result<Vec<RawPage
                 }
                 Ok(vec![RawPage {
                     index: 0,
-                    image: decode_single(data)?,
+                    image: decode_single(data, Some(name))?,
                     origin: PageOrigin::Image,
                 }])
             }
@@ -174,10 +174,19 @@ fn load_bytes(data: &[u8], name: &str, cfg: &IngestConfig) -> Result<Vec<RawPage
 }
 
 /// Decodes one raster image, honouring its EXIF orientation.
-fn decode_single(data: &[u8]) -> Result<RgbImage> {
-    let reader = image::ImageReader::new(Cursor::new(data))
+///
+/// `hint` is the file name or extension, used when the bytes alone are not
+/// enough: TGA and a few other formats have no magic number, so content
+/// sniffing cannot identify them.
+fn decode_single(data: &[u8], hint: Option<&str>) -> Result<RgbImage> {
+    let mut reader = image::ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .map_err(Error::PlainIo)?;
+    if reader.format().is_none() {
+        if let Some(format) = hint.and_then(format_from_hint) {
+            reader.set_format(format);
+        }
+    }
     let mut decoder = reader.into_decoder()?;
     // Phone photos are almost always stored rotated with an EXIF tag.
     let orientation = decoder.orientation().ok();
@@ -186,6 +195,16 @@ fn decode_single(data: &[u8]) -> Result<RgbImage> {
         img.apply_orientation(o);
     }
     Ok(img.into_rgb8())
+}
+
+/// Maps a file name or extension onto an image format.
+fn format_from_hint(hint: &str) -> Option<image::ImageFormat> {
+    let extension = hint
+        .rsplit(['.', '/', '\\'])
+        .next()
+        .unwrap_or(hint)
+        .to_ascii_lowercase();
+    image::ImageFormat::from_extension(extension)
 }
 
 /// Decodes every page of a (possibly multi-page) TIFF.
@@ -324,6 +343,34 @@ mod tests {
             .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    #[test]
+    fn extension_hint_decodes_formats_without_magic_bytes() {
+        // TGA carries no signature, so content sniffing cannot identify it.
+        let img = RgbImage::from_pixel(4, 3, image::Rgb([9, 9, 9]));
+        let mut tga = Vec::new();
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut Cursor::new(&mut tga), image::ImageFormat::Tga)
+            .unwrap();
+
+        assert!(
+            decode_single(&tga, None).is_err(),
+            "sniffing cannot work here"
+        );
+        let decoded = decode_single(&tga, Some("page.tga")).expect("hint decodes it");
+        assert_eq!(decoded.dimensions(), (4, 3));
+
+        // The same path goes through the public entry point.
+        let pages = load(&Source::bytes(tga, "page.TGA"), &IngestConfig::default()).unwrap();
+        assert_eq!(pages[0].image.dimensions(), (4, 3));
+    }
+
+    #[test]
+    fn format_hints_accept_paths_and_bare_extensions() {
+        assert_eq!(format_from_hint("a/b/c.PNG"), Some(image::ImageFormat::Png));
+        assert_eq!(format_from_hint("tga"), Some(image::ImageFormat::Tga));
+        assert_eq!(format_from_hint("mystery"), None);
     }
 
     #[test]

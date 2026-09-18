@@ -1,9 +1,12 @@
 """Command line interface: ``ocrust``.
 
-    ocrust scan invoice.pdf                 # text to stdout
-    ocrust scan *.jpg -f markdown -o out/   # batch, one file per input
-    ocrust pdf scan.jpg -o scan.pdf         # searchable PDF
-    ocrust doctor                           # what is installed, what is missing
+ocrust scan invoice.pdf                 # text to stdout
+ocrust scan *.jpg -f markdown -o out/   # batch, one file per input
+ocrust ocr scan.pdf -o scan.ocr.pdf     # add a text layer, keep the pages
+ocrust pdf photo.jpg -o photo.pdf       # build a searchable PDF from an image
+ocrust tiff scan.pdf --gray             # deskewed multi-page TIFF
+ocrust languages                        # what the installed model covers
+ocrust doctor                           # what is installed, what is missing
 """
 
 from __future__ import annotations
@@ -11,8 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from . import FORMATS, Ocr, OcrustError, __version__, runtime_info
 
@@ -62,6 +65,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         help="drop lines below this mean confidence (0..1)",
     )
+    scan.add_argument(
+        "--lang",
+        help="languages to require, e.g. de or de,fr (fails when the model cannot spell them)",
+    )
     scan.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
     pdf = sub.add_parser("pdf", help="write a searchable PDF (image plus text layer)")
@@ -71,6 +78,47 @@ def _build_parser() -> argparse.ArgumentParser:
     pdf.add_argument("--quality", type=int, default=80, help="JPEG quality (default 80)")
     pdf.add_argument("--models", type=Path)
     pdf.add_argument("--device")
+
+    ocr = sub.add_parser(
+        "ocr",
+        help="add an invisible OCR text layer to a PDF, keeping its pages untouched",
+    )
+    ocr.add_argument("input", type=Path)
+    ocr.add_argument("-o", "--output", type=Path, help="defaults to <input>.ocr.pdf")
+    ocr.add_argument("--dpi", type=float, help="rasterization DPI for recognition")
+    ocr.add_argument(
+        "--force",
+        action="store_true",
+        help="also OCR pages that already contain text",
+    )
+    ocr.add_argument("--no-compress", action="store_true", help="store the text layer uncompressed")
+    ocr.add_argument(
+        "--dry-run", action="store_true", help="report what would happen, change nothing"
+    )
+    ocr.add_argument("--lang")
+    ocr.add_argument("--models", type=Path)
+    ocr.add_argument("--device")
+    ocr.add_argument("--workers", type=int)
+
+    tiff = sub.add_parser("tiff", help="convert a document into a deskewed multi-page TIFF")
+    tiff.add_argument("input", type=Path)
+    tiff.add_argument("-o", "--output", type=Path, help="defaults to <input>.ocr.tiff")
+    tiff.add_argument("--gray", action="store_true", help="write greyscale instead of colour")
+    tiff.add_argument("--sidecar", choices=FORMATS, help="also write the text in this format")
+    tiff.add_argument("--dpi", type=float)
+    tiff.add_argument("--models", type=Path)
+    tiff.add_argument("--lang")
+
+    languages = sub.add_parser("languages", help="list the languages the installed model covers")
+    languages.add_argument("--models", type=Path)
+    languages.add_argument("--all", action="store_true", help="list every known language")
+    languages.add_argument("--json", action="store_true")
+
+    install = sub.add_parser(
+        "install-models",
+        help="download the bundled model set from GitHub into the model cache",
+    )
+    install.add_argument("--json", action="store_true")
 
     doctor = sub.add_parser("doctor", help="show runtime and model diagnostics")
     doctor.add_argument("--json", action="store_true", help="machine-readable output")
@@ -114,6 +162,7 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
         preprocess=not getattr(args, "no_preprocess", False),
         word_boxes=not getattr(args, "no_word_boxes", False),
         drop_score=getattr(args, "min_confidence", None),
+        lang=getattr(args, "lang", None),
     )
 
 
@@ -131,7 +180,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if many and args.output and args.output.suffix:
         print("ocrust: --output must be a directory when reading several files", file=sys.stderr)
         return 2
-    if args.output and (many or args.output.is_dir()):
+    # A path without a suffix is a directory: `-o out` writes out/<name>.<ext>,
+    # so switching --format does not overwrite the previous run's output.
+    write_to_dir = bool(args.output) and (many or args.output.is_dir() or not args.output.suffix)
+    if write_to_dir:
         args.output.mkdir(parents=True, exist_ok=True)
 
     failures = 0
@@ -150,7 +202,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 sys.stdout.write("\n")
         else:
             target = args.output
-            if many or target.is_dir():
+            if write_to_dir:
                 target = target / f"{path.stem}.{_EXTENSIONS[args.format]}"
             target.write_text(rendered, encoding="utf-8")
             if not args.quiet:
@@ -181,6 +233,145 @@ def _cmd_pdf(args: argparse.Namespace) -> int:
     target = args.output or args.input.with_suffix(".ocr.pdf")
     target.write_bytes(data)
     print(f"{args.input} -> {target} ({len(data) / 1e6:.1f} MB)", file=sys.stderr)
+    return 0
+
+
+def _cmd_ocr(args: argparse.Namespace) -> int:
+    if not args.input.exists():
+        print(f"ocrust: no such file: {args.input}", file=sys.stderr)
+        return 2
+    data = args.input.read_bytes()
+    if not data.startswith(b"%PDF"):
+        print(
+            f"ocrust: {args.input} is not a PDF; use `ocrust pdf` to build a searchable "
+            "PDF from an image",
+            file=sys.stderr,
+        )
+        return 2
+
+    engine = Ocr(
+        models_dir=args.models,
+        device=args.device,
+        page_workers=args.workers,
+        pdf_dpi=args.dpi,
+        lang=args.lang,
+        keep_page_images=True,
+    )
+
+    if args.dry_run:
+        plan = engine.plan_pdf(data, skip_pages_with_text=not args.force)
+        todo = sum(1 for page in plan if page["needs_ocr"])
+        for page in plan:
+            rotation = f", rotated {page['rotate']}deg" if page["rotate"] else ""
+            action = "ocr" if page["needs_ocr"] else "skip (has text)"
+            print(
+                f"page {page['index'] + 1}: {page['width']:.0f}x{page['height']:.0f} pt"
+                f"{rotation} -> {action}"
+            )
+        print(f"\n{todo} of {len(plan)} page(s) would get a text layer")
+        return 0
+
+    try:
+        pdf, report = engine.ocr_pdf(
+            data,
+            dpi=args.dpi,
+            skip_pages_with_text=not args.force,
+            compress=not args.no_compress,
+        )
+    except (OcrustError, OSError, ValueError) as exc:
+        print(f"ocrust: {exc}", file=sys.stderr)
+        return 1
+
+    target = args.output or args.input.with_suffix(".ocr.pdf")
+    target.write_bytes(pdf)
+    print(
+        f"{args.input} -> {target}: {report['pages_with_layer']} of {report['pages']} page(s) "
+        f"got a text layer, {report['pages_skipped']} skipped, {report['lines']} line(s)",
+        file=sys.stderr,
+    )
+    if report["unmappable_chars"]:
+        print(
+            f"note: {report['unmappable_chars']} character(s) are outside WinAnsi and were "
+            "written as '?' in the text layer (the visible page is unchanged)",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _cmd_tiff(args: argparse.Namespace) -> int:
+    if not args.input.exists():
+        print(f"ocrust: no such file: {args.input}", file=sys.stderr)
+        return 2
+    engine = Ocr(models_dir=args.models, pdf_dpi=args.dpi, lang=args.lang)
+    try:
+        data, doc = engine.to_tiff(args.input, gray=args.gray)
+    except (OcrustError, OSError, ValueError) as exc:
+        print(f"ocrust: {exc}", file=sys.stderr)
+        return 1
+    target = args.output or args.input.with_suffix(".ocr.tiff")
+    target.write_bytes(data)
+    print(
+        f"{args.input} -> {target}: {len(doc.pages)} page(s), {len(data) / 1e6:.1f} MB",
+        file=sys.stderr,
+    )
+    if args.sidecar:
+        sidecar = target.with_suffix("." + _EXTENSIONS[args.sidecar])
+        sidecar.write_text(doc.render(args.sidecar), encoding="utf-8")
+        print(f"{args.input} -> {sidecar}", file=sys.stderr)
+    return 0
+
+
+def _cmd_languages(args: argparse.Namespace) -> int:
+    from . import known_languages
+
+    if args.all:
+        entries = list(known_languages())
+        label = "known to ocrust"
+    else:
+        try:
+            engine = Ocr(models_dir=args.models)
+        except OcrustError as exc:
+            print(f"ocrust: {exc}", file=sys.stderr)
+            return 1
+        entries = list(engine.languages)
+        label = f"covered by the installed model ({engine.charset_size} characters)"
+
+    if args.json:
+        print(json.dumps(entries, indent=2))
+        return 0
+
+    print(f"{len(entries)} language(s) {label}:\n")
+    by_script: dict[str, list[str]] = {}
+    for entry in entries:
+        by_script.setdefault(str(entry["script"]), []).append(f"{entry['code']} ({entry['name']})")
+    for script in sorted(by_script):
+        print(f"  {script:<11} {', '.join(sorted(by_script[script]))}")
+
+    if not args.all:
+        near = Ocr(models_dir=args.models).partial_languages(0.8)
+        if near:
+            print("\nnearly covered (a few characters missing):")
+            for entry in near:
+                print(
+                    f"  {entry['code']} ({entry['name']}): {entry['ratio'] * 100:.0f}%"
+                    f", missing {entry['missing']}"
+                )
+    return 0
+
+
+def _cmd_install_models(args: argparse.Namespace) -> int:
+    from . import install_models
+
+    try:
+        paths = install_models()
+    except Exception as exc:
+        print(f"ocrust: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(paths, indent=2))
+        return 0
+    for key, value in paths.items():
+        print(f"{key:<12} {value or '-'}")
     return 0
 
 
@@ -225,6 +416,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_scan(args)
     if args.command == "pdf":
         return _cmd_pdf(args)
+    if args.command == "ocr":
+        return _cmd_ocr(args)
+    if args.command == "tiff":
+        return _cmd_tiff(args)
+    if args.command == "languages":
+        return _cmd_languages(args)
+    if args.command == "install-models":
+        return _cmd_install_models(args)
     if args.command == "doctor":
         return _cmd_doctor(args)
     if args.command == "models":

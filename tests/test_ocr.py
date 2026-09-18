@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import ocrust
-
 from conftest import squash
 
 

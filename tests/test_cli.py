@@ -41,9 +41,7 @@ def test_scan_writes_requested_format(engine, invoice_pdf, tmp_path, capsys):
 
 def test_scan_batch_writes_one_file_per_input(engine, invoice_pdf, tmp_path):
     outdir = tmp_path / "results"
-    code = main(
-        ["scan", str(invoice_pdf), str(invoice_pdf), "-f", "json", "-o", str(outdir), "-q"]
-    )
+    code = main(["scan", str(invoice_pdf), str(invoice_pdf), "-f", "json", "-o", str(outdir), "-q"])
     assert code == 0
     written = list(outdir.glob("*.json"))
     assert written, "expected json output"
@@ -54,3 +52,26 @@ def test_pdf_command_writes_searchable_pdf(engine, invoice_pdf, tmp_path):
     out = tmp_path / "searchable.pdf"
     assert main(["pdf", str(invoice_pdf), "-o", str(out)]) == 0
     assert out.read_bytes().startswith(b"%PDF")
+
+
+def test_suffixless_output_is_treated_as_a_directory(engine, invoice_pdf, tmp_path):
+    # `-o out` must produce out/invoice.txt, not a file called "out", so that
+    # scanning again with another format does not overwrite the first result.
+    outdir = tmp_path / "out"
+    assert main(["scan", str(invoice_pdf), "-f", "text", "-o", str(outdir), "-q"]) == 0
+    assert main(["scan", str(invoice_pdf), "-f", "markdown", "-o", str(outdir), "-q"]) == 0
+    assert outdir.is_dir()
+    assert (outdir / "invoice.txt").exists()
+    assert (outdir / "invoice.md").exists()
+
+
+def test_output_with_suffix_stays_a_file(engine, invoice_pdf, tmp_path):
+    target = tmp_path / "result.txt"
+    assert main(["scan", str(invoice_pdf), "-o", str(target), "-q"]) == 0
+    assert target.is_file()
+
+
+def test_batch_output_rejects_a_file_path(capsys, invoice_pdf, tmp_path):
+    code = main(["scan", str(invoice_pdf), str(invoice_pdf), "-o", str(tmp_path / "x.txt")])
+    assert code == 2
+    assert "must be a directory" in capsys.readouterr().err

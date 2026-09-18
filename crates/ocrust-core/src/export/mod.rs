@@ -1,6 +1,9 @@
 //! Turning a [`Document`] into the formats downstream tools expect.
 
+#[cfg(feature = "pdf")]
+pub mod overlay;
 pub mod pdf;
+pub mod tiff;
 
 use std::fmt::Write as _;
 

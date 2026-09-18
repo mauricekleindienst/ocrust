@@ -6,8 +6,9 @@ compare and print without surprises.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Sequence
+from typing import Any
 
 __all__ = ["Box", "Word", "Line", "Block", "Page", "Document"]
 
@@ -33,7 +34,7 @@ class Box:
         return (self.x0, self.y0, self.x1, self.y1)
 
     @classmethod
-    def _from_json(cls, data: dict[str, Any]) -> "Box":
+    def _from_json(cls, data: dict[str, Any]) -> Box:
         return cls(data["x0"], data["y0"], data["x1"], data["y1"])
 
 
@@ -44,7 +45,7 @@ class Word:
     confidence: float
 
     @classmethod
-    def _from_json(cls, data: dict[str, Any]) -> "Word":
+    def _from_json(cls, data: dict[str, Any]) -> Word:
         return cls(data["text"], Box._from_json(data["bbox"]), data["confidence"])
 
 
@@ -59,7 +60,7 @@ class Line:
     polygon: Sequence[tuple[float, float]] = field(default_factory=tuple)
 
     @classmethod
-    def _from_json(cls, data: dict[str, Any]) -> "Line":
+    def _from_json(cls, data: dict[str, Any]) -> Line:
         return cls(
             text=data["text"],
             box=Box._from_json(data["bbox"]),
@@ -83,11 +84,11 @@ class Block:
         return "\n".join(line.text for line in self.lines)
 
     @classmethod
-    def _from_json(cls, data: dict[str, Any]) -> "Block":
+    def _from_json(cls, data: dict[str, Any]) -> Block:
         return cls(
             kind=data["kind"],
             box=Box._from_json(data["bbox"]),
-            lines=tuple(Line._from_json(l) for l in data["lines"]),
+            lines=tuple(Line._from_json(item) for item in data["lines"]),
         )
 
 
@@ -114,10 +115,10 @@ class Page:
         lines = self.lines
         if not lines:
             return None
-        return sum(l.confidence for l in lines) / len(lines)
+        return sum(line.confidence for line in lines) / len(lines)
 
     @classmethod
-    def _from_json(cls, data: dict[str, Any]) -> "Page":
+    def _from_json(cls, data: dict[str, Any]) -> Page:
         return cls(
             index=data["index"],
             width=data["width"],
@@ -164,14 +165,14 @@ class Document:
         lines = self.lines
         if not lines:
             return None
-        return sum(l.confidence for l in lines) / len(lines)
+        return sum(line.confidence for line in lines) / len(lines)
 
     def to_dict(self) -> dict[str, Any]:
         """The raw engine output, including every box and score."""
         return self._raw
 
     @classmethod
-    def _from_json(cls, data: dict[str, Any]) -> "Document":
+    def _from_json(cls, data: dict[str, Any]) -> Document:
         doc = cls(
             source=data.get("source", ""),
             pages=tuple(Page._from_json(p) for p in data["pages"]),
