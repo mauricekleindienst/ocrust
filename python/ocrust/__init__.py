@@ -1,0 +1,391 @@
+"""ocrust — fast document OCR for Python, with a Rust core.
+
+    >>> import ocrust
+    >>> ocrust.read("invoice.pdf")          # doctest: +SKIP
+    'INVOICE 2026-0042\\nTotal: 199.90 EUR'
+
+Reads images (PNG, JPEG, WebP, TIFF, BMP, GIF, …), multi-page TIFF and PDF.
+No Tesseract, no PaddlePaddle, no PyTorch: the engine is a self-contained Rust
+extension that runs PP-OCR models through ONNX Runtime.
+
+Structured results, when you need more than the text::
+
+    doc = ocrust.scan("scan.jpg")
+    doc.text                      # plain text, reading order applied
+    doc.markdown()                # headings, lists, paragraphs
+    doc.hocr()                    # hOCR for downstream tooling
+    for line in doc.lines:
+        print(line.text, line.confidence, line.box.as_tuple())
+
+Reuse an engine when scanning more than one file — it loads the models once::
+
+    ocr = ocrust.Ocr(device="auto", page_workers=8)
+    for doc in ocr.scan_many(["a.pdf", "b.png"]):
+        print(doc.text)
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+from pathlib import Path
+from typing import Any, Iterable, Iterator, Sequence
+
+from ._runtime import default_models_dir, ensure_runtime, runtime_report
+from ._types import Block, Box, Document, Line, Page, Word
+
+# The extension dlopens libonnxruntime on first use, so the path has to be in
+# the environment before it is imported.
+ensure_runtime()
+
+from . import _ocrust  # noqa: E402  (import must follow ensure_runtime)
+
+__all__ = [
+    "Ocr",
+    "Document",
+    "Page",
+    "Block",
+    "Line",
+    "Word",
+    "Box",
+    "read",
+    "scan",
+    "scan_many",
+    "searchable_pdf",
+    "models_cache_dir",
+    "runtime_info",
+    "OcrustError",
+    "__version__",
+]
+
+__version__ = _ocrust.__version__
+
+#: Formats accepted by :meth:`Document.render`.
+FORMATS = ("text", "markdown", "json", "hocr", "alto", "csv")
+
+
+class OcrustError(RuntimeError):
+    """Raised when the engine cannot be built or a document cannot be read."""
+
+
+def _attach_render_methods() -> None:
+    """Adds the export helpers to :class:`Document`.
+
+    Rendering happens in Rust against the document JSON, so the formats stay in
+    exactly one place.
+    """
+
+    def render(self: Document, format: str = "text") -> str:
+        """Renders the document as ``text``, ``markdown``, ``json``, ``hocr``,
+        ``alto`` or ``csv``."""
+        return _ocrust.render_document(json.dumps(self.to_dict()), format)
+
+    def markdown(self: Document) -> str:
+        """Markdown with headings, bullet lists and paragraphs."""
+        return render(self, "markdown")
+
+    def hocr(self: Document) -> str:
+        """hOCR (HTML) with line and word geometry."""
+        return render(self, "hocr")
+
+    def alto(self: Document) -> str:
+        """ALTO XML, as used by archives and digital libraries."""
+        return render(self, "alto")
+
+    def csv(self: Document) -> str:
+        """One CSV row per recognized line."""
+        return render(self, "csv")
+
+    def json_(self: Document, indent: int | None = 2) -> str:
+        """The full result as JSON, including every box and score."""
+        return json.dumps(self.to_dict(), indent=indent, ensure_ascii=False)
+
+    Document.render = render  # type: ignore[attr-defined]
+    Document.markdown = markdown  # type: ignore[attr-defined]
+    Document.hocr = hocr  # type: ignore[attr-defined]
+    Document.alto = alto  # type: ignore[attr-defined]
+    Document.csv = csv  # type: ignore[attr-defined]
+    Document.json = json_  # type: ignore[attr-defined]
+
+
+_attach_render_methods()
+
+
+def _coerce_image(obj: Any) -> tuple[bytes, int, int] | None:
+    """Converts a numpy array or PIL image into raw RGB bytes.
+
+    Returns ``None`` when `obj` is not an image-like object, so callers can fall
+    back to treating it as a path or encoded bytes. Neither numpy nor Pillow is
+    a dependency; both are used only if the caller already has them.
+    """
+    # PIL.Image
+    if hasattr(obj, "convert") and hasattr(obj, "size") and hasattr(obj, "tobytes"):
+        rgb = obj.convert("RGB")
+        width, height = rgb.size
+        return rgb.tobytes(), width, height
+
+    # numpy array (H, W, 3) / (H, W) / (H, W, 4)
+    shape = getattr(obj, "shape", None)
+    if shape is None or len(shape) not in (2, 3):
+        return None
+    try:
+        import numpy as np
+    except Exception:  # pragma: no cover - numpy present whenever arrays are
+        return None
+
+    array = np.asarray(obj)
+    if array.dtype != np.uint8:
+        array = np.clip(array, 0, 255).astype(np.uint8)
+    if array.ndim == 2:
+        array = np.repeat(array[:, :, None], 3, axis=2)
+    elif array.shape[2] == 4:
+        array = array[:, :, :3]
+    elif array.shape[2] != 3:
+        raise ValueError(f"expected 1, 3 or 4 channels, got {array.shape[2]}")
+    array = np.ascontiguousarray(array)
+    height, width = array.shape[:2]
+    return array.tobytes(), width, height
+
+
+class Ocr:
+    """A loaded OCR engine.
+
+    Building one loads the models and prepares the inference sessions, so keep
+    it around and call :meth:`scan` repeatedly. Instances are thread-safe and
+    release the GIL while scanning.
+
+    Args:
+        models_dir: Directory holding the ONNX models. Defaults to the models
+            shipped by ``ocrust-models``, ``OCRUST_MODELS_DIR``, then the
+            per-user cache.
+        device: ``"cpu"`` (default), ``"auto"``, ``"cuda"``, ``"cuda:1"``,
+            ``"coreml"`` or ``"directml"``. Accelerators need a matching build.
+        threads: Threads per inference operator. ``None`` lets the runtime decide.
+        page_workers: Pages scanned in parallel. ``None`` means one per core.
+        pdf_dpi: Rasterization resolution for PDF pages (default 200).
+        preprocess: Auto-invert, deskew and rescale pages before OCR.
+        word_boxes: Compute per-word boxes (needed for hOCR/ALTO word output).
+        drop_score: Minimum mean confidence for a line to be kept.
+    """
+
+    def __init__(
+        self,
+        models_dir: str | os.PathLike[str] | None = None,
+        *,
+        device: str | None = None,
+        threads: int | None = None,
+        page_workers: int | None = None,
+        pdf_dpi: float | None = None,
+        preprocess: bool = True,
+        deskew: bool | None = None,
+        word_boxes: bool = True,
+        drop_score: float | None = None,
+        detection_model: str | os.PathLike[str] | None = None,
+        recognition_model: str | os.PathLike[str] | None = None,
+        orientation_model: str | os.PathLike[str] | None = None,
+        dictionary: str | os.PathLike[str] | None = None,
+        fix_orientation: bool = True,
+        det_limit_side: int | None = None,
+        det_box_threshold: float | None = None,
+        det_unclip_ratio: float | None = None,
+        rec_batch_size: int | None = None,
+        rec_image_height: int | None = None,
+        keep_page_images: bool = False,
+    ) -> None:
+        resolved = Path(models_dir) if models_dir is not None else default_models_dir()
+        # Kept so a searchable-PDF engine can be built with the same settings.
+        self._kwargs: dict[str, Any] = {
+            "models_dir": str(resolved) if resolved else None,
+            "detection_model": str(detection_model) if detection_model else None,
+            "recognition_model": str(recognition_model) if recognition_model else None,
+            "orientation_model": str(orientation_model) if orientation_model else None,
+            "dictionary": str(dictionary) if dictionary else None,
+            "device": device,
+            "threads": threads,
+            "page_workers": page_workers,
+            "pdf_dpi": pdf_dpi,
+            "preprocess": preprocess,
+            "deskew": deskew,
+            "word_boxes": word_boxes,
+            "keep_page_images": keep_page_images,
+            "drop_score": drop_score,
+            "det_limit_side": det_limit_side,
+            "det_box_threshold": det_box_threshold,
+            "det_unclip_ratio": det_unclip_ratio,
+            "rec_batch_size": rec_batch_size,
+            "rec_image_height": rec_image_height,
+            "fix_orientation": fix_orientation,
+        }
+        self._keeps_images = keep_page_images
+        self._pdf_engine_cache: Any = None
+        try:
+            self._engine = _ocrust.Engine(**self._kwargs)
+        except Exception as exc:  # pragma: no cover - depends on the environment
+            raise OcrustError(str(exc)) from exc
+
+    @property
+    def models(self) -> dict[str, str | None]:
+        """The model files in use."""
+        detection, recognition, orientation, dictionary = self._engine.models()
+        return {
+            "detection": detection,
+            "recognition": recognition,
+            "orientation": orientation,
+            "dictionary": dictionary,
+        }
+
+    def scan(
+        self,
+        source: Any,
+        *,
+        pages: Sequence[int] | None = None,
+        name: str | None = None,
+    ) -> Document:
+        """Scans a path, bytes, numpy array or PIL image.
+
+        Args:
+            source: File path, encoded bytes, ``numpy`` array or PIL image.
+            pages: Zero-based page indices to read from a multi-page source.
+            name: Label used in the result when `source` is not a path.
+        """
+        page_list = list(pages) if pages is not None else None
+
+        image = _coerce_image(source)
+        if image is not None:
+            data, width, height = image
+            raw = self._engine.scan_rgb(data, width, height, name or "<image>")
+        elif isinstance(source, (bytes, bytearray, memoryview)):
+            raw = self._engine.scan_bytes(bytes(source), name or "<bytes>", page_list)
+        elif isinstance(source, (str, os.PathLike)):
+            raw = self._engine.scan_path(str(source), page_list)
+        else:
+            raise TypeError(
+                f"cannot scan {type(source).__name__}; pass a path, bytes, numpy array or PIL image"
+            )
+        return Document._from_json(json.loads(raw))
+
+    def read(self, source: Any, **kwargs: Any) -> str:
+        """Scans `source` and returns just the text."""
+        return self.scan(source, **kwargs).text
+
+    def scan_many(self, sources: Iterable[Any]) -> Iterator[Document]:
+        """Scans several inputs, using all page workers.
+
+        Paths are handed to the Rust side in one batch so documents are scanned
+        in parallel; other inputs fall back to one call each.
+        """
+        items = list(sources)
+        if items and all(isinstance(s, (str, os.PathLike)) for s in items):
+            for raw in self._engine.scan_many([str(s) for s in items]):
+                payload = json.loads(raw)
+                if "error" in payload and "pages" not in payload:
+                    raise OcrustError(payload["error"])
+                yield Document._from_json(payload)
+        else:
+            for item in items:
+                yield self.scan(item)
+
+    def searchable_pdf(
+        self,
+        source: str | os.PathLike[str],
+        *,
+        dpi: float | None = None,
+        jpeg_quality: int = 80,
+    ) -> bytes:
+        """Scans `source` and returns a PDF with an invisible text layer.
+
+        The result looks exactly like the input but is searchable and
+        selectable — the usual goal when archiving scans.
+        """
+        try:
+            return self._pdf_engine().searchable_pdf(str(source), dpi, jpeg_quality)
+        except OcrustError:
+            raise
+        except Exception as exc:
+            raise OcrustError(str(exc)) from exc
+
+    def _pdf_engine(self) -> Any:
+        """An engine that keeps page images, which a text layer needs.
+
+        Reuses this engine when it already keeps them, otherwise builds a
+        sibling once, with the very same settings.
+        """
+        if self._keeps_images:
+            return self._engine
+        if self._pdf_engine_cache is None:
+            kwargs = dict(self._kwargs, keep_page_images=True)
+            try:
+                self._pdf_engine_cache = _ocrust.Engine(**kwargs)
+            except Exception as exc:  # pragma: no cover - environment dependent
+                raise OcrustError(str(exc)) from exc
+        return self._pdf_engine_cache
+
+    def __repr__(self) -> str:
+        return repr(self._engine)
+
+
+_default_lock = threading.Lock()
+_default_engine: Ocr | None = None
+
+
+def _default() -> Ocr:
+    """The lazily created engine behind the module-level helpers."""
+    global _default_engine
+    with _default_lock:
+        if _default_engine is None:
+            _default_engine = Ocr()
+        return _default_engine
+
+
+def read(source: Any, **kwargs: Any) -> str:
+    """Reads the text of a document with the default engine.
+
+    >>> ocrust.read("receipt.jpg")  # doctest: +SKIP
+    'REWE Markt GmbH\\nSumme 12,90'
+    """
+    return _default().read(source, **kwargs)
+
+
+def scan(source: Any, **kwargs: Any) -> Document:
+    """Scans a document with the default engine and returns the full result."""
+    return _default().scan(source, **kwargs)
+
+
+def scan_many(sources: Iterable[Any]) -> Iterator[Document]:
+    """Scans several documents with the default engine."""
+    return _default().scan_many(sources)
+
+
+def searchable_pdf(source: str | os.PathLike[str], **kwargs: Any) -> bytes:
+    """Produces a searchable PDF for `source` with the default engine."""
+    return _default().searchable_pdf(source, **kwargs)
+
+
+def models_cache_dir() -> str:
+    """Directory model bundles are cached in."""
+    return _ocrust.models_cache_dir()
+
+
+def runtime_info() -> dict[str, object]:
+    """Environment diagnostics: runtime, models and versions."""
+    report = dict(runtime_report())
+    report["ocrust"] = __version__
+    try:
+        report["onnxruntime_loaded"] = _ocrust.runtime_version()
+    except Exception as exc:
+        report["onnxruntime_loaded"] = f"unavailable: {exc}"
+    try:
+        detection, recognition, orientation, dictionary = _ocrust.resolve_models(
+            str(default_models_dir()) if default_models_dir() else None
+        )
+        report["models"] = {
+            "detection": detection,
+            "recognition": recognition,
+            "orientation": orientation,
+            "dictionary": dictionary,
+        }
+    except Exception as exc:
+        report["models"] = f"unavailable: {exc}"
+    report["models_cache_dir"] = models_cache_dir()
+    return report
