@@ -155,11 +155,17 @@ once — add it in Rust and nowhere else.
 
 1. Update `CHANGELOG.md` with the measured numbers.
 2. Bump the version in `Cargo.toml`, `crates/*/Cargo.toml` and `pyproject.toml`.
-3. Tag `vX.Y.Z` and push — or create the release from GitHub's UI, which is the
-   same thing. The workflow runs on `v*` tags as well as on `main`, builds all
-   five wheels plus the model wheel, and publishes **two** projects: `ocrust`
-   and `ocrust-models`, in separate steps, because trusted publishing mints a
-   token for one project at a time.
+3. Release it, either way round:
+   - **Tag it.** `git tag -a vX.Y.Z -m "…" && git push origin vX.Y.Z`, or create
+     the release in GitHub's UI. The workflow runs on `v*` tags as well as on
+     `main`.
+   - **Or run the workflow.** Actions → ci → *Run workflow*, with `tag` set to
+     `vX.Y.Z`: the release job creates that tag on the commit it built and then
+     publishes. Useful where creating a tag is the awkward part — a phone, say.
+
+   Either path builds all five wheels plus the model wheel and publishes **two**
+   projects, `ocrust` and `ocrust-models`, in separate steps, because trusted
+   publishing mints a token for one project at a time.
 4. Model bundles are pinned by `OCRUST_MODEL_REF`; if the bundle changed, tag it
    too, so an old release keeps downloading the models it was tested with.
 
