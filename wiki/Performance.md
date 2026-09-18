@@ -2,7 +2,7 @@
 
 All numbers below were measured on the generated corpus — 106 files, 191 pages,
 416 MB — on **four CPU cores**, with the shipped defaults. Reproduce them with
-`scripts/evaluate_corpus.py` ([[Evaluation]]).
+`scripts/evaluate_corpus.py` ([Evaluation](Evaluation.md)).
 
 ## The headline
 

@@ -1,0 +1,27 @@
+ocrust
+Copyright 2026 the ocrust contributors
+
+This product includes software developed by the ocrust contributors, licensed
+under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------------
+Bundled OCR models
+
+The files under models/ppocrv6/ are PP-OCR model releases of the PaddleOCR
+project, redistributed unmodified under the Apache License, Version 2.0:
+
+  ppocrv6_det.onnx   PP-OCRv6_det_small.onnx
+  ppocrv6_rec.onnx   PP-OCRv6_rec_small.onnx
+  ppocr_cls.onnx     ch_ppocr_mobile_v2.0_cls_mobile.onnx
+
+  Copyright PaddlePaddle Authors
+  https://github.com/PaddlePaddle/PaddleOCR
+
+They were obtained from the PyPI distribution `rapidocr` 3.9.2, which
+redistributes the PaddleOCR ONNX exports:
+
+  https://github.com/RapidAI/RapidOCR
+
+Every file's SHA-256 is recorded in models/ppocrv6.json, so the copies here can
+be verified against those distributions. No PaddleOCR source code is used or
+included; the engine in this repository is an independent implementation.

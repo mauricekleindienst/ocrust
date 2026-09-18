@@ -96,6 +96,21 @@ jobs:
           pattern: wheel-*
           merge-multiple: true
           path: dist
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      # Two distributions come out of the matrix, and trusted publishing mints a
+      # token for one project at a time — uploading them together would be
+      # rejected. The model wheel is identical on every runner, so the merge
+      # leaves exactly one copy.
+      - name: Separate the two distributions
+        run: |
+          mkdir -p upload/engine upload/models
+          mv dist/ocrust_models-*.whl upload/models/
+          mv dist/ocrust-*.whl upload/engine/
+          ls -l upload/engine upload/models
+      - name: Publish ocrust
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: dist
+          packages-dir: upload/engine
+      - name: Publish ocrust-models
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: upload/models

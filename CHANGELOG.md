@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.0
 
 First release.
 
@@ -132,6 +132,20 @@ First release.
   one is set, which is what a private repository or a GitHub Enterprise mirror
   needs. The token is sent only to GitHub hosts — never to a mirror URL out of a
   manifest — and that is unit-tested.
+
+### Packaging and licensing
+
+- **Apache-2.0 in the box.** The repository ships the license text and a NOTICE
+  naming the bundled PP-OCR models, their upstream and their checksums, and both
+  travel inside both wheels — a redistribution of someone else's Apache-2.0 work
+  should say so where it lands, not only in a README.
+- Project metadata points at this repository: homepage, source, documentation,
+  changelog and issues, in `pyproject.toml` and in the crates.
+- README images use absolute URLs, so the page renders on PyPI as well as on
+  GitHub. `twine check` passes for both distributions.
+- The release job publishes **two** projects, `ocrust` and `ocrust-models`, in
+  separate steps: trusted publishing mints a token for one project at a time, so
+  uploading them together would have been rejected on the first tag.
 
 ### Network shares
 

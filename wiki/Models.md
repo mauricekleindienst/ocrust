@@ -29,7 +29,7 @@ The files are byte-identical to that distribution; every SHA-256 is recorded in
 
 Why v6 and not v5: the v5 charset (18 383 classes) is missing characters several
 European languages need, so v5 cannot spell them. v6 (18 708) covers 27
-languages completely. See [[Languages]].
+languages completely. See [Languages](Languages.md).
 
 ## One source for everything
 
@@ -152,7 +152,7 @@ installs offline.
 
 ## What is not included
 
-- Cyrillic, Korean, Arabic and Devanagari recognizers (see [[Roadmap]])
+- Cyrillic, Korean, Arabic and Devanagari recognizers (see [Roadmap](Roadmap.md))
 - a layout/table-structure model — reading order is geometric, not learned
 - a document-orientation model beyond the 180° line classifier; page rotation is
   decided from box geometry

@@ -101,11 +101,11 @@ Results, before → after: A0 0.96 → 0.042, rotated PDFs 0.79 → 0.054, drawi
 
 Two later passes came out of the same corpus. Assembling lines from boxes took
 receipts 0.332 → 0.183 and forms 0.156 → 0.063, and cost the A0 sheet
-0.042 → 0.147 — the trade-off is spelled out on [[Accuracy]]. Restoring swallowed
+0.042 → 0.147 — the trade-off is spelled out on [Accuracy](Accuracy.md). Restoring swallowed
 word spaces took the corpus median from 0.013 to 0.006 and word recall from 0.836
 to 0.892, with image-only PDFs going 0.014 → 0.004.
 
-The current numbers are on [[Accuracy]] and [[Performance]].
+The current numbers are on [Accuracy](Accuracy.md) and [Performance](Performance.md).
 
 ## Evaluating your own documents
 

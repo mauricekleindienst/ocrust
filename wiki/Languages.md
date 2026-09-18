@@ -85,7 +85,7 @@ want the partial result anyway.
 
 These are known, named and checked — `ocrust.Ocr(lang="ru")` fails immediately
 rather than returning nonsense. Adding a Cyrillic/Arabic/Devanagari bundle is a
-matter of shipping a second recognizer, which is on the [[Roadmap]].
+matter of shipping a second recognizer, which is on the [Roadmap](Roadmap.md).
 
 ```python
 ocrust.Ocr().partial_languages(min_ratio=0.5)
@@ -110,7 +110,7 @@ model can spell all three, which is what you want in CI.
 
 ## Accuracy per language
 
-Measured on the generated corpus ([[Evaluation]]), clean renders at 200 dpi:
+Measured on the generated corpus ([Evaluation](Evaluation.md)), clean renders at 200 dpi:
 
 | language | mean CER on clean renders |
 |---|---:|
@@ -141,4 +141,4 @@ ocr = ocrust.Ocr(
 ```
 
 If the dictionary is embedded in the ONNX metadata, `dictionary` can be omitted.
-See [[Models]].
+See [Models](Models.md).

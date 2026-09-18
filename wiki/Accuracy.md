@@ -2,7 +2,7 @@
 
 Every number here comes from the generated corpus — 106 files, 191 pages, all
 with exact ground truth — and can be reproduced in about three minutes
-([[Evaluation]]). Nothing is cherry-picked, including the bad rows.
+([Evaluation](Evaluation.md)). Nothing is cherry-picked, including the bad rows.
 
 ## Overall
 
@@ -176,4 +176,4 @@ works on any folder that carries ground-truth text files:
 python scripts/evaluate_corpus.py /path/to/your/corpus -o report
 ```
 
-See [[Evaluation]] for the layout it expects and the metrics it reports.
+See [Evaluation](Evaluation.md) for the layout it expects and the metrics it reports.

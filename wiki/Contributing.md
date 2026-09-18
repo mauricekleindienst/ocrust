@@ -140,7 +140,7 @@ the corpus has 24 categories, and a real fix usually moves several.
    script). Cross-check against a real dictionary, not memory.
 2. `cargo test -p ocrust-core --lib lang` — coverage against the shipped charset
    is computed, not asserted by hand.
-3. If the shipped model cannot spell it, say so in [[Languages]] rather than
+3. If the shipped model cannot spell it, say so in [Languages](Languages.md) rather than
    pretending: a language that is listed but unreadable is worse than one that is
    absent.
 

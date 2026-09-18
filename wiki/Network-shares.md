@@ -77,7 +77,7 @@ workers more than they do locally:
 ocrust scan '\fileserver\scans6' --workers 4     # the default for a batch
 ```
 
-The numbers on [[Performance]] were measured on local disk; treat them as the
+The numbers on [Performance](Performance.md) were measured on local disk; treat them as the
 floor for network work, and measure your own share before tuning. If a batch is
 large and the share is slow, copying it locally first is not cheating — it is
 usually faster than doing it twice.
