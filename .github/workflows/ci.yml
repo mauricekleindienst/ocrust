@@ -3,6 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+    # The publish job below is gated on a release tag, so the workflow has to
+    # run for one: a tag push matches no branch filter.
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
