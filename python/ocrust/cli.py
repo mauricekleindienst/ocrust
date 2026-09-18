@@ -55,7 +55,11 @@ def _build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--pages", help="page selection for multi-page inputs, e.g. 1,3-5")
     scan.add_argument("--device", help="cpu (default), auto, cuda[:n], coreml, directml")
     scan.add_argument("--threads", type=int, help="threads per inference operator")
-    scan.add_argument("--workers", type=int, help="pages scanned in parallel")
+    scan.add_argument(
+        "--workers",
+        type=int,
+        help="pages scanned in parallel (default: 4 for several inputs, 1 otherwise)",
+    )
     scan.add_argument("--dpi", type=float, help="PDF rasterization DPI (default 200)")
     scan.add_argument("--models", type=Path, help="directory holding the ONNX models")
     scan.add_argument("--no-preprocess", action="store_true", help="skip deskew/invert/rescale")
@@ -152,12 +156,24 @@ def _parse_pages(spec: str | None) -> list[int] | None:
     return sorted(set(pages))
 
 
+def _workers_for(args: argparse.Namespace, inputs: int) -> int | None:
+    """Picks a sensible worker count when the user did not.
+
+    Workers share the cores rather than adding any, so more of them pay off only
+    when there is more than one page in flight. A batch qualifies; a single file
+    is left to run with all cores on one page.
+    """
+    if getattr(args, "workers", None):
+        return args.workers
+    return 4 if inputs > 1 else None
+
+
 def _engine_from_args(args: argparse.Namespace) -> Ocr:
     return Ocr(
         models_dir=getattr(args, "models", None),
         device=getattr(args, "device", None),
         threads=getattr(args, "threads", None),
-        page_workers=getattr(args, "workers", None),
+        page_workers=getattr(args, "_resolved_workers", None) or getattr(args, "workers", None),
         pdf_dpi=getattr(args, "dpi", None),
         preprocess=not getattr(args, "no_preprocess", False),
         word_boxes=not getattr(args, "no_word_boxes", False),
@@ -168,6 +184,7 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
 
 def _cmd_scan(args: argparse.Namespace) -> int:
     pages = _parse_pages(args.pages)
+    args._resolved_workers = _workers_for(args, len(args.inputs))
     engine = _engine_from_args(args)
 
     missing = [p for p in args.inputs if not p.exists()]

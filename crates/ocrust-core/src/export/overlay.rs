@@ -265,20 +265,45 @@ fn text_layer_stream(
         let (literal, replaced) = winansi_literal(text);
         unmappable += replaced;
 
-        let size = (line.bbox.height() * sy).max(1.0);
-        let x = line.bbox.x0 * sx;
+        // Rotated and skewed lines get a rotated baseline, so selecting the text
+        // follows the ink instead of cutting across it.
+        let angle = baseline_angle(line.angle);
+        let radians = -angle.to_radians(); // image y grows downwards, PDF y upwards
+        let (cos, sin) = (radians.cos(), radians.sin());
+
+        let quad = line.quad.ordered();
+        let baseline = quad.points[3]; // bottom-left corner of the line
+        let size = (line.quad.edge_height() * sy).max(1.0);
+        let x = baseline.x * sx;
         // Image space counts down from the top; PDF counts up from the bottom.
-        let y = display_h - line.bbox.y1 * sy + size * 0.18;
-        let target_w = line.bbox.width() * sx;
+        let y = display_h - baseline.y * sy + size * 0.18;
+        let target_w = line.quad.edge_width() * sx;
         let scale = super::pdf::horizontal_scale_for(text, size, target_w);
 
         out.push_str(&format!(
-            "/{FONT_NAME} {size:.2} Tf\n{scale:.1} Tz\n1 0 0 1 {x:.2} {y:.2} Tm\n({literal}) Tj\n"
+            "/{FONT_NAME} {size:.2} Tf\n{scale:.1} Tz\n\
+             {cos:.5} {sin:.5} {:.5} {cos:.5} {x:.2} {y:.2} Tm\n({literal}) Tj\n",
+            -sin
         ));
         lines += 1;
     }
     out.push_str("ET\nQ\n");
     (out, lines, unmappable)
+}
+
+/// Folds a line angle into the half turn a baseline can express.
+///
+/// `Line::angle` carries the 180-degree flip the line classifier applied, and a
+/// flipped line sits on the same baseline as an unflipped one — so 180 means
+/// zero here. Clamping instead would tip such a line onto its side.
+fn baseline_angle(angle: f32) -> f32 {
+    let mut folded = angle % 180.0;
+    if folded > 90.0 {
+        folded -= 180.0;
+    } else if folded < -90.0 {
+        folded += 180.0;
+    }
+    folded
 }
 
 /// Reads a page's media box and rotation, following `/Parent` for inherited
@@ -566,6 +591,33 @@ mod tests {
             .expect("text matrix");
         // x = 600 * 612/1200 = 306
         assert!(tm.contains("306.00"), "{tm}");
+    }
+
+    #[test]
+    fn baseline_angles_fold_into_a_half_turn() {
+        assert_eq!(baseline_angle(0.0), 0.0);
+        assert_eq!(baseline_angle(180.0), 0.0);
+        assert_eq!(baseline_angle(-180.0), 0.0);
+        assert!((baseline_angle(185.0) - 5.0).abs() < 1e-4);
+        assert!((baseline_angle(-4.0) + 4.0).abs() < 1e-4);
+        // A genuinely sideways line keeps its quarter turn. 90 and -90 describe
+        // the same baseline, so the fold settles on 90.
+        assert!((baseline_angle(90.0) - 90.0).abs() < 1e-4);
+        assert!((baseline_angle(270.0) - 90.0).abs() < 1e-4);
+        assert!((baseline_angle(-90.0) + 90.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn skewed_lines_get_a_rotated_text_matrix() {
+        let mut page = page_with_line("schief", Rect::new(50.0, 50.0, 350.0, 90.0), 1200, 1600);
+        page.blocks[0].lines[0].angle = 30.0;
+        let (stream, _, _) = text_layer_stream(&page, letter(0), 1200, 1600);
+        let tm = stream
+            .lines()
+            .find(|l| l.contains(" Tm"))
+            .expect("text matrix");
+        // cos(30 deg) = 0.866, and the sign convention flips with PDF's y axis.
+        assert!(tm.starts_with("0.86603 -0.50000 0.50000 0.86603"), "{tm}");
     }
 
     #[test]

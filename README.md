@@ -251,7 +251,22 @@ falls back to the CPU whenever a provider is unavailable, so code stays portable
 | `drop_score` | 0.5 | Minimum mean confidence for a line to be kept |
 | `preprocess` | `True` | Auto-invert, deskew, rescale |
 | `word_boxes` | `True` | Per-word geometry for hOCR/ALTO |
-| `page_workers` | one per core | Pages scanned in parallel |
+| `page_workers` | 1 | Pages scanned in parallel; see below |
+
+### Throughput versus latency
+
+ONNX Runtime already spreads one inference across every core, so page workers
+divide the cores rather than adding any. Measured on four cores with a 12-page
+scan:
+
+| `page_workers` | 12-page document | single page |
+|---:|---:|---:|
+| 1 (default) | 7.8 s | fastest |
+| 4 | **5.8 s** | ~2x slower |
+
+So: leave it at 1 for page-at-a-time work, and raise it for batches and long
+PDFs (`ocrust scan --workers 4`). Getting this wrong is easy — before the cores
+were shared, eight workers were 20% *slower* than one.
 
 ## Rust crate
 
@@ -296,6 +311,17 @@ ruff check python tests scripts
 Test fixtures are generated, not committed: a PDF with known text is written,
 rendered and recognized, so the suite has no binary inputs and the PDF path is
 covered on every run.
+
+For accuracy work there is a generated corpus with ground truth — aged scans,
+faxes, technical drawings, rotated pages, broken files — and an evaluation that
+reports character error rates, word recall and throughput per category:
+
+```bash
+python scripts/make_corpus.py --out /tmp/corpus
+python scripts/evaluate_corpus.py /tmp/corpus -o report
+```
+
+See [`docs/evaluation.md`](docs/evaluation.md).
 
 ## License
 

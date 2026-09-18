@@ -11,7 +11,7 @@ use imageproc::contours::{find_contours_with_threshold, BorderType};
 use ndarray::ArrayD;
 
 use crate::error::{Error, Result};
-use crate::geom::{min_area_rect, Point, Quad};
+use crate::geom::{min_area_rect, Point, Quad, Rect};
 use crate::runtime::{nchw, OnnxModel, SessionOptions};
 
 /// How `limit_side_len` is applied when resizing the input.
@@ -39,6 +39,17 @@ pub struct DetectorConfig {
     pub max_candidates: usize,
     /// Boxes thinner than this (in pixels, on the resized image) are dropped.
     pub min_box_size: f32,
+    /// Pages whose longest side exceeds this are detected in tiles rather than
+    /// scaled down. `None` disables tiling.
+    ///
+    /// The default is four times `limit_side_len`: below that, downscaling keeps
+    /// body text above roughly ten pixels and one pass is both faster and
+    /// sufficient. Above it — A0 and A3 sheets, 600 dpi scans — a whole-page
+    /// pass would shrink an 8 pt label to a few pixels, so tiles win.
+    pub tile_above_side_len: Option<u32>,
+    /// Fraction of a tile that overlaps its neighbour, so text on a seam is not
+    /// cut in half.
+    pub tile_overlap: f32,
 }
 
 impl Default for DetectorConfig {
@@ -51,6 +62,8 @@ impl Default for DetectorConfig {
             unclip_ratio: 1.5,
             max_candidates: 1000,
             min_box_size: 3.0,
+            tile_above_side_len: Some(3840),
+            tile_overlap: 0.15,
         }
     }
 }
@@ -88,11 +101,25 @@ impl TextDetector {
     }
 
     /// Detects text lines, ordered top-to-bottom / left-to-right.
+    ///
+    /// Large-format pages — A0 drawings, plan sheets, oversized scans — are
+    /// detected in overlapping tiles instead of being squeezed into
+    /// `limit_side_len`, because an 8 pt label on an A0 sheet is only a few
+    /// pixels tall once the whole sheet is scaled to 960 px.
     pub fn detect(&self, image: &RgbImage) -> Result<Vec<DetectedBox>> {
         let (orig_w, orig_h) = image.dimensions();
         if orig_w == 0 || orig_h == 0 {
             return Ok(Vec::new());
         }
+        if let Some(tiles) = plan_tiles(orig_w, orig_h, &self.config) {
+            return self.detect_tiled(image, &tiles);
+        }
+        self.detect_whole(image)
+    }
+
+    /// Detection on the whole image, scaled to `limit_side_len`.
+    fn detect_whole(&self, image: &RgbImage) -> Result<Vec<DetectedBox>> {
+        let (orig_w, orig_h) = image.dimensions();
         let (rw, rh) = self.target_size(orig_w, orig_h);
         let resized = image::imageops::resize(image, rw, rh, image::imageops::FilterType::Triangle);
 
@@ -110,18 +137,45 @@ impl TextDetector {
                 .ordered();
         }
         boxes.retain(|b| b.quad.edge_width() >= 2.0 && b.quad.edge_height() >= 2.0);
-        boxes.sort_by(|a, b| {
-            let (ba, bb) = (a.quad.bounds(), b.quad.bounds());
-            ba.y0
-                .partial_cmp(&bb.y0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(
-                    ba.x0
-                        .partial_cmp(&bb.x0)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                )
-        });
+        sort_reading_ish(&mut boxes);
         Ok(boxes)
+    }
+
+    /// Detects in overlapping tiles and merges the results.
+    fn detect_tiled(&self, image: &RgbImage, tiles: &[Tile]) -> Result<Vec<DetectedBox>> {
+        let (full_w, full_h) = image.dimensions();
+        log::debug!(
+            "tiled detection: {}x{} in {} tiles of {}",
+            full_w,
+            full_h,
+            tiles.len(),
+            self.config.limit_side_len
+        );
+
+        let mut merged: Vec<DetectedBox> = Vec::new();
+        for tile in tiles {
+            let view = image::imageops::crop_imm(image, tile.x, tile.y, tile.width, tile.height)
+                .to_image();
+            for mut b in self.detect_whole(&view)? {
+                b.quad = translate(&b.quad, tile.x as f32, tile.y as f32);
+                // Ownership is decided in page coordinates, so a line on a seam
+                // is kept by exactly one tile.
+                if tile.owns(&b.quad.bounds()) {
+                    merged.push(b);
+                }
+            }
+        }
+
+        // Boxes on a seam can still be found twice; keep the better one.
+        deduplicate(&mut merged, 0.3);
+        for b in merged.iter_mut() {
+            b.quad = b
+                .quad
+                .scaled_clamped(1.0, 1.0, full_w as f32, full_h as f32)
+                .ordered();
+        }
+        sort_reading_ish(&mut merged);
+        Ok(merged)
     }
 
     /// Resized dimensions: scaled by the side-length limit, rounded to /32.
@@ -215,6 +269,133 @@ fn normalize_det(img: &RgbImage) -> ArrayD<f32> {
         }
     }
     nchw(1, 3, h, w, data)
+}
+
+/// Tile grid for an oversized page, or `None` when a single pass is enough.
+///
+/// Tiles are the size the detector runs at, so the page is never downscaled and
+/// small labels keep their pixels.
+fn plan_tiles(width: u32, height: u32, config: &DetectorConfig) -> Option<Vec<Tile>> {
+    let limit = config.limit_side_len.max(64);
+    let trigger = config.tile_above_side_len?;
+    if width.max(height) <= trigger.max(limit) {
+        return None;
+    }
+    let overlap = config.tile_overlap.clamp(0.0, 0.4);
+    let step = ((limit as f32) * (1.0 - overlap)).max(64.0) as u32;
+
+    // Half the overlap: the distance from a tile edge to the middle of the
+    // strip it shares with its neighbour.
+    let half = (limit.saturating_sub(step)) as f32 * 0.5;
+
+    let mut tiles = Vec::new();
+    let mut y = 0u32;
+    loop {
+        let tile_h = limit.min(height - y);
+        let last_row = y + tile_h >= height;
+        let mut x = 0u32;
+        loop {
+            let tile_w = limit.min(width - x);
+            let last_column = x + tile_w >= width;
+            tiles.push(Tile {
+                x,
+                y,
+                width: tile_w,
+                height: tile_h,
+                own_x0: if x == 0 { 0.0 } else { x as f32 + half },
+                own_y0: if y == 0 { 0.0 } else { y as f32 + half },
+                own_x1: if last_column {
+                    width as f32 + 1.0
+                } else {
+                    (x + tile_w) as f32 - half
+                },
+                own_y1: if last_row {
+                    height as f32 + 1.0
+                } else {
+                    (y + tile_h) as f32 - half
+                },
+            });
+            if last_column {
+                break;
+            }
+            x += step;
+        }
+        if last_row {
+            break;
+        }
+        y += step;
+    }
+    (tiles.len() > 1).then_some(tiles)
+}
+
+/// One tile of an oversized page, with the region it is responsible for.
+///
+/// `own_*` is in page coordinates and splits every overlap down the middle, so
+/// each point of the page belongs to exactly one tile and merged results cannot
+/// contain the same line twice.
+#[derive(Debug, Clone, Copy)]
+struct Tile {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    own_x0: f32,
+    own_y0: f32,
+    own_x1: f32,
+    own_y1: f32,
+}
+
+impl Tile {
+    /// True when this tile owns `bounds` (given in page coordinates).
+    fn owns(&self, bounds: &Rect) -> bool {
+        let cx = bounds.center_x();
+        let cy = bounds.center_y();
+        cx >= self.own_x0 && cx < self.own_x1 && cy >= self.own_y0 && cy < self.own_y1
+    }
+}
+
+/// Moves a quad into page coordinates.
+fn translate(quad: &Quad, dx: f32, dy: f32) -> Quad {
+    let mut points = quad.points;
+    for p in points.iter_mut() {
+        p.x += dx;
+        p.y += dy;
+    }
+    Quad::new(points)
+}
+
+/// Drops boxes that overlap a better-scoring one by more than `max_iou`.
+fn deduplicate(boxes: &mut Vec<DetectedBox>, max_iou: f32) {
+    boxes.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut kept: Vec<DetectedBox> = Vec::with_capacity(boxes.len());
+    for candidate in boxes.drain(..) {
+        let bounds = candidate.quad.bounds();
+        if kept.iter().any(|k| k.quad.bounds().iou(&bounds) > max_iou) {
+            continue;
+        }
+        kept.push(candidate);
+    }
+    *boxes = kept;
+}
+
+/// Sorts boxes top-to-bottom, then left-to-right. Full reading order is decided
+/// later, in `layout`.
+fn sort_reading_ish(boxes: &mut [DetectedBox]) {
+    boxes.sort_by(|a, b| {
+        let (ba, bb) = (a.quad.bounds(), b.quad.bounds());
+        ba.y0
+            .partial_cmp(&bb.y0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                ba.x0
+                    .partial_cmp(&bb.x0)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
 }
 
 /// The detector's probability map, flattened.
@@ -342,6 +523,119 @@ mod tests {
         assert_eq!(ProbMap::from_output(&b).unwrap().height, 2);
         let bad = ArrayD::from_shape_vec(IxDyn(&[6]), vec![0.5; 6]).unwrap();
         assert!(ProbMap::from_output(&bad).is_err());
+    }
+
+    #[test]
+    fn small_pages_are_not_tiled() {
+        let cfg = DetectorConfig::default();
+        assert!(plan_tiles(1654, 2339, &cfg).is_none(), "A4 at 200 dpi");
+        assert!(plan_tiles(2480, 3508, &cfg).is_none(), "A4 at 300 dpi");
+        assert!(plan_tiles(960, 960, &cfg).is_none());
+        assert!(
+            plan_tiles(
+                9000,
+                7000,
+                &DetectorConfig {
+                    tile_above_side_len: None,
+                    ..DetectorConfig::default()
+                }
+            )
+            .is_none(),
+            "tiling can be switched off"
+        );
+    }
+
+    #[test]
+    fn large_format_sheets_are_tiled() {
+        let cfg = DetectorConfig::default();
+        // A0 at 300 dpi and A3 at 600 dpi both need tiles.
+        assert!(plan_tiles(9933, 7016, &cfg).is_some(), "A0 at 300 dpi");
+        assert!(plan_tiles(7016, 4960, &cfg).is_some(), "A3 at 600 dpi");
+    }
+
+    #[test]
+    fn large_pages_are_covered_by_overlapping_tiles() {
+        let cfg = DetectorConfig::default();
+        let tiles = plan_tiles(4000, 3000, &cfg).expect("tiled");
+        assert!(tiles.len() >= 20, "{} tiles", tiles.len());
+        // Every pixel must belong to at least one tile.
+        for (x, y) in [(0, 0), (3999, 2999), (2000, 1500), (3999, 0), (0, 2999)] {
+            assert!(
+                tiles
+                    .iter()
+                    .any(|t| x >= t.x && y >= t.y && x < t.x + t.width && y < t.y + t.height),
+                "({x},{y}) is not covered"
+            );
+        }
+        // Tiles never exceed the detector's working size.
+        for tile in &tiles {
+            assert!(tile.width <= cfg.limit_side_len);
+            assert!(tile.height <= cfg.limit_side_len);
+        }
+        // Neighbours overlap, so text on a seam is seen whole at least once.
+        let first_row: Vec<&Tile> = tiles.iter().filter(|t| t.y == 0).collect();
+        assert!(first_row.len() >= 2);
+        assert!(
+            first_row[1].x < first_row[0].x + first_row[0].width,
+            "tiles do not overlap"
+        );
+    }
+
+    #[test]
+    fn every_point_of_the_page_is_owned_exactly_once() {
+        let cfg = DetectorConfig::default();
+        let tiles = plan_tiles(5000, 4200, &cfg).expect("tiled");
+        for gx in (0..5000).step_by(97) {
+            for gy in (0..4200).step_by(101) {
+                let spot = Rect::new(gx as f32, gy as f32, gx as f32 + 1.0, gy as f32 + 1.0);
+                let owners = tiles.iter().filter(|t| t.owns(&spot)).count();
+                assert_eq!(owners, 1, "({gx},{gy}) owned by {owners} tiles");
+            }
+        }
+    }
+
+    #[test]
+    fn owned_regions_stay_inside_their_tile() {
+        let cfg = DetectorConfig::default();
+        for tile in plan_tiles(5000, 4200, &cfg).expect("tiled") {
+            // Whatever a tile owns, it must actually have seen.
+            assert!(tile.own_x0 >= tile.x as f32);
+            assert!(tile.own_y0 >= tile.y as f32);
+            assert!(tile.own_x1 <= (tile.x + tile.width) as f32 + 1.0);
+            assert!(tile.own_y1 <= (tile.y + tile.height) as f32 + 1.0);
+        }
+    }
+
+    #[test]
+    fn duplicates_on_a_seam_are_dropped_keeping_the_better_score() {
+        let mut boxes = vec![
+            DetectedBox {
+                quad: Quad::from_rect(Rect::new(10.0, 10.0, 110.0, 40.0)),
+                score: 0.7,
+            },
+            DetectedBox {
+                quad: Quad::from_rect(Rect::new(12.0, 11.0, 112.0, 41.0)),
+                score: 0.9,
+            },
+            DetectedBox {
+                quad: Quad::from_rect(Rect::new(400.0, 10.0, 500.0, 40.0)),
+                score: 0.8,
+            },
+        ];
+        deduplicate(&mut boxes, 0.3);
+        assert_eq!(boxes.len(), 2);
+        assert!((boxes[0].score - 0.9).abs() < 1e-6, "best score survives");
+    }
+
+    #[test]
+    fn translate_moves_a_quad_into_page_space() {
+        let q = translate(
+            &Quad::from_rect(Rect::new(0.0, 0.0, 10.0, 10.0)),
+            100.0,
+            50.0,
+        );
+        let b = q.bounds();
+        assert_eq!((b.x0, b.y0, b.x1, b.y1), (100.0, 50.0, 110.0, 60.0));
     }
 
     #[test]
