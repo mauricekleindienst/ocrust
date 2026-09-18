@@ -5,7 +5,7 @@
     {
       "name": "ppocrv6_det.onnx",
       "urls": [
-        "https://raw.githubusercontent.com/mauricekleindienst/pake/{ref}/ocrust/models/ppocrv6/ppocrv6_det.onnx"
+        "https://raw.githubusercontent.com/mauricekleindienst/ocrust/{ref}/models/ppocrv6/ppocrv6_det.onnx"
       ],
       "sha256": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
       "size": 9929594
@@ -13,7 +13,7 @@
     {
       "name": "ppocrv6_rec.onnx",
       "urls": [
-        "https://raw.githubusercontent.com/mauricekleindienst/pake/{ref}/ocrust/models/ppocrv6/ppocrv6_rec.onnx"
+        "https://raw.githubusercontent.com/mauricekleindienst/ocrust/{ref}/models/ppocrv6/ppocrv6_rec.onnx"
       ],
       "sha256": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
       "size": 21234383
@@ -21,7 +21,7 @@
     {
       "name": "ppocr_cls.onnx",
       "urls": [
-        "https://raw.githubusercontent.com/mauricekleindienst/pake/{ref}/ocrust/models/ppocrv6/ppocr_cls.onnx"
+        "https://raw.githubusercontent.com/mauricekleindienst/ocrust/{ref}/models/ppocrv6/ppocr_cls.onnx"
       ],
       "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
       "size": 585532

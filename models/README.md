@@ -18,12 +18,14 @@ SHA-256 for every file and a `raw.githubusercontent.com` URL pointing back here.
 
 The recognizer's character set is embedded in the ONNX file, so no dictionary
 file is needed. `ocrust languages` prints what it covers; at the time of writing
-that is complete coverage for English, German, French, Spanish, Italian,
-Portuguese, Dutch, Swedish, Danish, Norwegian, Finnish, Polish, Czech, Slovak,
-Hungarian, Romanian, Turkish, Croatian, Slovenian, Estonian, Latvian,
-Lithuanian, Greek, Japanese, Korean and Chinese (Simplified and Traditional).
+that is complete coverage for 27 languages: English, German, French, Spanish,
+Italian, Portuguese, Dutch, Swedish, Danish, Norwegian, Finnish, Icelandic,
+Polish, Czech, Slovak, Hungarian, Romanian, Turkish, Croatian, Slovenian,
+Estonian, Latvian, Lithuanian, Greek, Japanese and Chinese (Simplified and
+Traditional). Vietnamese is 98% covered — two tone-marked vowels are missing.
 
-Cyrillic (Russian, Ukrainian, Bulgarian, Serbian), Arabic and Devanagari need a
+Cyrillic (Russian, Ukrainian, Bulgarian, Serbian), Korean, Arabic and Devanagari
+need a
 script-specific recognition model; drop one into a directory and point
 `OCRUST_MODELS_DIR` at it, or pass `Ocr(recognition_model=…, dictionary=…)`.
 

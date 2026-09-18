@@ -350,7 +350,11 @@ fn download_any(urls: &[String]) -> Result<Vec<u8>> {
 #[cfg(feature = "download")]
 fn download_one(url: &str) -> Result<Vec<u8>> {
     use std::io::Read;
-    let mut response = ureq::get(url)
+    let mut request = ureq::get(url);
+    if let Some(token) = github_token(url) {
+        request = request.header("Authorization", &format!("Bearer {token}"));
+    }
+    let mut response = request
         .call()
         .map_err(|e| Error::Download(format!("{url}: {e}")))?;
     let mut buf = Vec::new();
@@ -360,6 +364,46 @@ fn download_one(url: &str) -> Result<Vec<u8>> {
         .read_to_end(&mut buf)
         .map_err(|e| Error::Download(format!("{url}: {e}")))?;
     Ok(buf)
+}
+
+/// A token to authenticate a GitHub download with, if one is configured.
+///
+/// Model bundles live in a repository, and that repository may be private or on
+/// GitHub Enterprise. `OCRUST_GITHUB_TOKEN` (or `GITHUB_TOKEN`, which CI already
+/// sets) is sent as a bearer token — but only to GitHub hosts, so a token can
+/// never leak to a third-party mirror listed in a manifest.
+#[cfg(feature = "download")]
+fn github_token(url: &str) -> Option<String> {
+    if !is_github_host(url) {
+        return None;
+    }
+    ["OCRUST_GITHUB_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find(|value| !value.trim().is_empty())
+}
+
+/// Whether `url` points at GitHub over HTTPS.
+#[cfg(feature = "download")]
+fn is_github_host(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host == "github.com"
+        || host == "raw.githubusercontent.com"
+        || host == "api.github.com"
+        || host == "codeload.github.com"
 }
 
 #[cfg(test)]
@@ -393,6 +437,24 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(feature = "download")]
+    #[test]
+    fn tokens_go_to_github_hosts_only() {
+        assert!(is_github_host(
+            "https://raw.githubusercontent.com/o/r/main/models/det.onnx"
+        ));
+        assert!(is_github_host("https://github.com/o/r/releases/download/x"));
+        assert!(is_github_host("https://API.GitHub.com/repos/o/r"));
+        // A mirror, a look-alike host and plain HTTP must never see the token.
+        assert!(!is_github_host("https://mirror.example.com/det.onnx"));
+        assert!(!is_github_host(
+            "https://raw.githubusercontent.com.evil.test/det.onnx"
+        ));
+        assert!(!is_github_host("https://evil.test/raw.githubusercontent.com"));
+        assert!(!is_github_host("http://raw.githubusercontent.com/o/r/det"));
+        assert!(!is_github_host("https://user@evil.test/github.com/det"));
     }
 
     #[test]

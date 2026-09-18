@@ -261,8 +261,8 @@ scan:
 
 | `page_workers` | 12-page document | single page |
 |---:|---:|---:|
-| 1 (default) | 7.8 s | fastest |
-| 4 | **5.8 s** | ~2x slower |
+| 1 (default) | 8.3 s | fastest |
+| 4 | **6.0 s** | slower, the cores are split |
 
 So: leave it at 1 for page-at-a-time work, and raise it for batches and long
 PDFs (`ocrust scan --workers 4`). Getting this wrong is easy — before the cores
@@ -298,13 +298,13 @@ based on.
 Individually:
 
 ```bash
-cargo test -p ocrust-core --lib                       # 112 unit tests, no models needed
+cargo test -p ocrust-core --lib                       # 142 unit tests, no models needed
 OCRUST_MODELS_DIR=models/ppocrv6 \
   cargo test -p ocrust-core --test end_to_end         # real models
 maturin build --release -o dist                       # the wheel
 python scripts/build_models_wheel.py \
   --models-dir models/ppocrv6 -o dist-models          # the model wheel
-pytest                                                # 57 API, format and CLI tests
+pytest                                                # 58 API, format and CLI tests
 ruff check python tests scripts
 ```
 
@@ -321,7 +321,8 @@ python scripts/make_corpus.py --out /tmp/corpus
 python scripts/evaluate_corpus.py /tmp/corpus -o report
 ```
 
-See [`docs/evaluation.md`](docs/evaluation.md).
+See [`docs/evaluation.md`](docs/evaluation.md) for what the numbers mean and
+[`docs/evaluation-report.md`](docs/evaluation-report.md) for the full run.
 
 ## License
 
