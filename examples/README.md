@@ -11,6 +11,8 @@ python examples/app.py                       # http://127.0.0.1:8765
 python examples/app.py --port 9000 --lang de,fr --dpi 300
 ```
 
+![The app reading an aged German invoice](../assets/screenshot.png)
+
 **No dependencies.** Only the standard library and `ocrust` itself — no Flask, no
 FastAPI, no Streamlit. If the app runs, the library runs, which makes it a
 reasonable smoke test for an installation.
