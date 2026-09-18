@@ -48,11 +48,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-13, target: x86_64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, test: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, test: true }
+          - { os: macos-latest, target: aarch64-apple-darwin, test: true }
+          # GitHub retired the Intel macOS runners, so this wheel is
+          # cross-compiled on Apple Silicon and cannot be run here.
+          - { os: macos-latest, target: x86_64-apple-darwin, test: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, test: true }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -69,6 +71,7 @@ jobs:
       - name: Build the model wheel
         run: python scripts/build_models_wheel.py --models-dir models/ppocrv6 -o dist
       - name: Install and test
+        if: matrix.test
         run: |
           pip install --find-links dist "ocrust[models]" pytest numpy pillow
           python -c "import ocrust; print(ocrust.__version__); print(ocrust.runtime_info())"
