@@ -155,6 +155,27 @@ once — add it in Rust and nowhere else.
 
 1. Update `CHANGELOG.md` with the measured numbers.
 2. Bump the version in `Cargo.toml`, `crates/*/Cargo.toml` and `pyproject.toml`.
-3. Tag `vX.Y.Z` and push. CI builds all five wheels and publishes to PyPI.
+3. Tag `vX.Y.Z` and push — or create the release from GitHub's UI, which is the
+   same thing. The workflow runs on `v*` tags as well as on `main`, builds all
+   five wheels plus the model wheel, and publishes **two** projects: `ocrust`
+   and `ocrust-models`, in separate steps, because trusted publishing mints a
+   token for one project at a time.
 4. Model bundles are pinned by `OCRUST_MODEL_REF`; if the bundle changed, tag it
    too, so an old release keeps downloading the models it was tested with.
+
+### PyPI, once
+
+Publishing uses trusted publishing, so there is no token to store — but each
+project needs a *pending publisher* on PyPI before its first upload
+(pypi.org → Your projects → Publishing → Add a pending publisher):
+
+| field | `ocrust` | `ocrust-models` |
+|---|---|---|
+| PyPI project name | `ocrust` | `ocrust-models` |
+| Owner | `mauricekleindienst` | `mauricekleindienst` |
+| Repository name | `ocrust` | `ocrust` |
+| Workflow name | `ci.yml` | `ci.yml` |
+| Environment name | `pypi` | `pypi` |
+
+Without them the upload step fails with an OIDC error and nothing is published;
+the version is not consumed, so the job can simply be re-run afterwards.
