@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from ocrust.cli import _expand_inputs, _parse_pages, main
+from ocrust.cli import _expand_inputs, _io_retries, _parse_pages, _write, main
 
 
 def test_page_spec_parsing():
@@ -18,6 +19,81 @@ def test_page_spec_parsing():
         _parse_pages("0")
     with pytest.raises(SystemExit):
         _parse_pages("5-2")
+
+
+def test_expand_inputs_explains_what_is_missing(tmp_path):
+    """A batch over a share needs the reason, not just "no"."""
+    files, missing = _expand_inputs([tmp_path / "gone.pdf"])
+    assert files == []
+    assert missing == [(tmp_path / "gone.pdf", "no such file")]
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    _, missing = _expand_inputs([empty])
+    assert missing[0][1] == "no readable files in this directory"
+
+    _, missing = _expand_inputs([tmp_path / "*.tiff"])
+    assert missing[0][1] == "nothing matched this pattern"
+
+
+def test_expand_inputs_keeps_unc_paths_intact():
+    """A Windows share path must survive the expansion unchanged.
+
+    On POSIX it is simply a file that does not exist, which is enough to prove
+    the string is not mangled on the way through.
+    """
+    unc = Path(r"\\fileserver\scans\invoice.pdf")
+    files, missing = _expand_inputs([unc])
+    assert files == []
+    assert missing[0][0] == unc
+
+
+def test_write_retries_a_dropped_share(tmp_path, monkeypatch):
+    target = tmp_path / "out.txt"
+    attempts = {"n": 0}
+    real = Path.write_text
+
+    def flaky(self, data, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise ConnectionResetError(104, "the network name is no longer available")
+        return real(self, data, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", flaky)
+    _write(target, "text", retries=2, delay=0)
+    assert attempts["n"] == 3
+    assert target.read_text() == "text"
+
+
+def test_write_gives_up_and_reports(tmp_path, monkeypatch):
+    def always_fails(self, data, **kwargs):
+        raise ConnectionResetError(104, "gone")
+
+    monkeypatch.setattr(Path, "write_text", always_fails)
+    with pytest.raises(ConnectionResetError):
+        _write(tmp_path / "out.txt", "text", retries=1, delay=0)
+
+
+def test_write_does_not_retry_a_real_error(tmp_path, monkeypatch):
+    attempts = {"n": 0}
+
+    def denied(self, data, **kwargs):
+        attempts["n"] += 1
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(Path, "write_text", denied)
+    with pytest.raises(PermissionError):
+        _write(tmp_path / "out.txt", "text", retries=3, delay=0)
+    assert attempts["n"] == 1, "a permission error will not fix itself"
+
+
+def test_io_retries_defaults_to_two():
+    from argparse import Namespace
+
+    assert _io_retries(Namespace()) == 2
+    assert _io_retries(Namespace(io_retries=None)) == 2
+    assert _io_retries(Namespace(io_retries=0)) == 0
+    assert _io_retries(Namespace(io_retries=5)) == 5
 
 
 def test_expand_inputs_walks_directories(tmp_path):
@@ -44,7 +120,7 @@ def test_expand_inputs_handles_patterns_and_duplicates(tmp_path):
 
     files, missing = _expand_inputs([tmp_path / "*.tiff"])
     assert files == []
-    assert missing == [tmp_path / "*.tiff"]
+    assert [p for p, _ in missing] == [tmp_path / "*.tiff"]
 
 
 def test_expand_inputs_reports_an_empty_directory(tmp_path):
@@ -52,7 +128,7 @@ def test_expand_inputs_reports_an_empty_directory(tmp_path):
     empty.mkdir()
     files, missing = _expand_inputs([empty])
     assert files == []
-    assert missing == [empty]
+    assert [p for p, _ in missing] == [empty]
 
 
 def test_scan_reads_a_directory(engine, invoice_pdf, tmp_path):

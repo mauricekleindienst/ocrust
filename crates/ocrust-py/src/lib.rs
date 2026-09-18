@@ -58,6 +58,7 @@ impl PyEngine {
         threads = None,
         page_workers = None,
         pdf_dpi = None,
+        io_retries = None,
         preprocess = true,
         deskew = None,
         word_boxes = true,
@@ -83,6 +84,7 @@ impl PyEngine {
         threads: Option<usize>,
         page_workers: Option<usize>,
         pdf_dpi: Option<f32>,
+        io_retries: Option<u32>,
         preprocess: bool,
         deskew: Option<bool>,
         word_boxes: bool,
@@ -118,6 +120,9 @@ impl PyEngine {
         }
         if let Some(dpi) = pdf_dpi {
             config.ingest.pdf_dpi = dpi;
+        }
+        if let Some(retries) = io_retries {
+            config.ingest.read_retries = retries;
         }
         if !preprocess {
             config.preprocess = ocrust_core::PreprocessConfig::none();

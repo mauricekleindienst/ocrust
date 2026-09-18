@@ -132,6 +132,24 @@ for line in sorted(doc.lines, key=lambda l: (l.box.y0, l.box.x0)):   # your own 
 and evaluating with word recall rather than CER if order does not matter for your
 use case.
 
+## A batch off a network share dies partway through
+
+Reads and writes already retry twice with backoff, which covers the ordinary SMB
+and NFS hiccup. A share that drops more often than that needs more:
+
+```bash
+ocrust scan '\\fileserver\scans' --io-retries 5 -o '\\fileserver\ocr'
+```
+
+```python
+ocrust.Ocr(io_retries=5)
+```
+
+"No such file" and "permission denied" are never retried — a second attempt
+returns the same answer. If the message names a Windows error instead
+(`[WinError 53] The network path was not found`), the share itself is
+unreachable and no retry count will help. [[Network shares]] has the details.
+
 ## Words are run together, or a space appears where none belongs
 
 The recognizer drops word spaces on lossy input, so `ocrust` restores them from

@@ -33,6 +33,7 @@ ocr = ocrust.Ocr(
     threads=None,         # threads per inference operator
     page_workers=None,    # pages in parallel; None -> 1
     pdf_dpi=None,         # PDF rasterization DPI, default 200
+    io_retries=None,      # extra attempts on a transient read failure; 2 by default
     preprocess=True,      # auto-invert, deskew, rescale
     deskew=None,          # deskew alone, when preprocess is on
     word_boxes=True,      # per-word geometry (hOCR/ALTO word output needs it)
@@ -61,6 +62,7 @@ the GIL for the whole scan, so a thread pool in Python parallelizes properly.
 | `det_limit_side` | The detector's working size (960). Large formats are tiled automatically above 3840 px. |
 | `det_unclip_ratio` | 1.5. Raise it when characters are clipped, lower it when neighbouring lines merge. |
 | `lang` | Always, in production. See [[Languages]]. |
+| `io_retries` | Reading off a network share. Two retries by default; raise it for a share that drops, set `0` to fail fast. See [[Network shares]]. |
 | `rec_space_gap` | Almost never. `0` disables space restoration, which you want only if a swallowed space is preferable to a wrongly inserted one. |
 
 ### Methods

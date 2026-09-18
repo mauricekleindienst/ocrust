@@ -157,6 +157,36 @@ tiny HTTP API (`POST /scan`, `POST /pdf`, `GET /languages`) — see
        width="900">
 </p>
 
+## Network shares
+
+Scanning straight off `\\fileserver\scans` works, and is treated as the
+different thing it is:
+
+```bash
+ocrust scan '\\fileserver\scans\2026' -f text -o '\\fileserver\ocr'
+ocrust scan /mnt/nfs/incoming --workers 4          # NFS or SMB mounts, same thing
+ocrust scan '\\fileserver\scans' --io-retries 5   # a share that drops often
+```
+
+```python
+ocr = ocrust.Ocr(io_retries=5)
+for doc in ocr.scan_many([r"\\fileserver\scans\2026"]):
+    ...
+```
+
+- **UNC paths and mapped drives** are ordinary paths: directories are walked
+  recursively, `'\\server\share\*.pdf'` is expanded by `ocrust` itself (the
+  Windows shell does not do it), and long paths are handled by the Rust side.
+- **A dropped connection is retried.** SMB and NFS time out, reset and return
+  "the network name is no longer available" for reasons that have nothing to do
+  with your file; reads and writes retry twice with backoff before giving up, so
+  a batch of four hundred documents does not die on number 212. "Not found" and
+  "permission denied" are answers, not hiccups, and are never retried.
+- **An unreachable share says so**: `\\fileserver\scans: [WinError 53] The
+  network path was not found` instead of a bare "no such file".
+- **Latency hides behind workers.** On a share the read is the slow part, so
+  `--workers 4` (the default for a batch) helps more than it does on local disk.
+
 ## Every input format
 
 | | formats |

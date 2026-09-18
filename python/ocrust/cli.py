@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -79,6 +80,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="languages to require, e.g. de or de,fr (fails when the model cannot spell them)",
     )
     scan.add_argument(
+        "--io-retries",
+        type=int,
+        metavar="N",
+        help="extra attempts when a read or write fails transiently "
+        "(default 2, for network shares)",
+    )
+    scan.add_argument(
         "--progress",
         action="store_true",
         help="report each page on stderr while reading (long PDFs)",
@@ -113,6 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ocr.add_argument("--models", type=Path)
     ocr.add_argument("--device")
     ocr.add_argument("--workers", type=int)
+    ocr.add_argument("--io-retries", type=int, metavar="N")
 
     tiff = sub.add_parser("tiff", help="convert a document into a deskewed multi-page TIFF")
     tiff.add_argument("input", type=Path)
@@ -177,7 +186,55 @@ READABLE_SUFFIXES = frozenset(
 )  # fmt: skip
 
 
-def _expand_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[Path]]:
+#: Windows redirector codes that mean "the share hiccuped", not "no".
+_TRANSIENT_WINDOWS_ERRORS = frozenset({51, 52, 54, 59, 64, 121, 1450})
+
+#: Errors a write to a network share can survive on a second attempt.
+_TRANSIENT_WRITE_ERRORS = (
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    TimeoutError,
+    InterruptedError,
+    BlockingIOError,
+)
+
+
+def _write(target: Path, data: bytes | str, *, retries: int = 2, delay: float = 0.15) -> None:
+    """Writes a file, retrying the failures a network share produces.
+
+    The read side has the same policy in the engine; output deserves it too,
+    because `-o \\\\fileserver\\ocr` is exactly where a batch writes hundreds of
+    small files and one dropped SMB connection would otherwise end the run.
+    """
+    for attempt in range(retries + 1):
+        try:
+            if isinstance(data, str):
+                target.write_text(data, encoding="utf-8")
+            else:
+                target.write_bytes(data)
+            return
+        except _TRANSIENT_WRITE_ERRORS:
+            if attempt == retries:
+                raise
+            time.sleep(delay * (2**attempt))
+        except OSError as exc:
+            # Windows reports a dropped share as a plain OSError carrying the
+            # redirector's own code: network name deleted, unexpected network
+            # error, no system resources.
+            transient = getattr(exc, "winerror", None) in _TRANSIENT_WINDOWS_ERRORS
+            if attempt == retries or not transient:
+                raise
+            time.sleep(delay * (2**attempt))
+
+
+def _io_retries(args: argparse.Namespace) -> int:
+    """How often a write may be retried, matching what the engine does on reads."""
+    value = getattr(args, "io_retries", None)
+    return 2 if value is None else max(0, value)
+
+
+def _expand_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[tuple[Path, str]]]:
     """Resolves directories and glob patterns into files.
 
     `ocrust scan archive/` is what everyone tries first, and on Windows the shell
@@ -185,12 +242,25 @@ def _expand_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[Path]]:
     filtered by suffix; patterns are expanded; everything is sorted so a batch
     writes the same output twice in a row.
 
-    Returns the files to read and the inputs that matched nothing.
+    UNC paths (`\\\\fileserver\\scans`) work like any other directory, and an
+    input that cannot be reached says *why* — "the network path was not found"
+    is a different problem from "no such file", and on a share it is the one you
+    actually have.
+
+    Returns the files to read, and the inputs that matched nothing with the
+    reason they did not.
     """
     files: list[Path] = []
-    missing: list[Path] = []
+    missing: list[tuple[Path, str]] = []
     for path in paths:
-        if path.is_dir():
+        try:
+            is_directory = path.is_dir()
+            exists = is_directory or path.exists()
+        except OSError as exc:  # pragma: no cover - needs an unreachable share
+            missing.append((path, str(exc)))
+            continue
+
+        if is_directory:
             found = sorted(
                 child
                 for child in path.rglob("*")
@@ -199,8 +269,8 @@ def _expand_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[Path]]:
             if found:
                 files.extend(found)
             else:
-                missing.append(path)
-        elif path.exists():
+                missing.append((path, "no readable files in this directory"))
+        elif exists:
             files.append(path)
         elif any(ch in str(path) for ch in "*?["):
             # A pattern the shell left alone, e.g. every `ocrust scan *.pdf` on
@@ -210,13 +280,28 @@ def _expand_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[Path]]:
             if found:
                 files.extend(found)
             else:
-                missing.append(path)
+                missing.append((path, "nothing matched this pattern"))
         else:
-            missing.append(path)
+            missing.append((path, _why_unreachable(path)))
     # Keep the first occurrence of each file: two patterns may overlap.
     seen: set[Path] = set()
     unique = [f for f in files if not (f in seen or seen.add(f))]
     return unique, missing
+
+
+def _why_unreachable(path: Path) -> str:
+    """Turns a path that is not there into the reason it is not there.
+
+    `Path.exists()` answers False for a missing file and for a share nobody can
+    reach, which are very different things to be told at the start of a batch.
+    """
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return "no such file"
+    except OSError as exc:
+        return str(exc)
+    return "no such file"
 
 
 def _workers_for(args: argparse.Namespace, inputs: int) -> int | None:
@@ -242,6 +327,7 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
         word_boxes=not getattr(args, "no_word_boxes", False),
         drop_score=getattr(args, "min_confidence", None),
         lang=getattr(args, "lang", None),
+        io_retries=getattr(args, "io_retries", None),
     )
 
 
@@ -250,8 +336,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     args.inputs, missing = _expand_inputs(args.inputs)
     if missing:
-        for path in missing:
-            print(f"ocrust: no such file: {path}", file=sys.stderr)
+        for path, reason in missing:
+            print(f"ocrust: {path}: {reason}", file=sys.stderr)
         return 2
     if not args.inputs:
         print("ocrust: nothing to read", file=sys.stderr)
@@ -296,7 +382,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             target = args.output
             if write_to_dir:
                 target = target / f"{path.stem}.{_EXTENSIONS[args.format]}"
-            target.write_text(rendered, encoding="utf-8")
+            _write(target, rendered, retries=_io_retries(args))
             if not args.quiet:
                 print(f"{path} -> {target}", file=sys.stderr)
 
@@ -323,7 +409,7 @@ def _cmd_pdf(args: argparse.Namespace) -> int:
         print(f"ocrust: {exc}", file=sys.stderr)
         return 1
     target = args.output or args.input.with_suffix(".ocr.pdf")
-    target.write_bytes(data)
+    _write(target, data)
     print(f"{args.input} -> {target} ({len(data) / 1e6:.1f} MB)", file=sys.stderr)
     return 0
 
@@ -375,7 +461,7 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
         return 1
 
     target = args.output or args.input.with_suffix(".ocr.pdf")
-    target.write_bytes(pdf)
+    _write(target, pdf)
     print(
         f"{args.input} -> {target}: {report['pages_with_layer']} of {report['pages']} page(s) "
         f"got a text layer, {report['pages_skipped']} skipped, {report['lines']} line(s)",
@@ -401,7 +487,7 @@ def _cmd_tiff(args: argparse.Namespace) -> int:
         print(f"ocrust: {exc}", file=sys.stderr)
         return 1
     target = args.output or args.input.with_suffix(".ocr.tiff")
-    target.write_bytes(data)
+    _write(target, data)
     print(
         f"{args.input} -> {target}: {len(doc.pages)} page(s), {len(data) / 1e6:.1f} MB",
         file=sys.stderr,
