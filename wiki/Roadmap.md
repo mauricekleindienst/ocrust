@@ -58,17 +58,7 @@ uncomfortable, and a second engine (the PDF-layer sibling) adds another ~100 MB.
 paths by default instead of building a sibling, and bound the recognition batch
 by pixels rather than count.
 
-## 5. Directory and glob inputs
-
-**Why:** `ocrust scan archive/` is what people try first, and it does not work
-today — the CLI takes files, so the shell has to expand them, and Windows has no
-glob expansion at all.
-
-**Shape of the fix:** accept directories (recursive, filtered by extension) and
-glob patterns in the CLI and in `scan_many`, with a deterministic order so batch
-output is reproducible.
-
-## 6. Progress reporting from Python
+## 5. Progress reporting from Python
 
 **Why:** the Rust engine already has `scan_with_progress`, and a 30-page PDF takes
 20 s. From Python there is no way to see where it is.
@@ -77,7 +67,7 @@ output is reproducible.
 plus `--progress` in the CLI. Care needed: a callback that reacquires the GIL per
 line would cost more than it reports.
 
-## 7. Searching a result
+## 6. Searching a result
 
 **Why:** everyone's next line after `scan()` is a loop looking for a word, and
 everyone writes it slightly wrong (case, hyphenation across lines, umlauts).
@@ -86,7 +76,7 @@ everyone writes it slightly wrong (case, hyphenation across lines, umlauts).
 index and box, normalized the same way the evaluator normalizes text, plus
 `doc.find_all(regex)`.
 
-## 8. Confidence calibration
+## 7. Confidence calibration
 
 **Why:** mean line confidence is 0.99 on clean pages and 0.93 on Greek — usable
 for routing, but the absolute values are optimistic: a line can be confidently
@@ -95,6 +85,14 @@ human review is guessing at the number.
 
 **Shape of the fix:** measure confidence against the corpus's ground truth, report
 the calibration curve, and document a threshold that means something.
+
+## Done since this list was written
+
+- **Directory and glob inputs.** `ocrust scan archive/` walks the folder
+  recursively, and `ocrust scan '*.pdf'` expands the pattern itself, which is what
+  Windows needs. Sorted and de-duplicated, so a batch is reproducible.
+- **Swallowed word spaces are restored** from the column ink of each crop, which
+  is what took image-only PDFs from CER 0.014 to 0.003 — see [[Accuracy]].
 
 ## Deliberately not planned
 

@@ -201,6 +201,7 @@ class Ocr:
         det_unclip_ratio: float | None = None,
         rec_batch_size: int | None = None,
         rec_image_height: int | None = None,
+        rec_space_gap: float | None = None,
         keep_page_images: bool = False,
         lang: str | Sequence[str] | None = None,
     ) -> None:
@@ -233,6 +234,7 @@ class Ocr:
             "det_unclip_ratio": det_unclip_ratio,
             "rec_batch_size": rec_batch_size,
             "rec_image_height": rec_image_height,
+            "rec_space_gap": rec_space_gap,
             "fix_orientation": fix_orientation,
             "languages": languages,
         }

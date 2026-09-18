@@ -48,14 +48,14 @@ First release.
   lines: a receipt's item and its right-aligned price are two boxes, and so are
   the cells of a table row. Joining them fixed receipts (CER 0.332 → 0.188),
   ruled forms (0.156 → 0.063) and drawings (0.197 on the worst sheet), while clean
-  pages, newspapers, faxes and multi-page scans stayed exactly as they were. The
-  corpus mean went 0.054 → 0.045. It costs one category: the A0 sheet's title
-  block is now read row-wise, which its ground truth lists field by field
-  (0.042 → 0.151, word recall unchanged at 0.868) — see `docs/evaluation.md`.
+  pages, newspapers, faxes and multi-page scans stayed exactly as they were. It
+  costs one category: the A0 sheet's title block is now read row-wise, which its
+  ground truth lists field by field (0.042 → 0.147, word recall 0.895) — see
+  `docs/evaluation.md`.
 - Preprocessing now **earns its keep**: because lines are assembled from
   baselines, deskewing decides whether a skewed page's line is assembled
-  correctly. `preprocess=False` went from free to costing 5x the error rate on
-  skewed, aged and inverted pages.
+  correctly. `preprocess=False` went from free to costing ten times the error rate
+  on skewed, aged and inverted pages (CER 0.004 against 0.040).
 - Whether a wide gap belongs to one row is decided by **repeating columns**: a
   table or price list puts cells at the same x positions row after row, a
   drawing's labels merely share a height. The decision is taken per region, so a
@@ -68,6 +68,34 @@ First release.
   line, and the skew estimate works on a smaller probe with a coarser first pass.
   A clean 200 dpi A4 page takes about 660 ms on four cores; the corpus median is
   669 ms per page.
+
+### Word spaces the recognizer swallowed
+
+- **Missing spaces are restored from the pixels.** A CTC recognizer emits a space
+  only when it is confident about the space class, and on a JPEG-compressed scan
+  or a fax it drops them: `Gesamtbetrag: 5.726,88 EUR` came back as
+  `Gesamtbetrag:5.726,88EUR`. Each recognition crop now also yields a column ink
+  profile, and a gap becomes a space when it is wide on the CTC timeline, blank on
+  the paper, and allowed by typography. The timeline alone is not enough — it
+  leaves just as wide a gap after a capital `M` or between a doubled `mm`.
+- Measured over the whole corpus: **mean CER 0.045 → 0.040, median 0.013 → 0.006,
+  WER 0.176 → 0.120, word recall 0.836 → 0.892**, with no category worse. The
+  biggest movers are the ones that go through a lossy encoder: image-only PDFs
+  0.014 → 0.004 (recall 0.848 → 0.957), rotated PDFs 0.082 → 0.054 (recall
+  0.514 → 0.884), aged scans 0.012 → 0.006, every raster format 0.007 → 0.001. A
+  receipt's WER fell from 0.382 to 0.059.
+- The decoder also keeps the *run* of timesteps a class occupies instead of only
+  its first step, so `m` is wider than `i`. That is what makes the gaps mean
+  something, and it makes per-word boxes more accurate as a side effect.
+- `Ocr(rec_space_gap=0)` turns the pass off.
+
+### Batches from the shell
+
+- `ocrust scan` accepts **directories** (walked recursively, filtered to readable
+  extensions) and **glob patterns**, which is what `ocrust scan '*.pdf'` needs on
+  Windows, where the shell expands nothing. Inputs are sorted and de-duplicated,
+  so a batch writes the same output twice in a row, and a directory with nothing
+  readable in it is an error rather than a silent success.
 
 ### Models and offline installs
 

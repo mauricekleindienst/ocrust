@@ -96,11 +96,14 @@ Five real defects, none of them measurement artifacts:
 | Ruled tables were read column by column | a column split now needs a real gutter, which a table's cell gaps never reach |
 | Eight page workers were 20% *slower* than one | page workers and ONNX Runtime threads divide the cores instead of each claiming all |
 
-Results, before → after: A0 0.96 → 0.042, rotated PDFs 0.79 → 0.082, drawings
-0.47 → 0.170, corpus mean 0.118 → 0.045. Worker scaling went from 0.79× to 1.38×.
-A later pass that assembles lines from boxes took receipts 0.332 → 0.188 and forms
-0.156 → 0.063, and cost the A0 sheet 0.042 → 0.151 — the trade-off is spelled out
-on [[Accuracy]].
+Results, before → after: A0 0.96 → 0.042, rotated PDFs 0.79 → 0.054, drawings
+0.47 → 0.170, corpus mean 0.118 → 0.040. Worker scaling went from 0.79× to 1.33×.
+
+Two later passes came out of the same corpus. Assembling lines from boxes took
+receipts 0.332 → 0.183 and forms 0.156 → 0.063, and cost the A0 sheet
+0.042 → 0.147 — the trade-off is spelled out on [[Accuracy]]. Restoring swallowed
+word spaces took the corpus median from 0.013 to 0.006 and word recall from 0.836
+to 0.892, with image-only PDFs going 0.014 → 0.004.
 
 The current numbers are on [[Accuracy]] and [[Performance]].
 

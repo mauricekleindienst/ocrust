@@ -63,5 +63,5 @@ three rules:
 | Languages | 27 complete (Latin, Greek, Japanese, Chinese); 35 known and checkable |
 | Models | PP-OCRv6, 18 708 characters, 31 MB, Apache-2.0 |
 | Speed | ~670 ms per 200 dpi A4 page on four CPU cores |
-| Accuracy | median CER 0.013 over a 106-file corpus of aged scans, faxes, drawings and forms |
+| Accuracy | median CER 0.006 over a 106-file corpus of aged scans, faxes, drawings and forms |
 | License | Apache-2.0 |

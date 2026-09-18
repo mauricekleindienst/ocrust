@@ -165,10 +165,10 @@ over clean, aged and fax PDFs ([[Evaluation]]):
 
 | dpi | mean CER | word recall | time |
 |---:|---:|---:|---:|
-| 100 | 0.004 | 0.962 | 4.2 s |
-| 150 | 0.006 | 0.931 | 4.2 s |
-| 200 (default) | 0.012 | 0.849 | 4.3 s |
-| 300 | 0.004 | 0.946 | 5.0 s |
+| 100 | 0.003 | 0.969 | 4.2 s |
+| 150 | 0.004 | 0.964 | 4.2 s |
+| 200 (default) | 0.007 | 0.910 | 4.4 s |
+| 300 | 0.002 | 0.980 | 5.2 s |
 
 The differences are small and not monotonic, because the detector resizes the
 page anyway. The practical rule: leave it at 200, raise it to 300 when the print

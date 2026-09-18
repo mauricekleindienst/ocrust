@@ -452,7 +452,9 @@ mod tests {
         assert!(!is_github_host(
             "https://raw.githubusercontent.com.evil.test/det.onnx"
         ));
-        assert!(!is_github_host("https://evil.test/raw.githubusercontent.com"));
+        assert!(!is_github_host(
+            "https://evil.test/raw.githubusercontent.com"
+        ));
         assert!(!is_github_host("http://raw.githubusercontent.com/o/r/det"));
         assert!(!is_github_host("https://user@evil.test/github.com/det"));
     }

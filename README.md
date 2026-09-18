@@ -183,6 +183,7 @@ tiff, doc = ocr.to_tiff("scan.pdf", gray=True)  # deskewed multi-page TIFF
 ocrust scan invoice.pdf                      # text on stdout
 ocrust scan page.jpg -f markdown -o page.md
 ocrust scan *.tiff -f json -o results/       # batch, one file per input
+ocrust scan archive/ -f text -o sidecars/    # a whole folder, read recursively
 ocrust scan book.pdf --pages 1,4-8 --dpi 300 --lang de
 ocrust ocr scan.pdf -o scan.ocr.pdf          # add a text layer
 ocrust pdf photo.jpg -o photo.pdf            # searchable PDF from an image
@@ -261,7 +262,7 @@ scan:
 
 | `page_workers` | 12-page document | single page |
 |---:|---:|---:|
-| 1 (default) | 8.3 s | fastest |
+| 1 (default) | 7.9 s | fastest |
 | 4 | **6.0 s** | slower, the cores are split |
 
 So: leave it at 1 for page-at-a-time work, and raise it for batches and long
@@ -298,13 +299,13 @@ based on.
 Individually:
 
 ```bash
-cargo test -p ocrust-core --lib                       # 142 unit tests, no models needed
+cargo test -p ocrust-core --lib                       # 150 unit tests, no models needed
 OCRUST_MODELS_DIR=models/ppocrv6 \
   cargo test -p ocrust-core --test end_to_end         # real models
 maturin build --release -o dist                       # the wheel
 python scripts/build_models_wheel.py \
   --models-dir models/ppocrv6 -o dist-models          # the model wheel
-pytest                                                # 58 API, format and CLI tests
+pytest                                                # 63 API, format and CLI tests
 ruff check python tests scripts
 ```
 
