@@ -140,6 +140,18 @@ Need a searchable PDF from images instead? That builds a new document:
 ocrust pdf photo.jpg -o photo.pdf
 ```
 
+## Try it in a browser
+
+```bash
+python examples/app.py        # http://127.0.0.1:8765
+```
+
+A local web app with no dependencies beyond the library: drop in a scan, a photo
+or a PDF and see the text, the line boxes over the image, every export format, a
+search box that highlights hits, and a one-click searchable PDF. It doubles as a
+tiny HTTP API (`POST /scan`, `POST /pdf`, `GET /languages`) — see
+[`examples/README.md`](examples/README.md).
+
 ## Every input format
 
 | | formats |
