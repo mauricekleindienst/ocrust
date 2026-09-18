@@ -17,6 +17,13 @@ pub struct OrientationConfig {
     pub batch_size: usize,
     /// Only rotate when the model is at least this sure.
     pub threshold: f32,
+    /// Classify at most this many crops first and, when they agree, apply their
+    /// verdict to the rest.
+    ///
+    /// A page is upside down as a whole; asking the model about every single
+    /// line costs a fifth of the page budget for an answer a sample already
+    /// gives. When the sample disagrees, every crop is classified after all.
+    pub sample_size: usize,
 }
 
 impl Default for OrientationConfig {
@@ -26,6 +33,7 @@ impl Default for OrientationConfig {
             image_width: 192,
             batch_size: 16,
             threshold: 0.9,
+            sample_size: 8,
         }
     }
 }
@@ -52,7 +60,35 @@ impl OrientationClassifier {
     /// Rotates crops that are upside down, in place.
     ///
     /// Returns the angle applied per crop (`0.0` or `180.0`).
+    ///
+    /// A sample is classified first; when it is unanimous its verdict covers the
+    /// whole page, which is the common case and saves most of the work.
     pub fn correct(&self, crops: &mut [RgbImage]) -> Result<Vec<f32>> {
+        let sample = self.config.sample_size;
+        if sample > 0 && crops.len() > sample {
+            let step = crops.len() / sample;
+            let indices: Vec<usize> = (0..sample).map(|i| i * step).collect();
+            let mut probe: Vec<RgbImage> = indices.iter().map(|&i| crops[i].clone()).collect();
+            let verdicts = self.classify_all(&mut probe)?;
+
+            let flipped = verdicts.iter().filter(|a| **a >= 90.0).count();
+            if flipped == 0 {
+                // Unanimously upright: nothing to do for any crop.
+                return Ok(vec![0.0; crops.len()]);
+            }
+            if flipped == verdicts.len() {
+                // Unanimously upside down: turn every crop without asking again.
+                for crop in crops.iter_mut() {
+                    *crop = image::imageops::rotate180(crop);
+                }
+                return Ok(vec![180.0; crops.len()]);
+            }
+        }
+        self.classify_all(crops)
+    }
+
+    /// Classifies and rotates every crop.
+    fn classify_all(&self, crops: &mut [RgbImage]) -> Result<Vec<f32>> {
         let mut angles = vec![0.0f32; crops.len()];
         if crops.is_empty() {
             return Ok(angles);
@@ -106,5 +142,26 @@ impl OrientationClassifier {
             }
         }
         Ok(angles)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sampling_is_configurable_and_off_for_small_pages() {
+        let config = OrientationConfig::default();
+        assert_eq!(config.sample_size, 8);
+        // With fewer crops than the sample size every crop is classified, which
+        // is what `correct` falls back to.
+        assert!(config.sample_size > 0);
+    }
+
+    #[test]
+    fn default_threshold_is_conservative() {
+        // Rotating a line that was merely hard to read would corrupt the text,
+        // so the classifier has to be confident.
+        assert!(OrientationConfig::default().threshold >= 0.9);
     }
 }

@@ -42,6 +42,25 @@ First release.
   model cannot spell a requested language, naming the missing characters.
 - `ocrust languages` reports covered and nearly covered languages.
 
+### Line assembly and speed
+
+- **Boxes on one baseline now become one line.** A detector returns boxes, not
+  lines: a receipt's item and its right-aligned price are two boxes, and so are
+  the cells of a table row. Joining them fixed receipts (CER 0.332 → 0.188),
+  ruled forms (0.156 → 0.062) and the worst drawing (0.433 → 0.206), while clean
+  pages, newspapers, faxes and multi-page scans stayed exactly as they were.
+- Whether a wide gap belongs to one row is decided by **repeating columns**: a
+  table or price list puts cells at the same x positions row after row, a
+  drawing's labels merely share a height. The decision is taken per region, so a
+  drawing's title block can be tabular while the sheet around it is not.
+- A column split now also requires **two lines on each side** and a side that is
+  wide relative to the gutter, which is what separates a newspaper's columns from
+  a table's cells.
+- **12% faster per page** (788 → 696 ms on a 200 dpi A4 page): the line
+  orientation classifier now asks about a sample of crops and applies a unanimous
+  verdict to the rest (it was costing a fifth of the page budget), and the skew
+  estimate works on a smaller probe with a coarser first pass.
+
 ### Found by the corpus, fixed
 
 - **Large-format sheets.** An A0 drawing at 300 dpi scored a 96% character error

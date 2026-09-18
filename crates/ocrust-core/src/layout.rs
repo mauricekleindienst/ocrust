@@ -15,6 +15,24 @@ pub struct LayoutConfig {
     pub line_gap_factor: f32,
     /// Minimum gutter width (in median line heights) to accept a column split.
     pub column_gap_factor: f32,
+    /// Refuse a column split when this share of baselines has boxes on both
+    /// sides of the gutter *and* one side is narrow (see
+    /// [`Self::column_min_width_over_gap`]).
+    ///
+    /// Rows of a table straddle the gutter; page columns are wide blocks. Both
+    /// conditions together tell an invoice's cells from a newspaper's columns.
+    pub column_shared_baseline_veto: f32,
+    /// A page column has to be at least this many gutter widths wide.
+    ///
+    /// A receipt's right-hand price column is narrower than the gap before it; a
+    /// newspaper column is several times wider.
+    pub column_min_width_over_gap: f32,
+    /// A page column also has to cover at least this share of the region.
+    ///
+    /// Together with the rule above this separates a table's narrow cell column
+    /// from a genuine page column, which is always a substantial slice of the
+    /// page.
+    pub column_min_width_fraction: f32,
     /// Minimum gutter width as a fraction of the content width.
     ///
     /// This is what separates a page laid out in columns from a table: a
@@ -24,6 +42,23 @@ pub struct LayoutConfig {
     pub column_gap_min_fraction: f32,
     /// A line this much taller than the median is treated as a heading.
     pub heading_height_factor: f32,
+    /// Join detected boxes that sit on the same baseline into one text line.
+    ///
+    /// A detector returns boxes, not lines: a receipt's `Milch 1L` and its
+    /// right-aligned `1,19` are two boxes on one line, and so are the cells of a
+    /// table row. Without this, they come out as separate lines in an order that
+    /// depends on their x positions.
+    pub merge_baselines: bool,
+    /// How much of the shorter box's height must overlap for a merge.
+    pub baseline_overlap: f32,
+    /// Largest gap, in line heights, that is merged on a page without a
+    /// repeating column structure.
+    ///
+    /// A table or a receipt has cells at the same x positions in row after row,
+    /// and there a wide gap still belongs to one row. A drawing's labels are
+    /// scattered, and joining two of them because they happen to sit at the same
+    /// height would invent a line that is not there.
+    pub max_merge_gap_factor: f32,
     /// Join words split across a line break by a trailing hyphen.
     pub dehyphenate: bool,
     /// Detect columns and read them one after another.
@@ -36,7 +71,13 @@ impl Default for LayoutConfig {
             line_gap_factor: 0.9,
             column_gap_factor: 1.2,
             column_gap_min_fraction: 0.035,
+            column_shared_baseline_veto: 0.6,
+            column_min_width_over_gap: 2.0,
+            column_min_width_fraction: 0.25,
             heading_height_factor: 1.45,
+            merge_baselines: true,
+            baseline_overlap: 0.55,
+            max_merge_gap_factor: 4.0,
             dehyphenate: true,
             detect_columns: true,
         }
@@ -63,28 +104,58 @@ pub fn reading_order(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Line> {
         return lines;
     }
     let scale = median_height(&lines);
+    // Whether the page has a repeating column structure is a property of the
+    // whole page, so it is decided here: after the first horizontal cut a single
+    // row no longer looks like a table.
+    let max_merge_gap =
+        if cfg.merge_baselines && has_repeating_columns(&lines, scale, cfg.baseline_overlap) {
+            f32::MAX
+        } else {
+            scale * cfg.max_merge_gap_factor
+        };
     let mut out = Vec::with_capacity(lines.len());
-    xy_cut(lines, scale, cfg, 0, &mut out);
+    xy_cut(lines, scale, cfg, max_merge_gap, 0, &mut out);
     out
 }
 
-fn xy_cut(mut lines: Vec<Line>, scale: f32, cfg: &LayoutConfig, depth: usize, out: &mut Vec<Line>) {
+fn xy_cut(
+    lines: Vec<Line>,
+    scale: f32,
+    cfg: &LayoutConfig,
+    inherited_merge_gap: f32,
+    depth: usize,
+    out: &mut Vec<Line>,
+) {
+    // Each region decides for itself whether it is tabular, as long as it still
+    // has enough baselines to tell: a drawing's title block is a table even
+    // though the sheet around it is not, and the dimension labels outside it must
+    // not be merged just because the block below them repeats.
+    let max_merge_gap =
+        if cfg.merge_baselines && baseline_bands(&lines, cfg.baseline_overlap).len() >= 3 {
+            if has_repeating_columns(&lines, scale, cfg.baseline_overlap) {
+                f32::MAX
+            } else {
+                scale * cfg.max_merge_gap_factor
+            }
+        } else {
+            inherited_merge_gap
+        };
+
     if lines.len() <= 1 || depth > 12 {
-        lines.sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0).then(cmp_f32(a.bbox.x0, b.bbox.x0)));
-        out.append(&mut lines);
+        emit_leaf(lines, cfg, max_merge_gap, out);
         return;
     }
 
     // Horizontal band: a y gap that no box spans.
-    if let Some(split) = find_gap(&lines, scale * 0.6, |l| (l.bbox.y0, l.bbox.y1)) {
+    if let Some((split, _)) = find_gap(&lines, scale * 0.6, |l| (l.bbox.y0, l.bbox.y1)) {
         let (top, bottom): (Vec<Line>, Vec<Line>) =
             lines.into_iter().partition(|l| l.bbox.center_y() < split);
         if !top.is_empty() && !bottom.is_empty() {
-            xy_cut(top, scale, cfg, depth + 1, out);
-            xy_cut(bottom, scale, cfg, depth + 1, out);
+            xy_cut(top, scale, cfg, max_merge_gap, depth + 1, out);
+            xy_cut(bottom, scale, cfg, max_merge_gap, depth + 1, out);
             return;
         }
-        return_sorted(lines_from(top, bottom), out);
+        return_sorted(lines_from(top, bottom), cfg, max_merge_gap, out);
         return;
     }
 
@@ -94,21 +165,205 @@ fn xy_cut(mut lines: Vec<Line>, scale: f32, cfg: &LayoutConfig, depth: usize, ou
             - lines.iter().map(|l| l.bbox.x0).fold(f32::MAX, f32::min);
         let min_gap =
             (scale * cfg.column_gap_factor).max(content_width * cfg.column_gap_min_fraction);
-        if let Some(split) = find_gap(&lines, min_gap, |l| (l.bbox.x0, l.bbox.x1)) {
+        if let Some((split, gap)) = find_gap(&lines, min_gap, |l| (l.bbox.x0, l.bbox.x1)) {
             let (left, right): (Vec<Line>, Vec<Line>) =
                 lines.into_iter().partition(|l| l.bbox.center_x() < split);
-            if !left.is_empty() && !right.is_empty() {
-                xy_cut(left, scale, cfg, depth + 1, out);
-                xy_cut(right, scale, cfg, depth + 1, out);
+            let straddled = shared_baseline_share(&left, &right, cfg.baseline_overlap);
+            // A column is a block of lines. One box on a side is a cell, a page
+            // number or a stray label — never a column.
+            let thin_side = left.len() < 2 || right.len() < 2;
+            let narrowest = horizontal_span(&left).min(horizontal_span(&right));
+            let region_width = horizontal_span(&left).max(0.0) + gap + horizontal_span(&right);
+            let too_narrow = narrowest < gap * cfg.column_min_width_over_gap
+                || narrowest < region_width * cfg.column_min_width_fraction;
+            if thin_side || (straddled >= cfg.column_shared_baseline_veto && too_narrow) {
+                // The gutter runs through rows, not between columns.
+                emit_leaf(lines_from(left, right), cfg, max_merge_gap, out);
                 return;
             }
-            return_sorted(lines_from(left, right), out);
+            if !left.is_empty() && !right.is_empty() {
+                xy_cut(left, scale, cfg, max_merge_gap, depth + 1, out);
+                xy_cut(right, scale, cfg, max_merge_gap, depth + 1, out);
+                return;
+            }
+            return_sorted(lines_from(left, right), cfg, max_merge_gap, out);
             return;
         }
     }
 
+    emit_leaf(lines, cfg, max_merge_gap, out);
+}
+
+/// Emits one region of the page: boxes on a shared baseline become one line.
+fn emit_leaf(mut lines: Vec<Line>, cfg: &LayoutConfig, max_merge_gap: f32, out: &mut Vec<Line>) {
     lines.sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0).then(cmp_f32(a.bbox.x0, b.bbox.x0)));
+    if cfg.merge_baselines {
+        lines = merge_baselines(lines, cfg.baseline_overlap, max_merge_gap);
+    }
     out.append(&mut lines);
+}
+
+/// True when boxes line up in the same columns across several baselines.
+///
+/// That is what a table, a receipt or a price list looks like, and it is what
+/// tells them from a drawing whose labels merely share a height.
+fn has_repeating_columns(lines: &[Line], scale: f32, min_overlap: f32) -> bool {
+    if lines.len() < 4 {
+        return false;
+    }
+    let bands = baseline_bands(lines, min_overlap);
+    if bands.len() < 3 {
+        return false;
+    }
+    // Cluster the left edges; a column is a cluster fed by at least three bands.
+    let tolerance = scale.max(1.0);
+    let mut columns: Vec<(f32, Vec<usize>)> = Vec::new();
+    for (band_index, band) in bands.iter().enumerate() {
+        for line in band {
+            let x = line.bbox.x0;
+            match columns
+                .iter_mut()
+                .find(|(centre, _)| (*centre - x).abs() <= tolerance)
+            {
+                Some((_, members)) => {
+                    if !members.contains(&band_index) {
+                        members.push(band_index);
+                    }
+                }
+                None => columns.push((x, vec![band_index])),
+            }
+        }
+    }
+    columns.iter().filter(|(_, bands)| bands.len() >= 3).count() >= 2
+}
+
+/// Splits lines into groups that share a baseline.
+fn baseline_bands(lines: &[Line], min_overlap: f32) -> Vec<Vec<&Line>> {
+    let mut bands: Vec<Vec<&Line>> = Vec::new();
+    for line in lines {
+        let joined = bands.last_mut().is_some_and(|band| {
+            band.iter().any(|existing| {
+                let overlap = existing.bbox.vertical_overlap(&line.bbox);
+                let shorter = existing.bbox.height().min(line.bbox.height()).max(1.0);
+                overlap / shorter >= min_overlap
+            })
+        });
+        if joined {
+            bands.last_mut().expect("checked above").push(line);
+        } else {
+            bands.push(vec![line]);
+        }
+    }
+    bands
+}
+
+/// Width covered by a group of lines.
+fn horizontal_span(lines: &[Line]) -> f32 {
+    if lines.is_empty() {
+        return 0.0;
+    }
+    let min = lines.iter().map(|l| l.bbox.x0).fold(f32::MAX, f32::min);
+    let max = lines.iter().map(|l| l.bbox.x1).fold(f32::MIN, f32::max);
+    (max - min).max(0.0)
+}
+
+/// Share of the left side's baselines that also carry a box on the right.
+fn shared_baseline_share(left: &[Line], right: &[Line], min_overlap: f32) -> f32 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let shared = left
+        .iter()
+        .filter(|l| {
+            right.iter().any(|r| {
+                let overlap = l.bbox.vertical_overlap(&r.bbox);
+                let shorter = l.bbox.height().min(r.bbox.height()).max(1.0);
+                overlap / shorter >= min_overlap
+            })
+        })
+        .count();
+    shared as f32 / left.len() as f32
+}
+
+/// Groups boxes that share a baseline and joins each group into one line.
+///
+/// Groups are taken greedily from the top: a box joins the open group when it
+/// overlaps it vertically by `min_overlap` of the shorter height. Within a group
+/// the boxes are read left to right and joined with a single space.
+fn merge_baselines(lines: Vec<Line>, min_overlap: f32, max_gap: f32) -> Vec<Line> {
+    let mut out: Vec<Line> = Vec::with_capacity(lines.len());
+    let mut group: Vec<Line> = Vec::new();
+
+    for line in lines {
+        let shares_baseline = group.iter().any(|existing| {
+            let overlap = existing.bbox.vertical_overlap(&line.bbox);
+            let shorter = existing.bbox.height().min(line.bbox.height()).max(1.0);
+            overlap / shorter >= min_overlap
+        }) && group
+            .iter()
+            .map(|existing| (line.bbox.x0 - existing.bbox.x1).max(existing.bbox.x0 - line.bbox.x1))
+            .fold(f32::MAX, f32::min)
+            <= max_gap;
+        if shares_baseline {
+            group.push(line);
+        } else {
+            if let Some(joined) = join_group(std::mem::take(&mut group)) {
+                out.push(joined);
+            }
+            group.push(line);
+        }
+    }
+    if let Some(joined) = join_group(group) {
+        out.push(joined);
+    }
+    out
+}
+
+/// Joins boxes of one baseline group into a single line, left to right.
+fn join_group(mut group: Vec<Line>) -> Option<Line> {
+    match group.len() {
+        0 => return None,
+        1 => return group.pop(),
+        _ => {}
+    }
+    group.sort_by(|a, b| cmp_f32(a.bbox.x0, b.bbox.x0));
+
+    let mut text = String::new();
+    let mut bbox = group[0].bbox;
+    let mut quad_points = group[0].quad.ordered().points;
+    let mut confidence_sum = 0.0;
+    let mut det_sum = 0.0;
+    let mut words = Vec::new();
+    let mut angle_sum = 0.0;
+
+    for (index, part) in group.iter().enumerate() {
+        if index > 0 && !text.ends_with(' ') && !part.text.starts_with(' ') {
+            text.push(' ');
+        }
+        text.push_str(part.text.trim());
+        bbox = bbox.union(&part.bbox);
+        confidence_sum += part.confidence;
+        det_sum += part.det_score;
+        angle_sum += part.angle;
+        words.extend(part.words.iter().cloned());
+    }
+    let count = group.len() as f32;
+
+    // The merged quad spans the group: keep the outermost corners so that a
+    // rotated row still describes the ink it covers.
+    let last = group[group.len() - 1].quad.ordered().points;
+    quad_points[1] = last[1];
+    quad_points[2] = last[2];
+
+    Some(Line {
+        text,
+        confidence: confidence_sum / count,
+        quad: Quad::new(quad_points).ordered(),
+        bbox,
+        angle: angle_sum / count,
+        det_score: det_sum / count,
+        words,
+    })
 }
 
 fn lines_from(mut a: Vec<Line>, mut b: Vec<Line>) -> Vec<Line> {
@@ -116,15 +371,18 @@ fn lines_from(mut a: Vec<Line>, mut b: Vec<Line>) -> Vec<Line> {
     a
 }
 
-fn return_sorted(mut lines: Vec<Line>, out: &mut Vec<Line>) {
-    lines.sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0).then(cmp_f32(a.bbox.x0, b.bbox.x0)));
-    out.append(&mut lines);
+fn return_sorted(lines: Vec<Line>, cfg: &LayoutConfig, max_merge_gap: f32, out: &mut Vec<Line>) {
+    emit_leaf(lines, cfg, max_merge_gap, out);
 }
 
 /// Finds the centre of the widest interval that no box covers.
 ///
 /// `extent` yields each box's `(start, end)` along the axis being cut.
-fn find_gap(lines: &[Line], min_gap: f32, extent: impl Fn(&Line) -> (f32, f32)) -> Option<f32> {
+fn find_gap(
+    lines: &[Line],
+    min_gap: f32,
+    extent: impl Fn(&Line) -> (f32, f32),
+) -> Option<(f32, f32)> {
     let mut spans: Vec<(f32, f32)> = lines.iter().map(&extent).collect();
     spans.sort_by(|a, b| cmp_f32(a.0, b.0));
 
@@ -137,7 +395,7 @@ fn find_gap(lines: &[Line], min_gap: f32, extent: impl Fn(&Line) -> (f32, f32)) 
         }
         reach = reach.max(end);
     }
-    best.map(|(_, split)| split)
+    best.map(|(gap, split)| (split, gap))
 }
 
 fn cmp_f32(a: f32, b: f32) -> std::cmp::Ordering {
@@ -379,13 +637,10 @@ mod tests {
         }
         let ordered = reading_order(lines, &LayoutConfig::default());
         let texts = texts(&ordered);
-        // Row-major order: the first row's cells come before the second row's.
-        assert_eq!(
-            &texts[..5],
-            &["r0c0", "r0c1", "r0c2", "r0c3", "r0c4"],
-            "{texts:?}"
-        );
-        assert_eq!(texts[5], "r1c0", "{texts:?}");
+        // Each row comes back as one line, read across its cells.
+        assert_eq!(texts.len(), 4, "{texts:?}");
+        assert_eq!(texts[0], "r0c0 r0c1 r0c2 r0c3 r0c4", "{texts:?}");
+        assert_eq!(texts[1], "r1c0 r1c1 r1c2 r1c3 r1c4", "{texts:?}");
     }
 
     #[test]
@@ -416,6 +671,167 @@ mod tests {
         ];
         let ordered = reading_order(lines, &LayoutConfig::default());
         assert_eq!(texts(&ordered)[0], "HEADLINE");
+    }
+
+    #[test]
+    fn boxes_on_one_baseline_become_one_line() {
+        // A receipt: item and right-aligned price are two boxes per row, and the
+        // rows repeat the same two columns.
+        let items = ["Milch 1L", "Brot 500g", "Kaffee 500g", "Butter 250g"];
+        let prices = ["1,19", "2,49", "6,99", "2,29"];
+        let mut lines = Vec::new();
+        for (row, (item, price)) in items.iter().zip(prices).enumerate() {
+            let y = 100.0 + row as f32 * 40.0;
+            lines.push(line_at(item, 10.0, y, 130.0, y + 24.0));
+            lines.push(line_at(price, 260.0, y + 1.0, 300.0, y + 23.0));
+        }
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        assert_eq!(
+            texts(&ordered),
+            [
+                "Milch 1L 1,19",
+                "Brot 500g 2,49",
+                "Kaffee 500g 6,99",
+                "Butter 250g 2,29"
+            ]
+        );
+        // The merged line covers both boxes.
+        assert_eq!(ordered[0].bbox.x1, 300.0);
+        assert!(ordered[0].confidence > 0.0);
+    }
+
+    #[test]
+    fn one_box_per_side_is_never_a_column_split() {
+        // Label and value on one line: the gap between them must not become a
+        // column boundary.
+        let lines = vec![
+            line_at("Summe", 10.0, 100.0, 120.0, 124.0),
+            line_at("16,45", 150.0, 101.0, 210.0, 123.0),
+        ];
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        assert_eq!(texts(&ordered), ["Summe 16,45"]);
+    }
+
+    #[test]
+    fn a_single_wide_gap_is_not_a_table() {
+        // Two boxes on one baseline with nothing repeating below them: joining
+        // them would invent a line, so they stay separate.
+        let lines = vec![
+            line_at("Anlage", 10.0, 100.0, 120.0, 124.0),
+            line_at("Seite 4", 600.0, 101.0, 700.0, 123.0),
+        ];
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        assert_eq!(texts(&ordered), ["Anlage", "Seite 4"]);
+    }
+
+    #[test]
+    fn table_rows_read_across_their_cells() {
+        let mut lines = Vec::new();
+        for (row, cells) in [["1", "Schiene", "12"], ["2", "Lager", "48"]]
+            .iter()
+            .enumerate()
+        {
+            let y = 100.0 + row as f32 * 40.0;
+            for (index, cell) in cells.iter().enumerate() {
+                let x = 20.0 + index as f32 * 200.0;
+                lines.push(line_at(cell, x, y, x + 120.0, y + 24.0));
+            }
+        }
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        assert_eq!(texts(&ordered), ["1 Schiene 12", "2 Lager 48"]);
+    }
+
+    #[test]
+    fn scattered_labels_at_one_height_are_not_joined() {
+        // A drawing: two labels far apart that happen to share a height. Without
+        // repeating columns they must stay separate lines.
+        let lines = vec![
+            line_at("MASSSTAB 1:2", 40.0, 100.0, 220.0, 124.0),
+            line_at("R110", 900.0, 102.0, 980.0, 122.0),
+            line_at("BLATT 1 VON 3", 40.0, 300.0, 240.0, 324.0),
+        ];
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        assert_eq!(texts(&ordered), ["MASSSTAB 1:2", "R110", "BLATT 1 VON 3"]);
+    }
+
+    #[test]
+    fn repeating_columns_are_recognized() {
+        let mut lines = Vec::new();
+        for row in 0..4 {
+            let y = 100.0 + row as f32 * 40.0;
+            lines.push(line_at("item", 20.0, y, 140.0, y + 24.0));
+            lines.push(line_at("1,19", 400.0, y, 460.0, y + 24.0));
+        }
+        let scale = median_height(&lines);
+        assert!(has_repeating_columns(&lines, scale, 0.55));
+
+        // Three scattered labels do not qualify.
+        let scattered = vec![
+            line_at("a", 0.0, 0.0, 50.0, 20.0),
+            line_at("b", 500.0, 100.0, 560.0, 120.0),
+            line_at("c", 200.0, 220.0, 260.0, 240.0),
+            line_at("d", 800.0, 330.0, 860.0, 350.0),
+        ];
+        let scale = median_height(&scattered);
+        assert!(!has_repeating_columns(&scattered, scale, 0.55));
+    }
+
+    #[test]
+    fn separate_baselines_stay_separate() {
+        let lines = vec![
+            line_at("erste", 10.0, 100.0, 200.0, 124.0),
+            line_at("zweite", 10.0, 140.0, 200.0, 164.0),
+        ];
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        assert_eq!(texts(&ordered), ["erste", "zweite"]);
+    }
+
+    #[test]
+    fn merging_can_be_switched_off() {
+        let lines = vec![
+            line_at("Milch 1L", 10.0, 100.0, 120.0, 124.0),
+            line_at("1,19", 260.0, 101.0, 300.0, 123.0),
+        ];
+        let cfg = LayoutConfig {
+            merge_baselines: false,
+            ..LayoutConfig::default()
+        };
+        assert_eq!(texts(&reading_order(lines, &cfg)), ["Milch 1L", "1,19"]);
+    }
+
+    #[test]
+    fn merged_lines_keep_their_word_boxes() {
+        // Boxes close enough to merge without needing a table structure.
+        let mut left = line_at("Summe", 10.0, 100.0, 120.0, 124.0);
+        left.words = vec![Word {
+            text: "Summe".into(),
+            bbox: Rect::new(10.0, 100.0, 120.0, 124.0),
+            confidence: 0.9,
+        }];
+        let mut right = line_at("16,45", 150.0, 101.0, 210.0, 123.0);
+        right.words = vec![Word {
+            text: "16,45".into(),
+            bbox: Rect::new(150.0, 101.0, 210.0, 123.0),
+            confidence: 0.8,
+        }];
+        let ordered = reading_order(vec![left, right], &LayoutConfig::default());
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].words.len(), 2);
+        assert_eq!(ordered[0].words[1].text, "16,45");
+    }
+
+    #[test]
+    fn newspaper_columns_are_not_merged_across_the_gutter() {
+        // Two columns whose lines share y positions: the gutter must win, so
+        // each column keeps its own lines.
+        let mut lines = Vec::new();
+        for row in 0..6 {
+            let y = 100.0 + row as f32 * 30.0;
+            lines.push(line_at(&format!("L{row}"), 0.0, y, 660.0, y + 24.0));
+            lines.push(line_at(&format!("R{row}"), 840.0, y, 1500.0, y + 24.0));
+        }
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        assert_eq!(&texts(&ordered)[..6], &["L0", "L1", "L2", "L3", "L4", "L5"]);
     }
 
     #[test]
