@@ -1,0 +1,56 @@
+"""CLI tests."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from ocrust.cli import _parse_pages, main
+
+
+def test_page_spec_parsing():
+    assert _parse_pages(None) is None
+    assert _parse_pages("1") == [0]
+    assert _parse_pages("1,3-5") == [0, 2, 3, 4]
+    assert _parse_pages("2, 2 ,1") == [0, 1]
+    with pytest.raises(SystemExit):
+        _parse_pages("0")
+    with pytest.raises(SystemExit):
+        _parse_pages("5-2")
+
+
+def test_doctor_reports_json(capsys):
+    code = main(["doctor", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert "ocrust" in payload
+    assert code in (0, 1)
+
+
+def test_scan_missing_file_exits_two(capsys):
+    assert main(["scan", "/nope/missing.png"]) == 2
+    assert "no such file" in capsys.readouterr().err
+
+
+def test_scan_writes_requested_format(engine, invoice_pdf, tmp_path, capsys):
+    out = tmp_path / "out.md"
+    code = main(["scan", str(invoice_pdf), "-f", "markdown", "-o", str(out), "-q"])
+    assert code == 0
+    assert "INVOICE" in out.read_text().upper()
+
+
+def test_scan_batch_writes_one_file_per_input(engine, invoice_pdf, tmp_path):
+    outdir = tmp_path / "results"
+    code = main(
+        ["scan", str(invoice_pdf), str(invoice_pdf), "-f", "json", "-o", str(outdir), "-q"]
+    )
+    assert code == 0
+    written = list(outdir.glob("*.json"))
+    assert written, "expected json output"
+    assert json.loads(written[0].read_text())["pages"]
+
+
+def test_pdf_command_writes_searchable_pdf(engine, invoice_pdf, tmp_path):
+    out = tmp_path / "searchable.pdf"
+    assert main(["pdf", str(invoice_pdf), "-o", str(out)]) == 0
+    assert out.read_bytes().startswith(b"%PDF")

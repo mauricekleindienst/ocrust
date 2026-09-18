@@ -1,0 +1,250 @@
+//! The document model returned by a scan: pages, blocks, lines and words.
+
+use std::sync::Arc;
+
+use image::RgbImage;
+use serde::{Deserialize, Serialize};
+
+use crate::geom::{Quad, Rect};
+
+/// What a block of text looks like structurally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockKind {
+    Paragraph,
+    /// A short, unusually large line — rendered as a Markdown heading.
+    Heading,
+    /// A line starting with a bullet or an enumerator.
+    ListItem,
+}
+
+/// Where a page's pixels came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageOrigin {
+    /// A standalone image file, byte buffer or in-memory frame.
+    Image,
+    /// A page rasterized from a PDF.
+    PdfPage,
+    /// One frame of a multi-page TIFF.
+    TiffFrame,
+}
+
+/// A single word with its own box.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Word {
+    pub text: String,
+    pub bbox: Rect,
+    pub confidence: f32,
+}
+
+/// One recognized text line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Line {
+    pub text: String,
+    /// Mean character confidence in `0..=1`.
+    pub confidence: f32,
+    /// Detection polygon, oriented `[tl, tr, br, bl]`.
+    pub quad: Quad,
+    pub bbox: Rect,
+    /// Rotation of the line in degrees, positive clockwise.
+    pub angle: f32,
+    /// Text-detector score for the box, in `0..=1`.
+    pub det_score: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<Word>,
+}
+
+/// A group of lines that belong together.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Block {
+    pub kind: BlockKind,
+    pub bbox: Rect,
+    pub lines: Vec<Line>,
+}
+
+impl Block {
+    /// Lines joined by single newlines.
+    pub fn text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// One page of a document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Page {
+    /// Zero-based page index within the source.
+    pub index: usize,
+    pub width: u32,
+    pub height: u32,
+    /// Page rotation that preprocessing corrected, in degrees.
+    pub rotation: f32,
+    pub origin: PageOrigin,
+    pub blocks: Vec<Block>,
+    /// Wall-clock time spent on this page, in milliseconds.
+    pub elapsed_ms: f64,
+    /// The preprocessed page image, kept only when
+    /// `EngineConfig::keep_page_images` is set (needed to write searchable
+    /// PDFs). Never serialized.
+    #[serde(skip)]
+    pub image: Option<Arc<RgbImage>>,
+}
+
+impl Page {
+    /// Blocks joined by blank lines.
+    pub fn text(&self) -> String {
+        self.blocks
+            .iter()
+            .map(|b| b.text())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// All lines in reading order.
+    pub fn lines(&self) -> impl Iterator<Item = &Line> {
+        self.blocks.iter().flat_map(|b| b.lines.iter())
+    }
+
+    /// Mean line confidence, or `None` for an empty page.
+    pub fn confidence(&self) -> Option<f32> {
+        let mut sum = 0.0;
+        let mut n = 0u32;
+        for line in self.lines() {
+            sum += line.confidence;
+            n += 1;
+        }
+        (n > 0).then(|| sum / n as f32)
+    }
+}
+
+/// A scanned document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Document {
+    /// Path or label the pages came from.
+    pub source: String,
+    pub pages: Vec<Page>,
+    /// Total wall-clock time for the document, in milliseconds.
+    pub elapsed_ms: f64,
+}
+
+impl Document {
+    pub fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            pages: Vec::new(),
+            elapsed_ms: 0.0,
+        }
+    }
+
+    /// Pages joined by form feeds, the convention OCR tools use for page breaks.
+    pub fn text(&self) -> String {
+        self.pages
+            .iter()
+            .map(|p| p.text())
+            .collect::<Vec<_>>()
+            .join("\n\u{000c}\n")
+    }
+
+    /// Mean line confidence across all pages.
+    pub fn confidence(&self) -> Option<f32> {
+        let mut sum = 0.0;
+        let mut n = 0u32;
+        for line in self.pages.iter().flat_map(|p| p.lines()) {
+            sum += line.confidence;
+            n += 1;
+        }
+        (n > 0).then(|| sum / n as f32)
+    }
+
+    /// Number of recognized lines.
+    pub fn line_count(&self) -> usize {
+        self.pages.iter().map(|p| p.lines().count()).sum()
+    }
+
+    /// Number of recognized words (falls back to whitespace splitting).
+    pub fn word_count(&self) -> usize {
+        self.pages
+            .iter()
+            .flat_map(|p| p.lines())
+            .map(|l| {
+                if l.words.is_empty() {
+                    l.text.split_whitespace().count()
+                } else {
+                    l.words.len()
+                }
+            })
+            .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(text: &str, conf: f32) -> Line {
+        let r = Rect::new(0.0, 0.0, 10.0, 5.0);
+        Line {
+            text: text.into(),
+            confidence: conf,
+            quad: Quad::from_rect(r),
+            bbox: r,
+            angle: 0.0,
+            det_score: 1.0,
+            words: Vec::new(),
+        }
+    }
+
+    fn page(lines: Vec<Line>) -> Page {
+        Page {
+            index: 0,
+            width: 100,
+            height: 100,
+            rotation: 0.0,
+            origin: PageOrigin::Image,
+            blocks: vec![Block {
+                kind: BlockKind::Paragraph,
+                bbox: Rect::new(0.0, 0.0, 10.0, 5.0),
+                lines,
+            }],
+            elapsed_ms: 1.0,
+            image: None,
+        }
+    }
+
+    #[test]
+    fn text_joins_lines_blocks_and_pages() {
+        let mut doc = Document::new("x");
+        doc.pages.push(page(vec![line("a", 1.0), line("b", 1.0)]));
+        doc.pages.push(page(vec![line("c", 1.0)]));
+        assert_eq!(doc.text(), "a\nb\n\u{000c}\nc");
+    }
+
+    #[test]
+    fn confidence_averages_over_lines() {
+        let mut doc = Document::new("x");
+        doc.pages.push(page(vec![line("a", 1.0), line("b", 0.5)]));
+        assert!((doc.confidence().unwrap() - 0.75).abs() < 1e-6);
+        assert_eq!(Document::new("empty").confidence(), None);
+    }
+
+    #[test]
+    fn word_count_falls_back_to_whitespace() {
+        let mut doc = Document::new("x");
+        doc.pages.push(page(vec![line("hello brave world", 1.0)]));
+        assert_eq!(doc.word_count(), 3);
+        assert_eq!(doc.line_count(), 1);
+    }
+
+    #[test]
+    fn document_round_trips_through_json() {
+        let mut doc = Document::new("x");
+        doc.pages.push(page(vec![line("a", 0.9)]));
+        let json = serde_json::to_string(&doc).unwrap();
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.text(), "a");
+    }
+}

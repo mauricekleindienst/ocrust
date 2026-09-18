@@ -1,0 +1,7 @@
+/target
+/dist
+/dist-models
+/.venv
+__pycache__/
+*.pyc
+.pytest_cache/

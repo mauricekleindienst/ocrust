@@ -1,0 +1,50 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ocrust"
+version = "0.1.0"
+description = "Fast document OCR for Python with a Rust core: images, TIFF and PDF, no system dependencies"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+keywords = ["ocr", "pdf", "document", "text-recognition", "rust", "onnx"]
+authors = [{ name = "ocrust contributors" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: Image Recognition",
+  "Topic :: Text Processing",
+  "Typing :: Typed",
+]
+dependencies = [
+  # Supplies libonnxruntime; the extension dlopens it from the wheel, so no
+  # system packages are involved.
+  "onnxruntime>=1.20",
+]
+
+[project.optional-dependencies]
+# PP-OCR model files as a wheel, so a fresh install needs no downloads.
+models = ["ocrust-models>=0.1"]
+gpu = ["onnxruntime-gpu>=1.20"]
+
+[project.scripts]
+ocrust = "ocrust.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mauricekleindienst/pake"
+Source = "https://github.com/mauricekleindienst/pake/tree/main/ocrust"
+Issues = "https://github.com/mauricekleindienst/pake/issues"
+
+[tool.maturin]
+manifest-path = "crates/ocrust-py/Cargo.toml"
+module-name = "ocrust._ocrust"
+python-source = "python"
+features = []
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

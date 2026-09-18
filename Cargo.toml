@@ -1,0 +1,39 @@
+[workspace]
+members = ["crates/ocrust-core", "crates/ocrust-py"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/mauricekleindienst/pake"
+homepage = "https://github.com/mauricekleindienst/pake"
+authors = ["ocrust contributors"]
+
+[workspace.dependencies]
+ocrust-core = { version = "0.1.0", path = "crates/ocrust-core", default-features = false }
+
+hayro = "0.7"
+image = "0.25"
+imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
+log = "0.4"
+ndarray = "0.17"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-22"] }
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tiff = "0.11"
+ureq = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+# Faster local iteration on the heavy image/inference paths.
+[profile.dev.package."*"]
+opt-level = 2
