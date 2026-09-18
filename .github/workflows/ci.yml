@@ -135,11 +135,14 @@ jobs:
           mv dist/ocrust_models-*.whl upload/models/
           mv dist/ocrust-*.whl upload/engine/
           ls -l upload/engine upload/models
-      - name: Publish ocrust
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: upload/engine
+      # Models first, deliberately: `ocrust[models]` depends on them, so if the
+      # second upload fails the world still makes sense. The other way round it
+      # would leave an engine on PyPI asking for a package that is not there.
       - name: Publish ocrust-models
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: upload/models
+      - name: Publish ocrust
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: upload/engine
