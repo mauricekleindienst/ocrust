@@ -66,9 +66,9 @@ the GIL for the whole scan, so a thread pool in Python parallelizes properly.
 ### Methods
 
 ```python
-ocr.scan(source, *, pages=None, name=None) -> Document
+ocr.scan(source, *, pages=None, name=None, progress=None) -> Document
 ocr.read(source, **kw) -> str
-ocr.scan_many(sources) -> Iterator[Document]
+ocr.scan_many(sources) -> Iterator[Document]      # paths, directories, patterns
 
 ocr.ocr_pdf(source, *, dpi=None, skip_pages_with_text=True, compress=True) -> (bytes, report)
 ocr.plan_pdf(source, *, skip_pages_with_text=True) -> tuple[dict, ...]
@@ -95,6 +95,52 @@ ocr.read(open("page.png", "rb").read())
 ocr.read("scan.pdf", pages=[0, 2, 4])          # zero-based
 ```
 
+## Scanning
+
+### Progress
+
+```python
+def tick(page: int, total: int, lines: int) -> None:
+    print(f"page {page + 1}/{total}, {lines} lines")
+
+doc = ocr.scan("book.pdf", progress=tick)
+```
+
+Called after every page, with the GIL held for the call and released again for
+the next page. Raising inside it aborts the scan and the exception comes back out
+unchanged — which is how you cancel one.
+
+### Batches, directories and patterns
+
+```python
+for doc in ocr.scan_many(["a.pdf", "b.png"]):
+    ...
+for doc in ocr.scan_many(["archive/"]):        # recursive, readable files only
+    ...
+for doc in ocr.scan_many(["scans/*.tiff"]):    # expanded here, not by the shell
+    ...
+```
+
+Files you name yourself come back one document per input, duplicates included, so
+`zip(paths, docs)` lines up. Only expanded files are de-duplicated.
+
+### Searching a result
+
+```python
+for hit in doc.search("gesamtbetrag"):
+    print(hit.page, hit.text, hit.box.as_tuple())
+
+doc.search(r"\d+,\d\d\s*EUR", regex=True)
+doc.search("EUR", whole_words=True)
+doc.search("Grüße", case=True)
+```
+
+`search` returns a tuple of `Match(text, page, box, line)`. The box is the union
+of the *words* the hit covers, which is what makes highlighting possible; without
+word boxes (`word_boxes=False`) it is the line's box. Matching is
+case-insensitive by default, because OCR case is not reliable enough to search
+on.
+
 ## Results
 
 ```python
@@ -103,6 +149,7 @@ Document(source, pages, elapsed_ms)
   .lines  .words             # flattened across pages
   .confidence                # mean line confidence, or None
   .render(format) / .markdown() / .json() / .hocr() / .alto() / .csv()
+  .search(needle, *, regex=False, case=False, whole_words=False)
   .to_dict()
 
 Page(index, width, height, rotation, origin, blocks, elapsed_ms)
@@ -114,6 +161,7 @@ Block(kind, box, lines)       # kind: "paragraph", "heading", "list"
 Line(text, box, confidence, angle, words, polygon)
 Word(text, box, confidence)
 Box(x0, y0, x1, y1)  .width  .height  .as_tuple()
+Match(text, page, box, line)
 ```
 
 All coordinates are pixels in the **preprocessed** page image, whose size is

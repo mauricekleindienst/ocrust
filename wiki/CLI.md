@@ -32,6 +32,7 @@ ocrust scan archive/ -f text -o sidecars/     # a directory, read recursively
 ocrust scan 'scans/*.pdf' -o out/             # a pattern, even where the shell keeps it
 ocrust scan book.pdf --pages 1,3-5            # 1-based on the command line
 ocrust scan faint.png --min-confidence 0.3    # keep faint lines
+ocrust scan book.pdf --progress               # page-by-page on stderr
 ocrust scan scan.pdf --dpi 300 --lang de,fr
 ocrust scan photo.jpg -q                      # no summary line
 ```

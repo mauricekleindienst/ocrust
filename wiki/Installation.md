@@ -12,8 +12,9 @@ Two things arrive with it:
 | `onnxruntime` | supplies `libonnxruntime`, which the extension loads at run time |
 | `ocrust-models` | the PP-OCRv6 model files, so nothing is downloaded on first use |
 
-No `apt`, no Homebrew, no CUDA toolkit, no compiler, no admin rights. The wheel is
-prebuilt (abi3), and the Rust side has no C, C++ or CMake dependency.
+No `apt`, no Homebrew, no CUDA toolkit, no compiler, no admin rights: the wheels
+are prebuilt (abi3, one per platform, every Python from 3.9 up) and nothing is
+compiled during `pip install`.
 
 ## Without the models extra
 
@@ -87,8 +88,7 @@ Anything other than `status: ready` is explained in [[Troubleshooting]].
 
 ## From source
 
-Needs Rust 1.85 or newer — and nothing else, because the whole dependency tree is
-pure Rust:
+Needs Rust 1.85 or newer, and — with one exception below — nothing else:
 
 ```bash
 git clone https://github.com/mauricekleindienst/ocrust

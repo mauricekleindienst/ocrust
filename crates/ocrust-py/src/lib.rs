@@ -6,6 +6,7 @@
 //! lives in the `ocrust` Python package.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use ocrust_core::export::overlay::{OverlayOptions, OverlayReport};
 use ocrust_core::export::pdf::{build_with_images, PdfOptions};
@@ -166,26 +167,28 @@ impl PyEngine {
     }
 
     /// Scans a file and returns the result as JSON.
-    #[pyo3(signature = (path, pages = None))]
+    #[pyo3(signature = (path, pages = None, progress = None))]
     fn scan_path(
         &self,
         py: Python<'_>,
         path: PathBuf,
         pages: Option<Vec<usize>>,
+        progress: Option<Py<PyAny>>,
     ) -> PyResult<String> {
-        self.scan_source(py, Source::path(path), pages)
+        self.scan_source(py, Source::path(path), pages, progress)
     }
 
     /// Scans an encoded document or image from memory.
-    #[pyo3(signature = (data, name = "<bytes>", pages = None))]
+    #[pyo3(signature = (data, name = "<bytes>", pages = None, progress = None))]
     fn scan_bytes(
         &self,
         py: Python<'_>,
         data: Vec<u8>,
         name: &str,
         pages: Option<Vec<usize>>,
+        progress: Option<Py<PyAny>>,
     ) -> PyResult<String> {
-        self.scan_source(py, Source::bytes(data, name), pages)
+        self.scan_source(py, Source::bytes(data, name), pages, progress)
     }
 
     /// Scans raw RGB pixels (`height * width * 3` bytes).
@@ -211,7 +214,7 @@ impl PyEngine {
             image,
             name: name.to_string(),
         };
-        self.scan_source(py, source, None)
+        self.scan_source(py, source, None, None)
     }
 
     /// Scans several files, in parallel, and returns one JSON string per input.
@@ -400,12 +403,37 @@ impl PyEngine {
         py: Python<'_>,
         source: Source,
         pages: Option<Vec<usize>>,
+        progress: Option<Py<PyAny>>,
     ) -> PyResult<String> {
-        let doc = py.detach(|| match pages {
-            // Page selection is per call, so it cannot live in the shared config.
-            Some(list) => self.inner.scan_pages(&source, &list),
-            None => self.inner.scan(&source),
+        // Reported errors are kept aside: the callback runs deep inside the
+        // engine, which knows nothing about Python, so it is raised afterwards.
+        let callback_error: Mutex<Option<PyErr>> = Mutex::new(None);
+        let doc = py.detach(|| {
+            let mut report = |p: ocrust_core::Progress| {
+                let Some(callback) = progress.as_ref() else {
+                    return;
+                };
+                if callback_error.lock().is_ok_and(|e| e.is_some()) {
+                    return; // already failed once; do not keep calling it
+                }
+                Python::attach(|py| {
+                    if let Err(e) = callback.call1(py, (p.page, p.total_pages, p.lines)) {
+                        if let Ok(mut slot) = callback_error.lock() {
+                            slot.get_or_insert(e);
+                        }
+                    }
+                });
+            };
+            match pages {
+                Some(list) => self
+                    .inner
+                    .scan_pages_with_progress(&source, &list, &mut report),
+                None => self.inner.scan_with_progress(&source, &mut report),
+            }
         });
+        if let Some(e) = callback_error.lock().ok().and_then(|mut slot| slot.take()) {
+            return Err(e);
+        }
         let doc = doc.map_err(to_py_err)?;
         serde_json::to_string(&doc).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }

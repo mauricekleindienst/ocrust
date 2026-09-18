@@ -6,11 +6,12 @@ compare and print without surprises.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["Box", "Word", "Line", "Block", "Page", "Document"]
+__all__ = ["Box", "Word", "Line", "Block", "Match", "Page", "Document"]
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,22 @@ class Block:
 
 
 @dataclass(frozen=True)
+class Match:
+    """Where a search hit sits in a document."""
+
+    text: str
+    #: Zero-based page index.
+    page: int
+    #: Box around the matching words, or the whole line when word boxes are off.
+    box: Box
+    #: The line the match was found in.
+    line: Line
+
+    def as_tuple(self) -> tuple[int, float, float, float, float]:
+        return (self.page, *self.box.as_tuple())
+
+
+@dataclass(frozen=True)
 class Page:
     index: int
     width: int
@@ -167,6 +184,52 @@ class Document:
             return None
         return sum(line.confidence for line in lines) / len(lines)
 
+    def search(
+        self,
+        needle: str,
+        *,
+        regex: bool = False,
+        case: bool = False,
+        whole_words: bool = False,
+    ) -> tuple[Match, ...]:
+        """Finds `needle` in the recognized text, with the box it sits in.
+
+        The loop everyone writes after their first scan, with the parts everyone
+        gets wrong: case folding, whitespace inside the line, and mapping the hit
+        back onto the word boxes so it can be highlighted.
+
+        Args:
+            needle: Text to look for, or a regular expression when `regex` is set.
+            regex: Treat `needle` as a Python regular expression.
+            case: Match case-sensitively. Off by default — OCR case is not
+                reliable enough to search on.
+            whole_words: Require word boundaries around the match.
+
+        >>> for hit in doc.search("gesamtbetrag"):        # doctest: +SKIP
+        ...     print(hit.page, hit.text, hit.box.as_tuple())
+        """
+        if not needle:
+            return ()
+        pattern = needle if regex else re.escape(needle)
+        if whole_words:
+            pattern = rf"\b(?:{pattern})\b"
+        flags = 0 if case else re.IGNORECASE
+        compiled = re.compile(pattern, flags)
+
+        found: list[Match] = []
+        for index, page in enumerate(self.pages):
+            for line in page.lines:
+                for hit in compiled.finditer(line.text):
+                    found.append(
+                        Match(
+                            text=hit.group(0),
+                            page=index,
+                            box=_box_for_span(line, hit.start(), hit.end()),
+                            line=line,
+                        )
+                    )
+        return tuple(found)
+
     def to_dict(self) -> dict[str, Any]:
         """The raw engine output, including every box and score."""
         return self._raw
@@ -180,3 +243,33 @@ class Document:
         )
         object.__setattr__(doc, "_raw", data)
         return doc
+
+
+def _box_for_span(line: Line, start: int, end: int) -> Box:
+    """The box around the words a character range covers.
+
+    Word boxes come from the recognizer's character positions, so a hit can be
+    highlighted instead of merely located. When they are missing — ``word_boxes``
+    was turned off, or the line has none — the line's own box is the honest
+    answer.
+    """
+    if not line.words:
+        return line.box
+
+    boxes: list[Box] = []
+    cursor = 0
+    for word in line.words:
+        position = line.text.find(word.text, cursor)
+        if position < 0:
+            continue
+        cursor = position + len(word.text)
+        if position < end and cursor > start:
+            boxes.append(word.box)
+    if not boxes:
+        return line.box
+    return Box(
+        x0=min(b.x0 for b in boxes),
+        y0=min(b.y0 for b in boxes),
+        x1=max(b.x1 for b in boxes),
+        y1=max(b.y1 for b in boxes),
+    )

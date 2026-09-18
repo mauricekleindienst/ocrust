@@ -69,6 +69,32 @@ First release.
   A clean 200 dpi A4 page takes about 660 ms on four cores; the corpus median is
   669 ms per page.
 
+### Searchable in every script
+
+- **PDF text layers are no longer limited to WinAnsi.** A line with CJK, Cyrillic
+  or Greek in it is written with a Type0 font whose two-byte codes are UTF-16 code
+  units, plus a `ToUnicode` CMap; Western text keeps the base-14 font it had. No
+  font file is embedded, because the layer is invisible and no glyph outline is
+  ever drawn — so the wheel stays free of a bundled font and its license, and the
+  added objects cost about nine kilobytes per document.
+- A Japanese scan now extracts as Japanese: `unmappable_chars` went from 340 over
+  the corpus to **0**, and the font objects are added only to documents that need
+  them, so a German invoice contains exactly what it did before.
+
+### Looking things up
+
+- **`doc.search("gesamtbetrag")`** returns every hit with its page and the box
+  around the matching *words*, so it can be highlighted. Case-insensitive by
+  default (OCR case is not reliable enough to search on), with `regex=True`,
+  `case=True` and `whole_words=True` when you need them. It falls back to the line
+  box when word boxes are off.
+- **`progress=`** on `Ocr.scan` is called after every page with
+  `(page, total_pages, lines)`, and `ocrust scan --progress` prints it. Raising
+  inside the callback aborts the scan, and the exception is the one you raised.
+- `scan_many` accepts directories and glob patterns like the CLI does. Files you
+  name yourself stay exactly as given, duplicates included, so one document comes
+  back per input; only expanded files are de-duplicated.
+
 ### Word spaces the recognizer swallowed
 
 - **Missing spaces are restored from the pixels.** A CTC recognizer emits a space
@@ -109,6 +135,7 @@ First release.
 
 ### Documentation
 
+- A logo (`assets/ocrust.svg`) at the top of the README and the wiki.
 - A 15-page wiki under `wiki/`: installation, quickstart, the Python API, the
   CLI, PDF workflows, languages, models, performance, accuracy, architecture,
   evaluation, troubleshooting, contributing and the roadmap.
@@ -153,7 +180,10 @@ First release.
 
 - Prebuilt abi3 wheel, Python 3.9 and up. No Tesseract, PaddlePaddle, PyTorch,
   Poppler or PDFium.
-- No C, C++ or CMake dependency anywhere in the tree; no admin rights needed.
+- Installing needs no compiler and no admin rights: prebuilt abi3 wheels, and
+  ONNX Runtime is loaded at run time from the `onnxruntime` wheel. A source build
+  is pure Rust as well, except for the optional model downloader, whose TLS stack
+  (`ring`) compiles C — `--no-default-features --features pdf` avoids it.
 - Models ship as the `ocrust-models` wheel or are fetched from
   `raw.githubusercontent.com` with SHA-256 verification. No other hosts are ever
   contacted.

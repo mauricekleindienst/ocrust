@@ -16,11 +16,15 @@ use lopdf::{dictionary, Dictionary, Document as PdfDocument, Object, ObjectId, S
 use crate::doc::Page;
 use crate::error::{Error, Result};
 
+use super::cidfont;
 use super::pdf::winansi_literal;
 
 /// Resource name the added font is registered under. Prefixed to avoid clashing
 /// with fonts the document already uses.
 const FONT_NAME: &str = "OcrustHelv";
+
+/// What [`super::pdf::show_text`] calls the base-14 font it encodes for.
+const FONT_NAME_WINANSI: &str = "F1";
 
 /// Options for [`add_text_layer`].
 #[derive(Debug, Clone)]
@@ -179,6 +183,9 @@ where
         "Encoding" => "WinAnsiEncoding",
     });
     let mut font_used = false;
+    // Added the first time a page carries text WinAnsi cannot hold, so Western
+    // documents keep exactly the objects they had before.
+    let mut unicode_font_id: Option<ObjectId> = None;
 
     for raw in rendered {
         let Some(plan) = plans.iter().find(|p| p.index == raw.index) else {
@@ -187,8 +194,20 @@ where
         let (image_w, image_h) = raw.image.dimensions();
         let ocr_page = recognize(raw.index, raw.image)?;
 
-        let (stream, lines, unmappable) =
-            text_layer_stream(&ocr_page, plan.page_box, image_w, image_h);
+        let needs_unicode = ocr_page
+            .lines()
+            .any(|line| cidfont::needs_unicode(line.text.trim()));
+        if needs_unicode && unicode_font_id.is_none() {
+            unicode_font_id = Some(add_unicode_font(&mut doc));
+        }
+
+        let (stream, lines, unmappable) = text_layer_stream(
+            &ocr_page,
+            plan.page_box,
+            image_w,
+            image_h,
+            unicode_font_id.is_some(),
+        );
         if lines == 0 {
             continue;
         }
@@ -205,7 +224,11 @@ where
         let page_id = *page_ids
             .get(raw.index)
             .ok_or_else(|| Error::Pdf(format!("page {} disappeared", raw.index + 1)))?;
-        attach_font(&mut doc, page_id, font_id)?;
+        let mut fonts: Vec<(&str, ObjectId)> = vec![(FONT_NAME, font_id)];
+        if let Some(id) = unicode_font_id {
+            fonts.push((cidfont::UNICODE_FONT_NAME, id));
+        }
+        attach_font(&mut doc, page_id, &fonts)?;
         append_content(&mut doc, page_id, content_id)?;
         font_used = true;
         report.pages_with_layer += 1;
@@ -235,6 +258,7 @@ fn text_layer_stream(
     page_box: PageBox,
     image_w: u32,
     image_h: u32,
+    unicode_font: bool,
 ) -> (String, usize, usize) {
     let (display_w, display_h) = page_box.display_size();
     // Points per pixel, derived from the rasterization that produced the image.
@@ -262,8 +286,10 @@ fn text_layer_stream(
         if text.is_empty() {
             continue;
         }
-        let (literal, replaced) = winansi_literal(text);
-        unmappable += replaced;
+        let (font, show, em) = super::pdf::show_text(text, unicode_font);
+        if font == FONT_NAME_WINANSI {
+            unmappable += winansi_literal(text).1;
+        }
 
         // Rotated and skewed lines get a rotated baseline, so selecting the text
         // follows the ink instead of cutting across it.
@@ -278,11 +304,18 @@ fn text_layer_stream(
         // Image space counts down from the top; PDF counts up from the bottom.
         let y = display_h - baseline.y * sy + size * 0.18;
         let target_w = line.quad.edge_width() * sx;
-        let scale = super::pdf::horizontal_scale_for(text, size, target_w);
+        let scale = super::pdf::horizontal_scale_em(text, size, target_w, em);
+        // The base-14 font keeps its own resource name; the Unicode font brings
+        // its own, and `show_text` has already encoded the string for it.
+        let resource = if font == FONT_NAME_WINANSI {
+            FONT_NAME
+        } else {
+            font
+        };
 
         out.push_str(&format!(
-            "/{FONT_NAME} {size:.2} Tf\n{scale:.1} Tz\n\
-             {cos:.5} {sin:.5} {:.5} {cos:.5} {x:.2} {y:.2} Tm\n({literal}) Tj\n",
+            "/{resource} {size:.2} Tf\n{scale:.1} Tz\n\
+             {cos:.5} {sin:.5} {:.5} {cos:.5} {x:.2} {y:.2} Tm\n{show} Tj\n",
             -sin
         ));
         lines += 1;
@@ -395,11 +428,55 @@ fn page_has_text(doc: &PdfDocument, page_id: ObjectId) -> bool {
     })
 }
 
+/// Adds the Unicode font, its descendant and the `ToUnicode` map to the file.
+fn add_unicode_font(doc: &mut PdfDocument) -> ObjectId {
+    let cmap = cidfont::to_unicode_cmap();
+    let to_unicode = doc.add_object(Stream::new(dictionary! {}, cmap.into_bytes()));
+    let descriptor = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => Object::Name(cidfont::UNICODE_BASE_FONT.into()),
+        "Flags" => cidfont::DESCRIPTOR_FLAGS,
+        "FontBBox" => Object::Array(
+            cidfont::DESCRIPTOR_BBOX.iter().map(|v| Object::Integer(*v)).collect(),
+        ),
+        "ItalicAngle" => 0,
+        "Ascent" => cidfont::DESCRIPTOR_ASCENT,
+        "Descent" => cidfont::DESCRIPTOR_DESCENT,
+        "CapHeight" => cidfont::DESCRIPTOR_CAP_HEIGHT,
+        "StemV" => cidfont::DESCRIPTOR_STEM_V,
+    });
+    let descendant = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => Object::Name(cidfont::UNICODE_BASE_FONT.into()),
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0,
+        },
+        "FontDescriptor" => Object::Reference(descriptor),
+        "DW" => 1000,
+        "CIDToGIDMap" => "Identity",
+    });
+    doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => Object::Name(cidfont::UNICODE_BASE_FONT.into()),
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => Object::Array(vec![Object::Reference(descendant)]),
+        "ToUnicode" => Object::Reference(to_unicode),
+    })
+}
+
 /// Registers the overlay font in the page's resources.
 ///
 /// Inherited resources are copied onto the page first, because setting
 /// `/Resources` here would otherwise shadow them and break existing content.
-fn attach_font(doc: &mut PdfDocument, page_id: ObjectId, font_id: ObjectId) -> Result<()> {
+fn attach_font(
+    doc: &mut PdfDocument,
+    page_id: ObjectId,
+    fonts_to_add: &[(&str, ObjectId)],
+) -> Result<()> {
     let existing: Option<Dictionary> = match inherited(doc, page_id, b"Resources") {
         Some(Object::Dictionary(dict)) => Some(dict.clone()),
         _ => None,
@@ -411,7 +488,9 @@ fn attach_font(doc: &mut PdfDocument, page_id: ObjectId, font_id: ObjectId) -> R
         Ok(Object::Reference(id)) => doc.get_dictionary(*id).cloned().unwrap_or_default(),
         _ => Dictionary::new(),
     };
-    fonts.set(FONT_NAME, Object::Reference(font_id));
+    for (name, id) in fonts_to_add {
+        fonts.set(*name, Object::Reference(*id));
+    }
     resources.set("Font", Object::Dictionary(fonts));
 
     let page = doc
@@ -568,7 +647,7 @@ mod tests {
             1200,
             1600,
         );
-        let (stream, lines, unmappable) = text_layer_stream(&page, letter(0), 1200, 1600);
+        let (stream, lines, unmappable) = text_layer_stream(&page, letter(0), 1200, 1600, false);
         assert_eq!(lines, 1);
         assert_eq!(unmappable, 0);
         assert!(stream.contains("3 Tr"), "{stream}");
@@ -581,10 +660,38 @@ mod tests {
     }
 
     #[test]
+    fn japanese_goes_into_the_unicode_font_as_utf16() {
+        let page = page_with_line("請求書", Rect::new(100.0, 100.0, 400.0, 140.0), 1200, 1600);
+
+        // Without the Unicode font the text still degrades to `?`.
+        let (plain, _, unmappable) = text_layer_stream(&page, letter(0), 1200, 1600, false);
+        assert_eq!(unmappable, 3);
+        assert!(plain.contains("(???)"), "{plain}");
+
+        // With it, the line is written as UTF-16 hex and nothing is lost.
+        let (stream, lines, unmappable) = text_layer_stream(&page, letter(0), 1200, 1600, true);
+        assert_eq!((lines, unmappable), (1, 0));
+        assert!(
+            stream.contains(&format!("/{}", cidfont::UNICODE_FONT_NAME)),
+            "{stream}"
+        );
+        assert!(stream.contains("<8ACB6C4266F8> Tj"), "{stream}");
+    }
+
+    #[test]
+    fn western_lines_keep_the_base14_font_even_when_unicode_is_available() {
+        let page = page_with_line("Grüße", Rect::new(100.0, 100.0, 400.0, 140.0), 1200, 1600);
+        let (stream, _, unmappable) = text_layer_stream(&page, letter(0), 1200, 1600, true);
+        assert_eq!(unmappable, 0);
+        assert!(stream.contains(&format!("/{FONT_NAME}")), "{stream}");
+        assert!(!stream.contains(cidfont::UNICODE_FONT_NAME), "{stream}");
+    }
+
+    #[test]
     fn text_position_follows_the_rasterization_scale() {
         // 1200px wide image for a 612pt page: 0.51 pt per pixel.
         let page = page_with_line("x", Rect::new(600.0, 800.0, 700.0, 840.0), 1200, 1600);
-        let (stream, _, _) = text_layer_stream(&page, letter(0), 1200, 1600);
+        let (stream, _, _) = text_layer_stream(&page, letter(0), 1200, 1600, false);
         let tm = stream
             .lines()
             .find(|l| l.contains(" Tm"))
@@ -611,7 +718,7 @@ mod tests {
     fn skewed_lines_get_a_rotated_text_matrix() {
         let mut page = page_with_line("schief", Rect::new(50.0, 50.0, 350.0, 90.0), 1200, 1600);
         page.blocks[0].lines[0].angle = 30.0;
-        let (stream, _, _) = text_layer_stream(&page, letter(0), 1200, 1600);
+        let (stream, _, _) = text_layer_stream(&page, letter(0), 1200, 1600, false);
         let tm = stream
             .lines()
             .find(|l| l.contains(" Tm"))
@@ -623,7 +730,7 @@ mod tests {
     #[test]
     fn unmappable_characters_are_counted() {
         let page = page_with_line("日本語", Rect::new(0.0, 0.0, 100.0, 40.0), 200, 200);
-        let (_, lines, unmappable) = text_layer_stream(&page, letter(0), 200, 200);
+        let (_, lines, unmappable) = text_layer_stream(&page, letter(0), 200, 200, false);
         assert_eq!(lines, 1);
         assert_eq!(unmappable, 3);
     }
@@ -631,10 +738,10 @@ mod tests {
     #[test]
     fn empty_pages_produce_no_lines() {
         let mut page = page_with_line("   ", Rect::new(0.0, 0.0, 10.0, 10.0), 100, 100);
-        let (_, lines, _) = text_layer_stream(&page, letter(0), 100, 100);
+        let (_, lines, _) = text_layer_stream(&page, letter(0), 100, 100, false);
         assert_eq!(lines, 0);
         page.blocks.clear();
-        let (_, lines, _) = text_layer_stream(&page, letter(0), 100, 100);
+        let (_, lines, _) = text_layer_stream(&page, letter(0), 100, 100, false);
         assert_eq!(lines, 0);
     }
 }

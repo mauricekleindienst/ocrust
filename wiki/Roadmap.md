@@ -26,18 +26,7 @@ cells known, field-wise rather than row-wise text for blocks that are forms
 rather than tables. A learned table-structure model would do better; a geometric
 one would already close most of the gap.
 
-## 2. Unicode text layers for PDFs
-
-**Why:** the searchable-PDF layer uses a WinAnsi base-14 font. CJK, Cyrillic and
-Greek text is recognized perfectly and then written as `?` in the invisible layer
-— the one place where `ocrust` knowingly loses information. The corpus run counts
-340 such characters.
-
-**Shape of the fix:** embed a subset TrueType font with an Identity-H encoding and
-a `ToUnicode` CMap. The font has to ship with the wheel or be findable on the
-system, which is the part that needs a decision, not the PDF plumbing.
-
-## 3. More scripts
+## 2. More scripts
 
 **Why:** Cyrillic (Russian, Ukrainian, Bulgarian, Serbian), Korean, Arabic and
 Devanagari are known, checked and **not covered** — `Ocr(lang="ru")` refuses
@@ -48,7 +37,7 @@ with its manifest entry, plus per-bundle language coverage so `ocrust languages`
 reports the union. The engine already supports swapping the recognizer; this is
 packaging and measurement work, not new code.
 
-## 4. Lower memory
+## 3. Lower memory
 
 **Why:** ~700–800 MB resident while scanning A4 pages at 200 dpi, most of it ONNX
 Runtime's CPU arena. It plateaus, but it makes a 1 GB container limit
@@ -58,25 +47,7 @@ uncomfortable, and a second engine (the PDF-layer sibling) adds another ~100 MB.
 paths by default instead of building a sibling, and bound the recognition batch
 by pixels rather than count.
 
-## 5. Progress reporting from Python
-
-**Why:** the Rust engine already has `scan_with_progress`, and a 30-page PDF takes
-20 s. From Python there is no way to see where it is.
-
-**Shape of the fix:** expose a callback that fires per page, released GIL and all,
-plus `--progress` in the CLI. Care needed: a callback that reacquires the GIL per
-line would cost more than it reports.
-
-## 6. Searching a result
-
-**Why:** everyone's next line after `scan()` is a loop looking for a word, and
-everyone writes it slightly wrong (case, hyphenation across lines, umlauts).
-
-**Shape of the fix:** `doc.search("Gesamtbetrag")` returning matches with page
-index and box, normalized the same way the evaluator normalizes text, plus
-`doc.find_all(regex)`.
-
-## 7. Confidence calibration
+## 4. Confidence calibration
 
 **Why:** mean line confidence is 0.99 on clean pages and 0.93 on Greek — usable
 for routing, but the absolute values are optimistic: a line can be confidently
@@ -88,11 +59,14 @@ the calibration curve, and document a threshold that means something.
 
 ## Done since this list was written
 
-- **Directory and glob inputs.** `ocrust scan archive/` walks the folder
-  recursively, and `ocrust scan '*.pdf'` expands the pattern itself, which is what
-  Windows needs. Sorted and de-duplicated, so a batch is reproducible.
+- **Unicode PDF text layers.** CJK, Cyrillic and Greek go into the layer as
+  UTF-16 through a Type0 font with a `ToUnicode` map, instead of `?`. Nothing is
+  embedded, because nothing is drawn. Corpus `unmappable_chars`: 340 → 0.
 - **Swallowed word spaces are restored** from the column ink of each crop, which
-  is what took image-only PDFs from CER 0.014 to 0.003 — see [[Accuracy]].
+  took image-only PDFs from CER 0.014 to 0.004 — see [[Accuracy]].
+- **Directory and glob inputs**, in the CLI and in `scan_many`.
+- **Progress callbacks** (`Ocr.scan(progress=…)`, `ocrust scan --progress`).
+- **`doc.search()`** with word-level boxes, regex, case and whole-word options.
 
 ## Deliberately not planned
 

@@ -191,14 +191,25 @@ the boxes, and TIFF output built from the same image lines up exactly. The PDF
 overlay path is the exception: it disables deskew and rescaling for the pages it
 OCRs, because the text layer must match the *original* page.
 
-## No C, no C++, no CMake
+## What has to be compiled, and when
 
-The whole workspace is pure Rust — `cargo tree --edges build` lists no build
-scripts that compile native code. ONNX Runtime is loaded **dynamically at run
-time** (`ort` with `load-dynamic`, pointed at `libonnxruntime` by
-`ORT_DYLIB_PATH`), supplied by the `onnxruntime` PyPI wheel. Nothing is compiled
-or vendored at build time, which is what lets `pip install ocrust` work on a
-locked-down machine without admin rights.
+For anyone installing the library: **nothing**. The wheels are prebuilt (abi3, one
+per platform), and ONNX Runtime is loaded **dynamically at run time** (`ort` with
+`load-dynamic`, pointed at `libonnxruntime` by `ORT_DYLIB_PATH`) from the
+`onnxruntime` wheel, so there is no build-time linking either. That is what lets
+`pip install ocrust` work on a locked-down Windows box without admin rights.
+
+For anyone building from source: Rust, and — by default — a C compiler, for one
+reason only. The model downloader speaks HTTPS, which brings `ureq` → `rustls` →
+`ring`, and `ring` compiles C and assembly. The engine itself has no native build
+scripts at all, so this turns the tree pure Rust again:
+
+```bash
+cargo build -p ocrust-core --no-default-features --features pdf
+cargo tree -p ocrust-core --no-default-features --features pdf -i cc   # nothing
+```
+
+Models then come from the `ocrust-models` wheel or `OCRUST_MODELS_DIR`.
 
 ## Error handling
 

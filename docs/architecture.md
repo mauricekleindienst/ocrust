@@ -61,6 +61,7 @@ Source (path | bytes | RGB frame)
 | `doc` | The result model (`Document` → `Page` → `Block` → `Line` → `Word`). |
 | `export` | Text, Markdown, JSON, hOCR, ALTO, CSV writers. |
 | `export::pdf` | Searchable PDF writer, plus the WinAnsi encoder both PDF paths use. |
+| `export::cidfont` | The Unicode (Type0/Identity-H) font both PDF paths use for other scripts. |
 | `export::overlay` | Text layer added to an existing PDF via `lopdf`. |
 | `export::tiff` | Multi-page TIFF writer. |
 | `models` | Model discovery, the cache directory, bundle manifests and downloads. |
@@ -106,7 +107,18 @@ a missing typographic quote does not corrupt a word.
 
 ## PDF text layers
 
-Two different jobs, two writers:
+### Two scripts, two fonts
+
+A text layer has to write whatever the recognizer read. Base-14 WinAnsi covers
+Western Europe and nothing else, so a line containing anything outside CP1252 is
+written with a Type0 font (`export::cidfont`) whose two-byte codes are UTF-16
+code units, with a `ToUnicode` CMap mapping code to character. No font file is
+embedded: the layer is drawn in rendering mode 3, so no glyph outline is ever
+required — only positions and the text behind them. That keeps CJK, Cyrillic and
+Greek searchable without bundling a font, and the font objects are added only to
+documents that need them.
+
+### Two jobs, two writers
 
 - **`export::pdf`** builds a *new* document: each page becomes a JPEG plus an
   invisible text layer. Use it for images.
@@ -143,10 +155,23 @@ the boxes, and PDF/TIFF output built from `Page.image` lines up exactly.
 
 ## Dependencies
 
-The whole workspace is pure Rust: no C, C++ or CMake dependency, which is what
-lets the wheel install without a toolchain. ONNX Runtime is loaded dynamically at
-run time (`ORT_DYLIB_PATH`), supplied by the `onnxruntime` PyPI wheel, so nothing
-is compiled or vendored at build time either.
+Installing the wheel compiles nothing: the wheels are prebuilt (abi3, one per
+platform) and ONNX Runtime is loaded dynamically at run time (`ORT_DYLIB_PATH`)
+from the `onnxruntime` wheel, so there is no build-time linking either. That is
+the promise that matters on a locked-down machine.
+
+Building *from source* is nearly as light. The engine itself — detection,
+recognition, layout, PDF and TIFF writing, PDF rasterization through `hayro` — is
+pure Rust with no build scripts that compile anything. The one exception is the
+optional model downloader: `ureq` brings `rustls`, which brings `ring`, which
+compiles C and assembly. Turn it off and the tree is entirely Rust:
+
+```bash
+cargo build -p ocrust-core --no-default-features --features pdf
+```
+
+Models then come from the `ocrust-models` wheel or `OCRUST_MODELS_DIR` instead of
+`ocrust install-models`.
 
 ## Error handling
 

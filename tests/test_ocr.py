@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from conftest import squash
 
 
@@ -90,3 +92,43 @@ def test_models_property(engine):
     models = engine.models
     assert models["detection"].endswith(".onnx")
     assert models["recognition"].endswith(".onnx")
+
+
+def test_progress_is_reported_per_page(engine, invoice_pdf):
+    seen: list[tuple[int, int, int]] = []
+    doc = engine.scan(
+        invoice_pdf, progress=lambda page, total, lines: seen.append((page, total, lines))
+    )
+    assert seen == [(0, 1, len(doc.lines))]
+
+
+def test_a_raising_progress_callback_aborts_the_scan(engine, invoice_pdf):
+    class Stop(Exception):
+        pass
+
+    def boom(page: int, total: int, lines: int) -> None:
+        raise Stop("enough")
+
+    with pytest.raises(Stop):
+        engine.scan(invoice_pdf, progress=boom)
+
+
+def test_search_locates_text_on_a_real_scan(engine, invoice_pdf):
+    doc = engine.scan(invoice_pdf)
+    hits = doc.search("invoice")
+    assert hits, doc.text
+    assert hits[0].page == 0
+    assert hits[0].box.width > 0
+    assert doc.search("no-such-string") == ()
+
+
+def test_scan_many_reads_a_directory(engine, invoice_pdf, tmp_path):
+    folder = tmp_path / "batch"
+    folder.mkdir()
+    for name in ("a.pdf", "b.pdf"):
+        (folder / name).write_bytes(invoice_pdf.read_bytes())
+    (folder / "notes.txt").write_text("ignored")
+
+    docs = list(engine.scan_many([folder]))
+    assert len(docs) == 2
+    assert all("INVOICE" in d.text.upper() for d in docs)
