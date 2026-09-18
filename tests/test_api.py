@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
+from pathlib import Path
 
 import pytest
 
@@ -24,7 +24,7 @@ def test_runtime_info_finds_onnxruntime():
 
 
 def test_models_cache_dir_is_absolute():
-    assert os.path.isabs(ocrust.models_cache_dir())
+    assert Path(ocrust.models_cache_dir()).is_absolute()
 
 
 def test_document_from_json_builds_dataclasses():

@@ -161,6 +161,10 @@ fn text_layer(page: &crate::doc::Page, px_to_pt: f32, page_h_pt: f32) -> String 
 ///
 /// Helvetica averages roughly `0.5 em` per character, which is close enough
 /// for a layer nobody sees but everybody searches.
+pub(crate) fn horizontal_scale_for(text: &str, size: f32, target_w: f32) -> f32 {
+    horizontal_scale(text, size, target_w)
+}
+
 fn horizontal_scale(text: &str, size: f32, target_w: f32) -> f32 {
     let chars = text.chars().count().max(1) as f32;
     let natural = chars * size * 0.5;
@@ -170,22 +174,90 @@ fn horizontal_scale(text: &str, size: f32, target_w: f32) -> f32 {
     (target_w / natural * 100.0).clamp(10.0, 400.0)
 }
 
-/// Escapes a string for a PDF literal, dropping characters WinAnsi cannot hold.
-fn escape_pdf_text(text: &str) -> String {
+/// Characters WinAnsi (CP1252) places in `0x80..=0x9F`, where it differs from
+/// Latin-1. Everything else in `0xA0..=0xFF` is identical to Latin-1.
+const WINANSI_HIGH: [(u8, char); 27] = [
+    (0x80, '\u{20AC}'), // €
+    (0x82, '\u{201A}'),
+    (0x83, '\u{0192}'),
+    (0x84, '\u{201E}'), // „
+    (0x85, '\u{2026}'), // …
+    (0x86, '\u{2020}'),
+    (0x87, '\u{2021}'),
+    (0x88, '\u{02C6}'),
+    (0x89, '\u{2030}'),
+    (0x8A, '\u{0160}'),
+    (0x8B, '\u{2039}'),
+    (0x8C, '\u{0152}'), // Œ
+    (0x8E, '\u{017D}'),
+    (0x91, '\u{2018}'),
+    (0x92, '\u{2019}'),
+    (0x93, '\u{201C}'), // “
+    (0x94, '\u{201D}'), // ”
+    (0x95, '\u{2022}'),
+    (0x96, '\u{2013}'), // –
+    (0x97, '\u{2014}'), // —
+    (0x98, '\u{02DC}'),
+    (0x99, '\u{2122}'),
+    (0x9A, '\u{0161}'),
+    (0x9B, '\u{203A}'),
+    (0x9C, '\u{0153}'), // œ
+    (0x9E, '\u{017E}'),
+    (0x9F, '\u{0178}'),
+];
+
+/// Encodes `text` as a WinAnsi (CP1252) PDF string literal.
+///
+/// Returns the escaped literal and how many characters had to be replaced.
+/// WinAnsi covers Western European text — German umlauts, French accents, the
+/// euro sign — which is what a base-14 font can show; scripts beyond it need an
+/// embedded font and are reported through the replacement count.
+pub fn winansi_literal(text: &str) -> (String, usize) {
     let mut out = String::with_capacity(text.len() + 8);
+    let mut replaced = 0usize;
     for c in text.chars() {
-        match c {
-            '(' => out.push_str("\\("),
-            ')' => out.push_str("\\)"),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => out.push(' '),
-            // WinAnsi covers Latin-1 plus a few extras; anything else would be
-            // mis-decoded by readers, so it becomes a placeholder.
-            c if (c as u32) <= 0xFF => out.push(c),
-            _ => out.push('?'),
+        let byte = match c {
+            '(' => {
+                out.push_str("\\(");
+                continue;
+            }
+            ')' => {
+                out.push_str("\\)");
+                continue;
+            }
+            '\\' => {
+                out.push_str("\\\\");
+                continue;
+            }
+            c if (c as u32) < 0x20 => b' ',
+            c if (c as u32) < 0x80 => c as u8,
+            c => match WINANSI_HIGH.iter().find(|(_, mapped)| *mapped == c) {
+                Some((byte, _)) => *byte,
+                None => {
+                    let code = c as u32;
+                    if (0xA0..=0xFF).contains(&code) {
+                        code as u8
+                    } else {
+                        replaced += 1;
+                        b'?'
+                    }
+                }
+            },
+        };
+        // Bytes above 0x7F are written as octal escapes so the literal stays
+        // 7-bit clean and cannot be mangled by tooling.
+        if byte < 0x80 {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("\\{byte:03o}"));
         }
     }
-    out
+    (out, replaced)
+}
+
+/// Escapes a string for a PDF literal, dropping characters WinAnsi cannot hold.
+fn escape_pdf_text(text: &str) -> String {
+    winansi_literal(text).0
 }
 
 fn encode_jpeg(image: &RgbImage, quality: u8) -> Result<Vec<u8>> {
@@ -415,10 +487,33 @@ mod tests {
     }
 
     #[test]
-    fn non_latin_characters_do_not_corrupt_the_stream() {
-        assert_eq!(escape_pdf_text("Grüße"), "Grüße");
-        assert_eq!(escape_pdf_text("日本"), "??");
+    fn winansi_encodes_western_european_text() {
+        // ü = 0xFC, ß = 0xDF, é = 0xE9 — written as octal escapes.
+        let (literal, replaced) = winansi_literal("Grüße");
+        assert_eq!(literal, "Gr\\374\\337e");
+        assert_eq!(replaced, 0);
+        assert_eq!(winansi_literal("déjà").0, "d\\351j\\340");
+    }
+
+    #[test]
+    fn winansi_maps_the_cp1252_range() {
+        // The euro sign is 0x80 in WinAnsi but absent from Latin-1.
+        assert_eq!(winansi_literal("€").0, "\\200");
+        assert_eq!(winansi_literal("„quoted“").0, "\\204quoted\\223");
+        assert_eq!(winansi_literal("Œuvre").0, "\\214uvre");
+    }
+
+    #[test]
+    fn characters_outside_winansi_are_counted_not_smuggled() {
+        let (literal, replaced) = winansi_literal("日本語");
+        assert_eq!(literal, "???");
+        assert_eq!(replaced, 3);
+    }
+
+    #[test]
+    fn pdf_syntax_characters_are_escaped() {
         assert_eq!(escape_pdf_text("a(b)c\\"), "a\\(b\\)c\\\\");
+        assert_eq!(escape_pdf_text("tab\there"), "tab here");
     }
 
     #[test]

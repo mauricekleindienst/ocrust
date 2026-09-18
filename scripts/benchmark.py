@@ -20,15 +20,17 @@ from pathlib import Path
 from typing import Callable
 
 
-def _load_image(path: Path, dpi: float) -> "object":
+def _load_image(path: Path, dpi: float) -> object:
     """Returns the page as a numpy array, rasterizing PDFs if needed."""
     import numpy as np
 
     if path.suffix.lower() == ".pdf":
         try:
             import pypdfium2
-        except ImportError:
-            raise SystemExit("PDF input needs `pip install pypdfium2` for a neutral rasterizer")
+        except ImportError as exc:
+            raise SystemExit(
+                "PDF input needs `pip install pypdfium2` for a neutral rasterizer"
+            ) from exc
         page = pypdfium2.PdfDocument(str(path))[0]
         bitmap = page.render(scale=dpi / 72.0)
         return np.asarray(bitmap.to_pil().convert("RGB"))
@@ -108,9 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("image", type=Path, help="image or single-page PDF")
     parser.add_argument("--runs", type=int, default=5, help="timed runs per engine")
     parser.add_argument("--dpi", type=float, default=200.0, help="rasterization DPI for PDFs")
-    parser.add_argument(
-        "--only", nargs="*", choices=sorted(ENGINES), help="limit to these engines"
-    )
+    parser.add_argument("--only", nargs="*", choices=sorted(ENGINES), help="limit to these engines")
     args = parser.parse_args(argv)
 
     if not args.image.exists():

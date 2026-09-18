@@ -29,8 +29,9 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any
 
 from ._runtime import default_models_dir, ensure_runtime, runtime_report
 from ._types import Block, Box, Document, Line, Page, Word
@@ -53,6 +54,11 @@ __all__ = [
     "scan",
     "scan_many",
     "searchable_pdf",
+    "ocr_pdf",
+    "to_tiff",
+    "languages",
+    "known_languages",
+    "install_models",
     "models_cache_dir",
     "runtime_info",
     "OcrustError",
@@ -167,6 +173,10 @@ class Ocr:
         preprocess: Auto-invert, deskew and rescale pages before OCR.
         word_boxes: Compute per-word boxes (needed for hOCR/ALTO word output).
         drop_score: Minimum mean confidence for a line to be kept.
+        lang: Languages the documents are in (``"de"``, ``["de", "fr"]``,
+            ``"de,fr"``). Building the engine fails when the recognition model
+            cannot spell one of them, because a model that silently drops ``ö``
+            and ``ß`` returns text that looks right and is wrong.
     """
 
     def __init__(
@@ -192,7 +202,15 @@ class Ocr:
         rec_batch_size: int | None = None,
         rec_image_height: int | None = None,
         keep_page_images: bool = False,
+        lang: str | Sequence[str] | None = None,
     ) -> None:
+        if isinstance(lang, str):
+            languages = [part.strip() for part in lang.replace(",", " ").split() if part.strip()]
+        elif lang is None:
+            languages = None
+        else:
+            languages = [str(item) for item in lang]
+
         resolved = Path(models_dir) if models_dir is not None else default_models_dir()
         # Kept so a searchable-PDF engine can be built with the same settings.
         self._kwargs: dict[str, Any] = {
@@ -216,6 +234,7 @@ class Ocr:
             "rec_batch_size": rec_batch_size,
             "rec_image_height": rec_image_height,
             "fix_orientation": fix_orientation,
+            "languages": languages,
         }
         self._keeps_images = keep_page_images
         self._pdf_engine_cache: Any = None
@@ -285,6 +304,98 @@ class Ocr:
         else:
             for item in items:
                 yield self.scan(item)
+
+    @property
+    def languages(self) -> tuple[dict[str, str], ...]:
+        """Languages the loaded model covers completely."""
+        return tuple(
+            {"code": code, "name": name, "script": script}
+            for code, name, script in self._engine.languages()
+        )
+
+    def partial_languages(self, min_ratio: float = 0.8) -> tuple[dict[str, object], ...]:
+        """Languages the model nearly covers, with the characters it is missing."""
+        return tuple(
+            {"code": code, "name": name, "ratio": ratio, "missing": missing}
+            for code, name, ratio, missing in self._engine.partial_languages(min_ratio)
+        )
+
+    @property
+    def charset_size(self) -> int:
+        """Number of characters the recognition model can emit."""
+        return self._engine.charset_size()
+
+    def ocr_pdf(
+        self,
+        source: str | os.PathLike[str] | bytes,
+        *,
+        dpi: float | None = None,
+        skip_pages_with_text: bool = True,
+        compress: bool = True,
+    ) -> tuple[bytes, dict[str, int]]:
+        """Adds an invisible OCR text layer to an existing PDF.
+
+        The pages themselves are untouched — same images, same compression — so
+        this is the archival path: the file looks identical and becomes
+        searchable. Pages that already contain text are skipped by default.
+
+        Returns the new PDF bytes and a report with the counts.
+        """
+        data = source if isinstance(source, bytes) else Path(source).read_bytes()
+        engine = self._pdf_engine()
+        try:
+            pdf, pages, with_layer, skipped, lines, unmappable = engine.pdf_text_layer(
+                data, dpi, skip_pages_with_text, compress
+            )
+        except OcrustError:
+            raise
+        except Exception as exc:
+            raise OcrustError(str(exc)) from exc
+        return pdf, {
+            "pages": pages,
+            "pages_with_layer": with_layer,
+            "pages_skipped": skipped,
+            "lines": lines,
+            "unmappable_chars": unmappable,
+        }
+
+    def plan_pdf(
+        self,
+        source: str | os.PathLike[str] | bytes,
+        *,
+        skip_pages_with_text: bool = True,
+    ) -> tuple[dict[str, object], ...]:
+        """Reports what :meth:`ocr_pdf` would do, without running OCR."""
+        data = source if isinstance(source, bytes) else Path(source).read_bytes()
+        return tuple(
+            {
+                "index": index,
+                "width": width,
+                "height": height,
+                "rotate": rotate,
+                "needs_ocr": needs_ocr,
+            }
+            for index, width, height, rotate, needs_ocr in self._engine.plan_pdf_text_layer(
+                data, skip_pages_with_text
+            )
+        )
+
+    def to_tiff(
+        self,
+        source: str | os.PathLike[str],
+        *,
+        gray: bool = False,
+    ) -> tuple[bytes, Document]:
+        """Scans `source` and returns it as one multi-page TIFF plus the result.
+
+        The pages written are the preprocessed ones, so the archive copy is
+        already deskewed and upright.
+        """
+        try:
+            data, raw = self._engine.to_tiff(str(source), gray)
+        except Exception as exc:
+            raise OcrustError(str(exc)) from exc
+        return data, Document._from_json(json.loads(raw))
 
     def searchable_pdf(
         self,
@@ -360,6 +471,45 @@ def scan_many(sources: Iterable[Any]) -> Iterator[Document]:
 def searchable_pdf(source: str | os.PathLike[str], **kwargs: Any) -> bytes:
     """Produces a searchable PDF for `source` with the default engine."""
     return _default().searchable_pdf(source, **kwargs)
+
+
+def ocr_pdf(source: Any, **kwargs: Any) -> tuple[bytes, dict[str, int]]:
+    """Adds an OCR text layer to a PDF using the default engine."""
+    return _default().ocr_pdf(source, **kwargs)
+
+
+def to_tiff(source: Any, **kwargs: Any) -> tuple[bytes, Document]:
+    """Converts a document to a multi-page TIFF using the default engine."""
+    return _default().to_tiff(source, **kwargs)
+
+
+def languages() -> tuple[dict[str, str], ...]:
+    """Languages the installed model covers completely."""
+    return _default().languages
+
+
+def known_languages() -> tuple[dict[str, str], ...]:
+    """Every language ocrust can validate, whether or not a model covers it."""
+    return tuple(
+        {"code": code, "name": name, "script": script}
+        for code, name, script in _ocrust.known_languages()
+    )
+
+
+def install_models() -> dict[str, str | None]:
+    """Downloads the bundled model set from GitHub into the model cache.
+
+    Only needed when the ``ocrust-models`` wheel is not installed. Everything is
+    fetched from ``raw.githubusercontent.com`` and checksum-verified, so a
+    network that allows GitHub and nothing else is enough.
+    """
+    detection, recognition, orientation, dictionary = _ocrust.install_models()
+    return {
+        "detection": detection,
+        "recognition": recognition,
+        "orientation": orientation,
+        "dictionary": dictionary,
+    }
 
 
 def models_cache_dir() -> str:

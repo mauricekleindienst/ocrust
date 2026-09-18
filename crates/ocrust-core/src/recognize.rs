@@ -101,6 +101,11 @@ impl TextRecognizer {
         self.num_classes
     }
 
+    /// The model's character set, for language-coverage checks.
+    pub fn dict(&self) -> &CharDict {
+        &self.dict
+    }
+
     /// Recognizes a batch of line crops, preserving input order.
     ///
     /// Crops are grouped by aspect ratio so that padding stays small, which is

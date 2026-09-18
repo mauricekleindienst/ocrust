@@ -7,11 +7,24 @@
 
 use std::path::PathBuf;
 
+use ocrust_core::export::overlay::{OverlayOptions, OverlayReport};
 use ocrust_core::export::pdf::{build_with_images, PdfOptions};
-use ocrust_core::{Device, Document, EngineConfig, Format, Source};
+use ocrust_core::export::tiff::TiffColor;
+use ocrust_core::{lang, Device, Document, EngineConfig, Format, Source};
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
+
+/// One model bundle as Python sees it: detection, recognition, orientation and
+/// dictionary paths.
+type ModelPathsTuple = (String, String, Option<String>, Option<String>);
+
+/// One planned overlay page: index, width, height, rotation and whether it
+/// needs OCR.
+type PagePlanTuple = (usize, f32, f32, i64, bool);
+
+/// A written text layer: the PDF plus the counts from the run.
+type TextLayerResult<'py> = (Bound<'py, PyBytes>, usize, usize, usize, usize, usize);
 
 /// Maps engine errors onto the Python exception a caller would expect.
 fn to_py_err(e: ocrust_core::Error) -> PyErr {
@@ -55,6 +68,7 @@ impl PyEngine {
         rec_batch_size = None,
         rec_image_height = None,
         fix_orientation = true,
+        languages = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -78,6 +92,7 @@ impl PyEngine {
         rec_batch_size: Option<usize>,
         rec_image_height: Option<u32>,
         fix_orientation: bool,
+        languages: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let mut config = EngineConfig::new();
         config.models.directory = models_dir;
@@ -126,12 +141,16 @@ impl PyEngine {
             config.recognizer.image_height = v;
         }
 
+        if let Some(codes) = languages {
+            config = config.with_languages(codes).map_err(to_py_err)?;
+        }
+
         let inner = ocrust_core::Engine::new(config).map_err(to_py_err)?;
         Ok(Self { inner })
     }
 
     /// The model files in use, as `(detection, recognition, orientation, dictionary)`.
-    fn models(&self) -> (String, String, Option<String>, Option<String>) {
+    fn models(&self) -> ModelPathsTuple {
         let set = self.inner.model_set();
         (
             set.detection.display().to_string(),
@@ -239,6 +258,126 @@ impl PyEngine {
         Ok(PyBytes::new(py, &bytes.map_err(to_py_err)?))
     }
 
+    /// Languages the loaded recognition model covers completely.
+    ///
+    /// Each entry is `(code, name, script)`.
+    fn languages(&self) -> Vec<(String, String, String)> {
+        self.inner
+            .supported_languages()
+            .into_iter()
+            .map(|l| {
+                (
+                    l.code.to_string(),
+                    l.name.to_string(),
+                    l.script.name().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Languages the model nearly covers: `(code, name, ratio, missing)`.
+    #[pyo3(signature = (min_ratio = 0.8))]
+    fn partial_languages(&self, min_ratio: f32) -> Vec<(String, String, f32, String)> {
+        self.inner
+            .partial_languages(min_ratio)
+            .into_iter()
+            .map(|c| {
+                (
+                    c.language.code.to_string(),
+                    c.language.name.to_string(),
+                    c.ratio(),
+                    c.missing_display(),
+                )
+            })
+            .collect()
+    }
+
+    /// Number of characters the recognition model can emit.
+    fn charset_size(&self) -> usize {
+        self.inner.charset_size()
+    }
+
+    /// Adds an invisible OCR text layer to an existing PDF.
+    ///
+    /// Returns the new PDF and a report: `(pdf, pages, pages_with_layer,
+    /// pages_skipped, lines, unmappable_chars)`.
+    #[pyo3(signature = (data, dpi = None, skip_pages_with_text = true, compress = true))]
+    fn pdf_text_layer<'py>(
+        &self,
+        py: Python<'py>,
+        data: Vec<u8>,
+        dpi: Option<f32>,
+        skip_pages_with_text: bool,
+        compress: bool,
+    ) -> PyResult<TextLayerResult<'py>> {
+        let options = OverlayOptions {
+            dpi: dpi.unwrap_or(self.inner.config().ingest.pdf_dpi),
+            skip_pages_with_text,
+            compress,
+        };
+        let outcome: ocrust_core::Result<(Vec<u8>, OverlayReport)> =
+            py.detach(|| self.inner.add_pdf_text_layer(&data, &options));
+        let (bytes, report) = outcome.map_err(to_py_err)?;
+        Ok((
+            PyBytes::new(py, &bytes),
+            report.pages,
+            report.pages_with_layer,
+            report.pages_skipped,
+            report.lines,
+            report.unmappable_chars,
+        ))
+    }
+
+    /// Reports what `pdf_text_layer` would do: one
+    /// `(index, width, height, rotate, needs_ocr)` per page.
+    #[pyo3(signature = (data, skip_pages_with_text = true))]
+    fn plan_pdf_text_layer(
+        &self,
+        data: Vec<u8>,
+        skip_pages_with_text: bool,
+    ) -> PyResult<Vec<PagePlanTuple>> {
+        let options = OverlayOptions {
+            skip_pages_with_text,
+            ..Default::default()
+        };
+        let plans = self
+            .inner
+            .plan_pdf_text_layer(&data, &options)
+            .map_err(to_py_err)?;
+        Ok(plans
+            .into_iter()
+            .map(|p| {
+                (
+                    p.index,
+                    p.page_box.width,
+                    p.page_box.height,
+                    p.page_box.rotate,
+                    p.needs_ocr,
+                )
+            })
+            .collect())
+    }
+
+    /// Scans `path` and returns `(multipage_tiff, document_json)`.
+    #[pyo3(signature = (path, gray = false))]
+    fn to_tiff<'py>(
+        &self,
+        py: Python<'py>,
+        path: PathBuf,
+        gray: bool,
+    ) -> PyResult<(Bound<'py, PyBytes>, String)> {
+        let color = if gray {
+            TiffColor::Gray
+        } else {
+            TiffColor::Rgb
+        };
+        let outcome = py.detach(|| self.inner.to_tiff(&Source::path(path), color));
+        let (bytes, doc) = outcome.map_err(to_py_err)?;
+        let json =
+            serde_json::to_string(&doc).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok((PyBytes::new(py, &bytes), json))
+    }
+
     fn __repr__(&self) -> String {
         let set = self.inner.model_set();
         format!(
@@ -302,6 +441,42 @@ fn resolve_models(
     ))
 }
 
+/// Every language `ocrust` can validate: `(code, name, script)`.
+#[pyfunction]
+fn known_languages() -> Vec<(String, String, String)> {
+    lang::all()
+        .iter()
+        .map(|l| {
+            (
+                l.code.to_string(),
+                l.name.to_string(),
+                l.script.name().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Downloads the bundled model set from GitHub into the model cache.
+///
+/// Returns the resolved `(detection, recognition, orientation, dictionary)`
+/// paths. Files already present with the right checksum are kept.
+#[pyfunction]
+fn install_models(py: Python<'_>) -> PyResult<ModelPathsTuple> {
+    let set = py.detach(|| -> ocrust_core::Result<ocrust_core::ModelSet> {
+        let manifest = ocrust_core::models::builtin_manifest()?;
+        ocrust_core::models::install(&manifest, &mut |name, done, total| {
+            log::info!("ocrust: fetched {name} ({done}/{total})");
+        })
+    });
+    let set = set.map_err(to_py_err)?;
+    Ok((
+        set.detection.display().to_string(),
+        set.recognition.display().to_string(),
+        set.orientation.as_ref().map(|p| p.display().to_string()),
+        set.dictionary.as_ref().map(|p| p.display().to_string()),
+    ))
+}
+
 /// The default model cache directory.
 #[pyfunction]
 fn models_cache_dir() -> String {
@@ -316,5 +491,7 @@ fn _ocrust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(runtime_version, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_models, m)?)?;
     m.add_function(wrap_pyfunction!(models_cache_dir, m)?)?;
+    m.add_function(wrap_pyfunction!(known_languages, m)?)?;
+    m.add_function(wrap_pyfunction!(install_models, m)?)?;
     Ok(())
 }

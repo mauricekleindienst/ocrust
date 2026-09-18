@@ -231,6 +231,32 @@ pub struct ManifestFile {
     pub size: Option<u64>,
 }
 
+/// The manifest of the model bundle shipped with this repository.
+///
+/// Every URL points at `raw.githubusercontent.com`, so a network that allows
+/// GitHub and nothing else is enough to install models.
+pub const BUILTIN_MANIFEST: &str = include_str!("../../../models/ppocrv6.json");
+
+/// Git ref the built-in manifest downloads from.
+///
+/// Override with `OCRUST_MODEL_REF` to install models from a branch, tag or
+/// commit other than the default.
+pub fn manifest_ref() -> String {
+    std::env::var("OCRUST_MODEL_REF").unwrap_or_else(|_| "main".to_string())
+}
+
+/// The bundle `ocrust models install` uses by default.
+pub fn builtin_manifest() -> Result<Manifest> {
+    let mut manifest = Manifest::parse(BUILTIN_MANIFEST)?;
+    let git_ref = manifest_ref();
+    for file in &mut manifest.files {
+        for url in &mut file.urls {
+            *url = url.replace("{ref}", &git_ref);
+        }
+    }
+    Ok(manifest)
+}
+
 /// A named model bundle that can be installed from the network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -437,6 +463,40 @@ mod tests {
         dir.touch("only_rec.onnx");
         let set = resolve_in(&dir.0).unwrap();
         assert!(set.detection.starts_with(&dir.0));
+    }
+
+    #[test]
+    fn builtin_manifest_points_at_github_and_carries_checksums() {
+        let manifest = builtin_manifest().unwrap();
+        assert_eq!(manifest.name, "ppocrv6");
+        assert_eq!(manifest.files.len(), 3);
+        for file in &manifest.files {
+            assert_eq!(file.sha256.len(), 64, "{} has no sha256", file.name);
+            assert!(file.size.unwrap_or(0) > 0, "{} has no size", file.name);
+            assert!(!file.urls.is_empty());
+            for url in &file.urls {
+                assert!(
+                    url.starts_with("https://raw.githubusercontent.com/"),
+                    "{url} is not a GitHub source"
+                );
+                assert!(!url.contains("{ref}"), "ref placeholder left in {url}");
+            }
+        }
+        // Detection, recognition and orientation must all be covered.
+        let names: Vec<&str> = manifest.files.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.iter().any(|n| n.contains("det")), "{names:?}");
+        assert!(names.iter().any(|n| n.contains("rec")), "{names:?}");
+        assert!(names.iter().any(|n| n.contains("cls")), "{names:?}");
+    }
+
+    #[test]
+    fn manifest_ref_is_overridable() {
+        // Default ref plus the documented override knob.
+        assert!(!manifest_ref().is_empty());
+        assert!(
+            BUILTIN_MANIFEST.contains("{ref}"),
+            "template keeps the placeholder"
+        );
     }
 
     #[test]

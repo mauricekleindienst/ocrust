@@ -77,6 +77,22 @@ impl CharDict {
         self.classes.len() <= 1
     }
 
+    /// True when the model can emit `c` as a character of its own.
+    ///
+    /// Multi-character classes (a few PP-OCR exports contain ligature-like
+    /// entries) count as containing each of their characters.
+    pub fn contains(&self, c: char) -> bool {
+        self.classes
+            .iter()
+            .skip(1)
+            .any(|class| class.chars().any(|k| k == c))
+    }
+
+    /// Every character the model can emit, in class order.
+    pub fn chars(&self) -> impl Iterator<Item = char> + '_ {
+        self.classes.iter().skip(1).flat_map(|c| c.chars())
+    }
+
     /// Text for a logit index, or `None` for blank / out-of-range.
     pub fn get(&self, index: usize) -> Option<&str> {
         match self.classes.get(index) {
@@ -110,6 +126,16 @@ mod tests {
     fn mismatch_is_reported() {
         let err = CharDict::from_lines(["a", "b"], Some(99)).unwrap_err();
         assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    #[test]
+    fn contains_and_chars_expose_the_charset() {
+        let d = CharDict::from_lines(["a", "ä", "ß"], None).unwrap();
+        assert!(d.contains('ä'));
+        assert!(d.contains('ß'));
+        assert!(!d.contains('ö'));
+        // The blank class is never a character.
+        assert_eq!(d.chars().count(), 3);
     }
 
     #[test]

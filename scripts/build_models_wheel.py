@@ -71,9 +71,7 @@ def _wanted(path: Path) -> bool:
     if path.suffix.lower() == ".onnx":
         return True
     name = path.name.lower()
-    return path.suffix.lower() == ".txt" and any(
-        key in name for key in ("dict", "keys", "charset")
-    )
+    return path.suffix.lower() == ".txt" and any(key in name for key in ("dict", "keys", "charset"))
 
 
 def _record_line(arcname: str, data: bytes) -> str:
@@ -122,7 +120,9 @@ def build(models_dir: Path, out_dir: Path, version: str) -> Path:
             zf.writestr(f"{dist_info}/RECORD", record)
         shutil.rmtree(staging, ignore_errors=True)
 
-    print(f"\n{wheel_path} ({wheel_path.stat().st_size / 1e6:.1f} MB, {total / 1e6:.1f} MB of models)")
+    print(
+        f"\n{wheel_path} ({wheel_path.stat().st_size / 1e6:.1f} MB, {total / 1e6:.1f} MB of models)"
+    )
     return wheel_path
 
 
