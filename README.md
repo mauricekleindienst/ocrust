@@ -152,6 +152,11 @@ search box that highlights hits, and a one-click searchable PDF. It doubles as a
 tiny HTTP API (`POST /scan`, `POST /pdf`, `GET /languages`) — see
 [`examples/README.md`](examples/README.md).
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="An aged German invoice, read and searched"
+       width="900">
+</p>
+
 ## Every input format
 
 | | formats |
