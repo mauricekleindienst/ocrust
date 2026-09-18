@@ -114,6 +114,10 @@ What is still weak, and why:
   argument for treating table structure as unfinished rather than tuned.
 - **Greek** is the weakest language in the bundle (0.180, recall 0.536).
 
+The PDF text layer has nothing left to lose: over the 39 PDFs, **0 characters**
+fall outside what the layer can write (it was 340 before the Unicode font), and a
+layered document grows by 3.2 KB on average — the font objects included.
+
 ### Speed findings
 
 | measurement | result |

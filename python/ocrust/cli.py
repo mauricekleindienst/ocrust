@@ -78,6 +78,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--lang",
         help="languages to require, e.g. de or de,fr (fails when the model cannot spell them)",
     )
+    scan.add_argument(
+        "--progress",
+        action="store_true",
+        help="report each page on stderr while reading (long PDFs)",
+    )
     scan.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
     pdf = sub.add_parser("pdf", help="write a searchable PDF (image plus text layer)")
@@ -265,14 +270,22 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if write_to_dir:
         args.output.mkdir(parents=True, exist_ok=True)
 
+    def report(page: int, total: int, lines: int) -> None:
+        print(f"\r  page {page + 1}/{total}, {lines} line(s)", end="", file=sys.stderr, flush=True)
+
+    progress = report if getattr(args, "progress", False) else None
+
     failures = 0
     for path in args.inputs:
         try:
-            doc = engine.scan(path, pages=pages)
+            doc = engine.scan(path, pages=pages, progress=progress)
         except (OcrustError, OSError, ValueError) as exc:
             print(f"ocrust: {path}: {exc}", file=sys.stderr)
             failures += 1
             continue
+
+        if progress is not None:
+            print("", file=sys.stderr)  # close the progress line
 
         rendered = doc.render(args.format)
         if args.output is None:

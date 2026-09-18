@@ -61,17 +61,27 @@ page 3: 612x792 pt -> skip (has text)
 
 ### The text layer's character set
 
-The layer uses a base-14 WinAnsi font, which covers Western European text
-including German umlauts, French accents and the euro sign. Characters outside
-it — CJK, Cyrillic, Greek — are counted in `unmappable_chars` and written as `?`
-**in the invisible layer only**. The visible page is never modified, and the
-recognized text is still complete in every other output format:
+Any script the recognizer can read ends up in the layer. Western European text
+uses a base-14 WinAnsi font, exactly as before; a line with anything else — CJK,
+Cyrillic, Greek — is written with a Type0 font whose two-byte codes are UTF-16
+code units, plus a `ToUnicode` map that says so. Nothing is embedded, because
+nothing is drawn: the layer is invisible, so no glyph outline is ever needed, and
+the wheel stays free of a bundled font and its license.
 
-```bash
-ocrust scan scan.pdf -f json -o scan.json   # full text, whatever the script
+```python
+pdf, report = ocrust.ocr_pdf("請求書.pdf")
+report["unmappable_chars"]     # 0 — the Japanese text is in the layer
 ```
 
-Embedding a Unicode font for the text layer is on the roadmap.
+```console
+$ python -c "from pypdf import PdfReader; print(PdfReader('請求書.ocr.pdf').pages[0].extract_text())"
+請求書 2026-04-1187
+株式会社ミュンヘン機械
+```
+
+`unmappable_chars` therefore counts what the layer really lost, which is now
+nothing in practice. The Unicode font is added only when a page needs it, so a
+Western document contains exactly the objects it did before.
 
 ## Building a PDF from images
 

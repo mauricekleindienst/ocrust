@@ -29,12 +29,12 @@ from __future__ import annotations
 import json
 import os
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from ._runtime import default_models_dir, ensure_runtime, runtime_report
-from ._types import Block, Box, Document, Line, Page, Word
+from ._types import Block, Box, Document, Line, Match, Page, Word
 
 # The extension dlopens libonnxruntime on first use, so the path has to be in
 # the environment before it is imported.
@@ -49,6 +49,7 @@ __all__ = [
     "Block",
     "Line",
     "Word",
+    "Match",
     "Box",
     "read",
     "scan",
@@ -152,6 +153,56 @@ def _coerce_image(obj: Any) -> tuple[bytes, int, int] | None:
     array = np.ascontiguousarray(array)
     height, width = array.shape[:2]
     return array.tobytes(), width, height
+
+
+#: Suffixes worth reading when a directory is handed to :meth:`Ocr.scan_many`.
+#: Content sniffing decides what a file really is, but a folder should not be
+#: opened blind.
+READABLE_SUFFIXES = frozenset(
+    {
+        ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
+        ".pnm", ".pbm", ".pgm", ".ppm", ".tga", ".dds", ".hdr", ".exr",
+        ".qoi", ".ico", ".pdf",
+    }
+)  # fmt: skip
+
+
+def _expand_sources(sources: Iterable[Any]) -> list[Any]:
+    """Expands directories and glob patterns, keeping everything else as is.
+
+    Files the caller named stay exactly as given, duplicates included — one
+    document comes back per input, which is what makes ``zip(paths, docs)``
+    work. Only *expanded* files are de-duplicated, because two overlapping
+    patterns should not read the same file twice.
+    """
+    out: list[Any] = []
+    expanded: set[Path] = set()
+
+    def add_expanded(found: Iterable[Path]) -> None:
+        for item in found:
+            if item not in expanded:
+                expanded.add(item)
+                out.append(item)
+
+    for source in sources:
+        if not isinstance(source, (str, os.PathLike)):
+            out.append(source)
+            continue
+        path = Path(source)
+        if path.is_dir():
+            add_expanded(
+                sorted(
+                    child
+                    for child in path.rglob("*")
+                    if child.is_file() and child.suffix.lower() in READABLE_SUFFIXES
+                )
+            )
+        elif not path.exists() and any(ch in str(path) for ch in "*?["):
+            base = path.parent if str(path.parent) else Path()
+            add_expanded(sorted(item for item in base.glob(path.name) if item.is_file()))
+        else:
+            out.append(path)
+    return out
 
 
 class Ocr:
@@ -262,6 +313,7 @@ class Ocr:
         *,
         pages: Sequence[int] | None = None,
         name: str | None = None,
+        progress: Callable[[int, int, int], None] | None = None,
     ) -> Document:
         """Scans a path, bytes, numpy array or PIL image.
 
@@ -269,6 +321,9 @@ class Ocr:
             source: File path, encoded bytes, ``numpy`` array or PIL image.
             pages: Zero-based page indices to read from a multi-page source.
             name: Label used in the result when `source` is not a path.
+            progress: Called after every page with ``(page_index, total_pages,
+                lines)``. A 30-page PDF takes half a minute; this is how you show
+                that something is happening. Raising inside it aborts the scan.
         """
         page_list = list(pages) if pages is not None else None
 
@@ -277,9 +332,9 @@ class Ocr:
             data, width, height = image
             raw = self._engine.scan_rgb(data, width, height, name or "<image>")
         elif isinstance(source, (bytes, bytearray, memoryview)):
-            raw = self._engine.scan_bytes(bytes(source), name or "<bytes>", page_list)
+            raw = self._engine.scan_bytes(bytes(source), name or "<bytes>", page_list, progress)
         elif isinstance(source, (str, os.PathLike)):
-            raw = self._engine.scan_path(str(source), page_list)
+            raw = self._engine.scan_path(str(source), page_list, progress)
         else:
             raise TypeError(
                 f"cannot scan {type(source).__name__}; pass a path, bytes, numpy array or PIL image"
@@ -294,9 +349,11 @@ class Ocr:
         """Scans several inputs, using all page workers.
 
         Paths are handed to the Rust side in one batch so documents are scanned
-        in parallel; other inputs fall back to one call each.
+        in parallel; other inputs fall back to one call each. A directory or a
+        glob pattern stands for the readable files inside it, sorted, so
+        ``scan_many(["archive/"])`` does what it looks like.
         """
-        items = list(sources)
+        items = _expand_sources(sources)
         if items and all(isinstance(s, (str, os.PathLike)) for s in items):
             for raw in self._engine.scan_many([str(s) for s in items]):
                 payload = json.loads(raw)

@@ -9,7 +9,7 @@ releases.
 - corpus: **106 files**, 191 recognized pages, 416 MB
 - models: `ppocrv6_rec.onnx`, 18709 characters, 27 languages
 - runtime: 1.30.0 · 4 CPU cores
-- total scan time: **157.3 s** (823 ms per page)
+- total scan time: **160.9 s** (842 ms per page)
 - accuracy over 100 files with ground truth: **mean CER 0.040**, median 0.006, mean WER 0.120, **mean word recall 0.892**
 - failures: 5 total, **0 unexpected**, 0 broken file(s) that did not error
 
@@ -17,29 +17,29 @@ releases.
 
 | category | files | ok | pages | ms/page | mean CER | median CER | mean WER | word recall | confidence |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| aged | 8 | 8 | 8 | 713 | 0.006 | 0.006 | 0.063 | 0.937 | 0.986 |
-| aged-pdf | 8 | 8 | 8 | 722 | 0.008 | 0.007 | 0.095 | 0.905 | 0.986 |
-| blank | 1 | 1 | 1 | 299 | — | — | — | — | — |
-| born-digital | 2 | 2 | 4 | 620 | 0.002 | 0.002 | 0.010 | 0.990 | 0.993 |
-| broken | 6 | 1 | 1 | 650 | 0.000 | 0.000 | 0.000 | 1.000 | 0.995 |
-| clean | 14 | 14 | 14 | 663 | 0.033 | 0.003 | 0.155 | 0.845 | 0.983 |
-| clean-pdf | 14 | 14 | 14 | 677 | 0.042 | 0.006 | 0.208 | 0.792 | 0.977 |
+| aged | 8 | 8 | 8 | 706 | 0.006 | 0.006 | 0.063 | 0.937 | 0.986 |
+| aged-pdf | 8 | 8 | 8 | 783 | 0.008 | 0.007 | 0.095 | 0.905 | 0.986 |
+| blank | 1 | 1 | 1 | 289 | — | — | — | — | — |
+| born-digital | 2 | 2 | 4 | 670 | 0.002 | 0.002 | 0.010 | 0.990 | 0.993 |
+| broken | 6 | 1 | 1 | 1091 | 0.000 | 0.000 | 0.000 | 1.000 | 0.995 |
+| clean | 14 | 14 | 14 | 651 | 0.033 | 0.003 | 0.155 | 0.845 | 0.983 |
+| clean-pdf | 14 | 14 | 14 | 695 | 0.042 | 0.006 | 0.208 | 0.792 | 0.977 |
 | drawing | 4 | 4 | 4 | 583 | 0.170 | 0.168 | 0.276 | 0.855 | 0.986 |
-| drawing-pdf | 4 | 4 | 4 | 644 | 0.166 | 0.166 | 0.250 | 0.882 | 0.984 |
-| fax | 4 | 4 | 4 | 547 | 0.014 | 0.013 | 0.133 | 0.867 | 0.978 |
-| fax-pdf | 4 | 4 | 4 | 644 | 0.014 | 0.015 | 0.109 | 0.897 | 0.975 |
-| form | 4 | 4 | 4 | 628 | 0.063 | 0.063 | 0.256 | 0.744 | 0.990 |
-| format | 8 | 8 | 8 | 638 | 0.001 | 0.000 | 0.023 | 0.977 | 0.994 |
-| huge | 1 | 1 | 1 | 30290 | 0.147 | 0.147 | 0.211 | 0.895 | 0.989 |
-| inverted | 1 | 1 | 1 | 604 | 0.003 | 0.003 | 0.020 | 0.980 | 0.994 |
-| long | 1 | 1 | 1 | 2594 | 0.054 | 0.054 | 0.109 | 0.891 | 0.992 |
-| multipage-pdf | 3 | 3 | 47 | 673 | 0.004 | 0.004 | 0.043 | 0.957 | 0.988 |
-| multipage-tiff | 3 | 3 | 47 | 623 | 0.003 | 0.003 | 0.017 | 0.983 | 0.991 |
-| newspaper | 4 | 4 | 4 | 1131 | 0.003 | 0.003 | 0.023 | 0.977 | 0.995 |
-| receipt | 4 | 4 | 4 | 406 | 0.183 | 0.183 | 0.059 | 0.941 | 0.995 |
-| rotated-pdf | 3 | 3 | 3 | 885 | 0.054 | 0.079 | 0.116 | 0.884 | 0.972 |
-| skewed | 4 | 4 | 4 | 744 | 0.000 | 0.000 | 0.000 | 1.000 | 0.992 |
-| tiny | 1 | 1 | 1 | 412 | 0.006 | 0.006 | 0.111 | 0.889 | 0.992 |
+| drawing-pdf | 4 | 4 | 4 | 639 | 0.166 | 0.166 | 0.250 | 0.882 | 0.984 |
+| fax | 4 | 4 | 4 | 567 | 0.014 | 0.013 | 0.133 | 0.867 | 0.978 |
+| fax-pdf | 4 | 4 | 4 | 602 | 0.014 | 0.015 | 0.109 | 0.897 | 0.975 |
+| form | 4 | 4 | 4 | 598 | 0.063 | 0.063 | 0.256 | 0.744 | 0.990 |
+| format | 8 | 8 | 8 | 714 | 0.001 | 0.000 | 0.023 | 0.977 | 0.994 |
+| huge | 1 | 1 | 1 | 30267 | 0.147 | 0.147 | 0.211 | 0.895 | 0.989 |
+| inverted | 1 | 1 | 1 | 591 | 0.003 | 0.003 | 0.020 | 0.980 | 0.994 |
+| long | 1 | 1 | 1 | 2524 | 0.054 | 0.054 | 0.109 | 0.891 | 0.992 |
+| multipage-pdf | 3 | 3 | 47 | 675 | 0.004 | 0.004 | 0.043 | 0.957 | 0.988 |
+| multipage-tiff | 3 | 3 | 47 | 639 | 0.003 | 0.003 | 0.017 | 0.983 | 0.991 |
+| newspaper | 4 | 4 | 4 | 1108 | 0.003 | 0.003 | 0.023 | 0.977 | 0.995 |
+| receipt | 4 | 4 | 4 | 385 | 0.183 | 0.183 | 0.059 | 0.941 | 0.995 |
+| rotated-pdf | 3 | 3 | 3 | 891 | 0.054 | 0.079 | 0.116 | 0.884 | 0.972 |
+| skewed | 4 | 4 | 4 | 805 | 0.000 | 0.000 | 0.000 | 1.000 | 0.992 |
+| tiny | 1 | 1 | 1 | 406 | 0.006 | 0.006 | 0.111 | 0.889 | 0.992 |
 
 ## By language
 
@@ -57,33 +57,33 @@ releases.
 
 | file | category | CER | WER | word recall | confidence | ms |
 |---|---|---:|---:|---:|---:|---:|
-| `drawings/drawing_01.png` | drawing | 0.206 | 0.342 | 0.763 | 0.988 | 563 |
-| `drawings/drawing_01.pdf` | drawing-pdf | 0.197 | 0.316 | 0.789 | 0.982 | 650 |
-| `drawings/drawing_03.pdf` | drawing-pdf | 0.197 | 0.316 | 0.789 | 0.985 | 620 |
-| `drawings/drawing_03.png` | drawing | 0.197 | 0.289 | 0.816 | 0.984 | 525 |
-| `clean/el_200dpi.pdf` | clean-pdf | 0.192 | 0.464 | 0.536 | 0.916 | 605 |
-| `receipts/receipt_00.png` | receipt | 0.183 | 0.059 | 0.941 | 0.995 | 378 |
-| `receipts/receipt_01.png` | receipt | 0.183 | 0.059 | 0.941 | 0.995 | 388 |
-| `receipts/receipt_02.png` | receipt | 0.183 | 0.059 | 0.941 | 0.995 | 381 |
-| `receipts/receipt_03.png` | receipt | 0.183 | 0.059 | 0.941 | 0.995 | 479 |
-| `clean/el_300dpi.pdf` | clean-pdf | 0.183 | 0.464 | 0.536 | 0.916 | 621 |
-| `clean/el_200dpi.png` | clean | 0.178 | 0.464 | 0.536 | 0.940 | 584 |
-| `clean/el_300dpi.png` | clean | 0.168 | 0.464 | 0.536 | 0.937 | 645 |
+| `drawings/drawing_01.png` | drawing | 0.206 | 0.342 | 0.763 | 0.988 | 556 |
+| `drawings/drawing_01.pdf` | drawing-pdf | 0.197 | 0.316 | 0.789 | 0.982 | 640 |
+| `drawings/drawing_03.pdf` | drawing-pdf | 0.197 | 0.316 | 0.789 | 0.985 | 630 |
+| `drawings/drawing_03.png` | drawing | 0.197 | 0.289 | 0.816 | 0.984 | 545 |
+| `clean/el_200dpi.pdf` | clean-pdf | 0.192 | 0.464 | 0.536 | 0.916 | 600 |
+| `receipts/receipt_00.png` | receipt | 0.183 | 0.059 | 0.941 | 0.995 | 385 |
+| `receipts/receipt_01.png` | receipt | 0.183 | 0.059 | 0.941 | 0.995 | 391 |
+| `receipts/receipt_02.png` | receipt | 0.183 | 0.059 | 0.941 | 0.995 | 389 |
+| `receipts/receipt_03.png` | receipt | 0.183 | 0.059 | 0.941 | 0.995 | 375 |
+| `clean/el_300dpi.pdf` | clean-pdf | 0.183 | 0.464 | 0.536 | 0.916 | 596 |
+| `clean/el_200dpi.png` | clean | 0.178 | 0.464 | 0.536 | 0.940 | 560 |
+| `clean/el_300dpi.png` | clean | 0.168 | 0.464 | 0.536 | 0.937 | 638 |
 
 ## Slowest files
 
 | file | bytes | pages | seconds | pages/s | MB/s |
 |---|---:|---:|---:|---:|---:|
-| `extremes/a0_drawing_300dpi.png` | 0.3 MB | 1 | 30.29 | 0.03 | 0.0 |
-| `multipage/scan_30p.pdf` | 2.5 MB | 30 | 20.01 | 1.50 | 0.1 |
-| `multipage/scan_30p.tiff` | 195.6 MB | 30 | 18.48 | 1.62 | 10.6 |
-| `multipage/scan_12p.pdf` | 1.0 MB | 12 | 8.17 | 1.47 | 0.1 |
-| `multipage/scan_12p.tiff` | 78.3 MB | 12 | 7.54 | 1.59 | 10.4 |
-| `multipage/scan_5p.pdf` | 0.4 MB | 5 | 3.36 | 1.49 | 0.1 |
-| `multipage/scan_5p.tiff` | 32.6 MB | 5 | 3.13 | 1.60 | 10.4 |
-| `extremes/long_receipt.png` | 0.2 MB | 1 | 2.59 | 0.39 | 0.1 |
-| `borndigital/report_text_3p.pdf` | 0.0 MB | 3 | 1.76 | 1.71 | 0.0 |
-| `newspaper/news_00.png` | 0.1 MB | 1 | 1.27 | 0.79 | 0.1 |
+| `extremes/a0_drawing_300dpi.png` | 0.3 MB | 1 | 30.27 | 0.03 | 0.0 |
+| `multipage/scan_30p.pdf` | 2.5 MB | 30 | 20.64 | 1.45 | 0.1 |
+| `multipage/scan_30p.tiff` | 195.6 MB | 30 | 20.04 | 1.50 | 9.8 |
+| `multipage/scan_12p.pdf` | 1.0 MB | 12 | 8.26 | 1.45 | 0.1 |
+| `multipage/scan_12p.tiff` | 78.3 MB | 12 | 7.59 | 1.58 | 10.3 |
+| `multipage/scan_5p.pdf` | 0.4 MB | 5 | 3.25 | 1.54 | 0.1 |
+| `multipage/scan_5p.tiff` | 32.6 MB | 5 | 3.08 | 1.62 | 10.6 |
+| `extremes/long_receipt.png` | 0.2 MB | 1 | 2.52 | 0.40 | 0.1 |
+| `borndigital/report_text_3p.pdf` | 0.0 MB | 3 | 1.84 | 1.63 | 0.0 |
+| `newspaper/news_01.png` | 0.1 MB | 1 | 1.24 | 0.80 | 0.1 |
 
 ## Failures
 
@@ -103,7 +103,7 @@ Rendered from `clean/cs_200dpi.png`:
 |---|---:|---:|
 | text | 309 | 0.4 |
 | markdown | 310 | 0.2 |
-| json | 25926 | 0.3 |
+| json | 25919 | 0.3 |
 | hocr | 6730 | 0.2 |
 | alto | 6580 | 0.2 |
 | csv | 736 | 0.2 |
@@ -112,9 +112,9 @@ Rendered from `clean/cs_200dpi.png`:
 
 - 39 PDFs processed, 38 succeeded
 - 80 page(s) got a layer, 4 skipped because they already had text
-- mean time 1.43 s per document
-- mean growth 1.2 KB
-- 340 character(s) outside WinAnsi in the text layer
+- mean time 1.41 s per document
+- mean growth 3.2 KB
+- 0 character(s) outside WinAnsi in the text layer
 - 36 document(s) without a detectable text layer
 
 | file | error |
@@ -125,12 +125,12 @@ Rendered from `clean/cs_200dpi.png`:
 
 | file | pages | colour | greyscale | seconds |
 |---|---:|---:|---:|---:|
-| `aged/aged_00_de.pdf` | 1 | 11.6 MB | 3.9 MB | 0.75 |
-| `aged/aged_01_en.pdf` | 1 | 11.6 MB | 3.9 MB | 0.68 |
-| `aged/aged_02_fr.pdf` | 1 | 11.6 MB | 3.9 MB | 0.72 |
-| `aged/aged_03_pl.pdf` | 1 | 11.6 MB | 3.9 MB | 0.69 |
-| `aged/aged_04_de.pdf` | 1 | 11.6 MB | 3.9 MB | 0.83 |
-| `aged/aged_05_en.pdf` | 1 | 11.6 MB | 3.9 MB | 0.68 |
+| `aged/aged_00_de.pdf` | 1 | 11.6 MB | 3.9 MB | 0.76 |
+| `aged/aged_01_en.pdf` | 1 | 11.6 MB | 3.9 MB | 0.77 |
+| `aged/aged_02_fr.pdf` | 1 | 11.6 MB | 3.9 MB | 0.73 |
+| `aged/aged_03_pl.pdf` | 1 | 11.6 MB | 3.9 MB | 0.70 |
+| `aged/aged_04_de.pdf` | 1 | 11.6 MB | 3.9 MB | 0.75 |
+| `aged/aged_05_en.pdf` | 1 | 11.6 MB | 3.9 MB | 0.74 |
 
 ## Worker scaling
 
@@ -138,10 +138,10 @@ On `multipage/scan_12p.pdf`:
 
 | workers | seconds | pages/s | speedup |
 |---:|---:|---:|---:|
-| 1 | 7.89 | 1.52 | 1.00x |
-| 2 | 7.23 | 1.66 | 1.09x |
-| 4 | 5.95 | 2.02 | 1.33x |
-| 8 | 6.58 | 1.82 | 1.20x |
+| 1 | 8.05 | 1.49 | 1.00x |
+| 2 | 6.93 | 1.73 | 1.16x |
+| 4 | 5.50 | 2.18 | 1.47x |
+| 8 | 5.91 | 2.03 | 1.36x |
 
 ## DPI sweep
 
@@ -149,10 +149,10 @@ Over 6 PDFs (clean, aged and fax):
 
 | dpi | mean CER | median CER | word recall | seconds |
 |---:|---:|---:|---:|---:|
-| 100 | 0.003 | 0.003 | 0.969 | 4.2 |
+| 100 | 0.003 | 0.003 | 0.969 | 4.0 |
 | 150 | 0.004 | 0.003 | 0.964 | 4.2 |
-| 200 | 0.007 | 0.007 | 0.910 | 4.4 |
-| 300 | 0.002 | 0.003 | 0.980 | 5.2 |
+| 200 | 0.007 | 0.007 | 0.910 | 4.3 |
+| 300 | 0.002 | 0.003 | 0.980 | 4.9 |
 
 ## Does preprocessing pay off?
 
@@ -160,12 +160,12 @@ Over 13 skewed, aged and inverted pages:
 
 | preprocessing | mean CER | word recall | seconds |
 |---|---:|---:|---:|
-| on | 0.004 | 0.960 | 9.3 |
-| off | 0.040 | 0.960 | 8.6 |
+| on | 0.004 | 0.960 | 9.1 |
+| off | 0.040 | 0.960 | 8.4 |
 
 ## Batch API
 
-20 files: 13.5 s one by one versus 13.6 s with `scan_many` (**0.99x**).
+20 files: 13.1 s one by one versus 13.2 s with `scan_many` (**0.99x**).
 
 ## Sample output
 

@@ -1,4 +1,13 @@
-# ocrust
+<p align="center">
+  <img src="assets/ocrust.svg" alt="ocrust — blazing fast Rust OCR" width="640">
+</p>
+
+<p align="center">
+  <a href="https://github.com/mauricekleindienst/ocrust/actions"><img src="https://github.com/mauricekleindienst/ocrust/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
+  <img src="https://img.shields.io/badge/no%20compiler-required-success" alt="No compiler required">
+</p>
 
 **Document OCR for Python, with a Rust core.** Images, multi-page TIFF and PDF in
 — text, Markdown, JSON, hOCR, ALTO, CSV, multi-page TIFF or a searchable PDF out.
@@ -28,8 +37,9 @@ around three rules:
 
 1. **No native prerequisites.** No Tesseract binary, no PaddlePaddle, no PyTorch,
    no Poppler, no PDFium. The whole engine is one prebuilt wheel.
-2. **No admin rights and no compiler.** Everything is a wheel; the Rust side has
-   no C, C++ or CMake dependency at all.
+2. **No admin rights and no compiler.** Installing is `pip install`: prebuilt
+   abi3 wheels for Linux, macOS and Windows, nothing compiled on your machine.
+   (Building *from source* is Rust-only too, with one exception noted below.)
 3. **One source for everything.** The models live in this repository and are
    installed from a wheel or fetched from `raw.githubusercontent.com`. A
    corporate proxy that allows GitHub and PyPI — and nothing else — is enough.
@@ -119,9 +129,10 @@ print(report)
   naive implementations corrupt documents.
 - Nothing is re-encoded. Only a content stream and a font object are added.
 
-The text layer uses a base-14 WinAnsi font, which covers Western European text.
-Characters outside it (CJK, Cyrillic) are counted in `unmappable_chars` and
-written as `?` *in the invisible layer only* — the visible page never changes.
+Any script the recognizer can read goes into the layer: Western European text
+uses a base-14 WinAnsi font, and a line with anything else (CJK, Cyrillic, Greek)
+gets a Type0 font whose codes are UTF-16 code units with a `ToUnicode` map. No
+font file is embedded, because the layer is invisible and no glyph is ever drawn.
 
 Need a searchable PDF from images instead? That builds a new document:
 
@@ -164,9 +175,19 @@ for line in doc.lines:
     for word in line.words:
         print("   ", word.text, word.box.as_tuple())
 
-# Batch, in parallel.
+# Find something, with the box to highlight it.
+for hit in doc.search("gesamtbetrag"):
+    print(hit.page, hit.text, hit.box.as_tuple())
+doc.search(r"\d+,\d\d\s*EUR", regex=True)
+
+# Long documents can report where they are.
+doc = ocr.scan("book.pdf", progress=lambda page, total, lines: print(page + 1, "/", total))
+
+# Batch, in parallel. A directory or a pattern stands for the files in it.
 for result in ocr.scan_many(["a.pdf", "b.png", "c.tiff"]):
     print(result.source, len(result.pages))
+for result in ocr.scan_many(["archive/"]):
+    print(result.source)
 
 # numpy arrays and PIL images (neither is a dependency).
 doc = ocr.scan(numpy_array, name="frame")
@@ -184,6 +205,7 @@ ocrust scan invoice.pdf                      # text on stdout
 ocrust scan page.jpg -f markdown -o page.md
 ocrust scan *.tiff -f json -o results/       # batch, one file per input
 ocrust scan archive/ -f text -o sidecars/    # a whole folder, read recursively
+ocrust scan book.pdf --progress              # page-by-page on stderr
 ocrust scan book.pdf --pages 1,4-8 --dpi 300 --lang de
 ocrust ocr scan.pdf -o scan.ocr.pdf          # add a text layer
 ocrust pdf photo.jpg -o photo.pdf            # searchable PDF from an image

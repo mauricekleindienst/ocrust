@@ -1,6 +1,7 @@
 //! Turning a [`Document`] into the formats downstream tools expect.
 
 #[cfg(feature = "pdf")]
+pub(crate) mod cidfont;
 pub mod overlay;
 pub mod pdf;
 pub mod tiff;

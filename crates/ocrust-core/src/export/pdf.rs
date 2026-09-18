@@ -9,6 +9,7 @@ use std::io::Cursor;
 
 use image::RgbImage;
 
+use super::cidfont;
 use crate::doc::Document;
 use crate::error::{Error, Result};
 
@@ -72,6 +73,14 @@ pub fn build_with_images(
     let catalog = pdf.reserve();
     let page_tree = pdf.reserve();
     let font = pdf.reserve();
+    // The Unicode font is written only when some line needs it, so a Western
+    // document keeps exactly the objects it had before.
+    let unicode_font = doc
+        .pages
+        .iter()
+        .flat_map(|page| page.lines())
+        .any(|line| cidfont::needs_unicode(&line.text))
+        .then(|| write_unicode_font(&mut pdf));
 
     let mut page_ids = Vec::with_capacity(doc.pages.len());
     for (page, image) in doc.pages.iter().zip(images) {
@@ -94,16 +103,20 @@ pub fn build_with_images(
         // Draw the scan so the PDF looks like the original.
         content.push_str(&format!("q\n{w_pt:.2} 0 0 {h_pt:.2} 0 0 cm\n/Im0 Do\nQ\n"));
         if opts.text_layer {
-            content.push_str(&text_layer(page, px_to_pt, h_pt));
+            content.push_str(&text_layer(page, px_to_pt, h_pt, unicode_font.is_some()));
         }
         let content_id = pdf.stream_object(
             &format!("<< /Length {} >>", content.len()),
             content.as_bytes(),
         );
 
+        let fonts = match unicode_font {
+            Some(id) => format!("/F1 {font} 0 R /{} {id} 0 R", cidfont::UNICODE_FONT_NAME),
+            None => format!("/F1 {font} 0 R"),
+        };
         let page_id = pdf.object(&format!(
             "<< /Type /Page /Parent {page_tree} 0 R /MediaBox [0 0 {w_pt:.2} {h_pt:.2}] \
-             /Resources << /XObject << /Im0 {image_id} 0 R >> /Font << /F1 {font} 0 R >> >> \
+             /Resources << /XObject << /Im0 {image_id} 0 R >> /Font << {fonts} >> >> \
              /Contents {content_id} 0 R >>"
         ));
         page_ids.push(page_id);
@@ -134,7 +147,15 @@ pub fn build_with_images(
 }
 
 /// Emits invisible (`3 Tr`) text positioned over each recognized line.
-fn text_layer(page: &crate::doc::Page, px_to_pt: f32, page_h_pt: f32) -> String {
+///
+/// `unicode_font` says whether the Unicode font was added to the page's
+/// resources; without it, text outside WinAnsi still degrades to `?`.
+fn text_layer(
+    page: &crate::doc::Page,
+    px_to_pt: f32,
+    page_h_pt: f32,
+    unicode_font: bool,
+) -> String {
     let mut out = String::from("BT\n3 Tr\n");
     for line in page.lines() {
         if line.text.trim().is_empty() {
@@ -146,28 +167,72 @@ fn text_layer(page: &crate::doc::Page, px_to_pt: f32, page_h_pt: f32) -> String 
         // above the box bottom.
         let y = page_h_pt - line.bbox.y1 * px_to_pt + size * 0.18;
         let target_w = line.bbox.width() * px_to_pt;
-        let scale = horizontal_scale(&line.text, size, target_w);
+        let (font, show, em) = show_text(&line.text, unicode_font);
+        let scale = horizontal_scale_em(&line.text, size, target_w, em);
 
         out.push_str(&format!(
-            "/F1 {size:.2} Tf\n{scale:.1} Tz\n1 0 0 1 {x:.2} {y:.2} Tm\n({}) Tj\n",
-            escape_pdf_text(&line.text)
+            "/{font} {size:.2} Tf\n{scale:.1} Tz\n1 0 0 1 {x:.2} {y:.2} Tm\n{show} Tj\n"
         ));
     }
     out.push_str("ET\n");
     out
 }
 
-/// Horizontal scaling (`Tz`) that stretches the text onto the detected box.
+/// Picks the font for one line and encodes the text for it.
 ///
-/// Helvetica averages roughly `0.5 em` per character, which is close enough
-/// for a layer nobody sees but everybody searches.
-pub(crate) fn horizontal_scale_for(text: &str, size: f32, target_w: f32) -> f32 {
-    horizontal_scale(text, size, target_w)
+/// Returns the resource name, the operand for `Tj` and how wide a character is
+/// in that font, which is what stretches the line onto its box.
+pub(crate) fn show_text(text: &str, unicode_font: bool) -> (&'static str, String, f32) {
+    if unicode_font && cidfont::needs_unicode(text) {
+        (
+            cidfont::UNICODE_FONT_NAME,
+            format!("<{}>", cidfont::utf16_hex(text)),
+            cidfont::UNICODE_EM_PER_CHAR,
+        )
+    } else {
+        ("F1", format!("({})", escape_pdf_text(text)), 0.5)
+    }
 }
 
-fn horizontal_scale(text: &str, size: f32, target_w: f32) -> f32 {
+/// Writes the Type0 font, its descendant and the `ToUnicode` map.
+fn write_unicode_font(pdf: &mut PdfWriter) -> usize {
+    let cmap = cidfont::to_unicode_cmap();
+    let to_unicode = pdf.stream_object(&format!("<< /Length {} >>", cmap.len()), cmap.as_bytes());
+    let descriptor = pdf.object(&format!(
+        "<< /Type /FontDescriptor /FontName /{} /Flags {} \
+         /FontBBox [{} {} {} {}] /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV {} >>",
+        cidfont::UNICODE_BASE_FONT,
+        cidfont::DESCRIPTOR_FLAGS,
+        cidfont::DESCRIPTOR_BBOX[0],
+        cidfont::DESCRIPTOR_BBOX[1],
+        cidfont::DESCRIPTOR_BBOX[2],
+        cidfont::DESCRIPTOR_BBOX[3],
+        cidfont::DESCRIPTOR_ASCENT,
+        cidfont::DESCRIPTOR_DESCENT,
+        cidfont::DESCRIPTOR_CAP_HEIGHT,
+        cidfont::DESCRIPTOR_STEM_V,
+    ));
+    let descendant = pdf.object(&format!(
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{} \
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+         /FontDescriptor {descriptor} 0 R /DW 1000 /CIDToGIDMap /Identity >>",
+        cidfont::UNICODE_BASE_FONT
+    ));
+    pdf.object(&format!(
+        "<< /Type /Font /Subtype /Type0 /BaseFont /{} /Encoding /Identity-H \
+         /DescendantFonts [{descendant} 0 R] /ToUnicode {to_unicode} 0 R >>",
+        cidfont::UNICODE_BASE_FONT
+    ))
+}
+
+/// Horizontal scaling (`Tz`) that stretches the text onto the detected box.
+///
+/// Helvetica averages roughly `0.5 em` per character and the Unicode font
+/// declares a full em, which is close enough for a layer nobody sees but
+/// everybody searches.
+pub(crate) fn horizontal_scale_em(text: &str, size: f32, target_w: f32, em: f32) -> f32 {
     let chars = text.chars().count().max(1) as f32;
-    let natural = chars * size * 0.5;
+    let natural = chars * size * em;
     if natural <= 0.0 || target_w <= 0.0 {
         return 100.0;
     }
@@ -229,18 +294,11 @@ pub fn winansi_literal(text: &str) -> (String, usize) {
                 out.push_str("\\\\");
                 continue;
             }
-            c if (c as u32) < 0x20 => b' ',
-            c if (c as u32) < 0x80 => c as u8,
-            c => match WINANSI_HIGH.iter().find(|(_, mapped)| *mapped == c) {
-                Some((byte, _)) => *byte,
+            c => match winansi_byte(c) {
+                Some(byte) => byte,
                 None => {
-                    let code = c as u32;
-                    if (0xA0..=0xFF).contains(&code) {
-                        code as u8
-                    } else {
-                        replaced += 1;
-                        b'?'
-                    }
+                    replaced += 1;
+                    b'?'
                 }
             },
         };
@@ -253,6 +311,25 @@ pub fn winansi_literal(text: &str) -> (String, usize) {
         }
     }
     (out, replaced)
+}
+
+/// The WinAnsi (CP1252) byte for a character, if it has one.
+///
+/// Control characters become a space: they carry no text and would otherwise be
+/// counted as losses. Everything this returns `None` for needs the Unicode font
+/// in [`super::cidfont`].
+pub(crate) fn winansi_byte(c: char) -> Option<u8> {
+    let code = c as u32;
+    if code < 0x20 {
+        return Some(b' ');
+    }
+    if code < 0x80 {
+        return Some(code as u8);
+    }
+    if let Some((byte, _)) = WINANSI_HIGH.iter().find(|(_, mapped)| *mapped == c) {
+        return Some(*byte);
+    }
+    (0xA0..=0xFF).contains(&code).then_some(code as u8)
 }
 
 /// Escapes a string for a PDF literal, dropping characters WinAnsi cannot hold.
@@ -455,6 +532,40 @@ mod tests {
     }
 
     #[test]
+    fn a_page_with_other_scripts_gets_the_unicode_font() {
+        let (mut doc, images) = scanned_doc(1);
+        doc.pages[0].blocks[0].lines[0].text = "請求書 2026".to_string();
+        let pdf = build_with_images(&doc, &images, &PdfOptions::default()).unwrap();
+        let text = String::from_utf8_lossy(&pdf);
+
+        assert!(text.contains("/Subtype /Type0"), "a Type0 font is written");
+        assert!(text.contains("/Encoding /Identity-H"));
+        assert!(text.contains("/CIDFontType2"));
+        assert!(text.contains("/ToUnicode"));
+        assert!(
+            text.contains(&format!("/{}", cidfont::UNICODE_FONT_NAME)),
+            "the page references it"
+        );
+        assert!(
+            text.contains("<8ACB6C4266F8"),
+            "UTF-16 hex, not question marks"
+        );
+        assert!(
+            hayro::hayro_syntax::Pdf::new(std::sync::Arc::new(pdf.clone())).is_ok(),
+            "still a readable PDF"
+        );
+    }
+
+    #[test]
+    fn a_western_page_carries_no_unicode_font() {
+        let (doc, images) = scanned_doc(1);
+        let pdf = build_with_images(&doc, &images, &PdfOptions::default()).unwrap();
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(!text.contains("/Type0"), "nothing extra for WinAnsi text");
+        assert!(!text.contains(cidfont::UNICODE_FONT_NAME));
+    }
+
+    #[test]
     fn text_layer_can_be_disabled() {
         let (doc, images) = scanned_doc(1);
         let bytes = build_with_images(
@@ -519,8 +630,8 @@ mod tests {
     #[test]
     fn horizontal_scale_stretches_to_the_box() {
         // 10 chars at size 10 ≈ 50pt natural width; target 100pt → 200%.
-        let s = horizontal_scale("0123456789", 10.0, 100.0);
+        let s = horizontal_scale_em("0123456789", 10.0, 100.0, 0.5);
         assert!((s - 200.0).abs() < 1.0, "{s}");
-        assert_eq!(horizontal_scale("x", 10.0, 0.0), 100.0);
+        assert_eq!(horizontal_scale_em("x", 10.0, 0.0, 0.5), 100.0);
     }
 }

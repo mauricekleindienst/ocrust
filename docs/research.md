@@ -67,7 +67,7 @@ follow from that:
   from `raw.githubusercontent.com` with SHA-256 verification. Upstream model
   hosts (`huggingface.co`, `modelscope.cn`, `bcebos.com`) are commonly blocked by
   corporate proxies, and a first run that cannot download is a failed install.
-- **No C toolchain.** Every dependency is pure Rust, and ONNX Runtime is loaded
+- **No C toolchain for users.** The wheels are prebuilt, and ONNX Runtime is loaded
   dynamically from the `onnxruntime` wheel rather than linked. `pip install`
   therefore needs no compiler, no CMake and no admin rights.
 - **Prebuilt abi3 wheels** for Linux (x86-64, aarch64), macOS (arm64, x86-64) and

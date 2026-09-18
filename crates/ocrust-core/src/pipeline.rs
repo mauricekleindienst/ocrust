@@ -256,7 +256,7 @@ impl Engine {
 
     /// Scans a file, byte buffer or in-memory image.
     pub fn scan(&self, source: &Source) -> Result<Document> {
-        self.scan_with_progress(source, &mut |_| {})
+        self.run(source, None, &mut |_| {})
     }
 
     /// Scans `source`, reporting progress after every page.
@@ -265,8 +265,37 @@ impl Engine {
         source: &Source,
         progress: &mut (dyn FnMut(Progress) + Send),
     ) -> Result<Document> {
+        self.run(source, None, progress)
+    }
+
+    /// Scans selected pages of a multi-page source, reporting progress.
+    pub fn scan_pages_with_progress(
+        &self,
+        source: &Source,
+        pages: &[usize],
+        progress: &mut (dyn FnMut(Progress) + Send),
+    ) -> Result<Document> {
+        self.run(source, Some(pages), progress)
+    }
+
+    /// The one scan implementation: every other entry point routes through it, so
+    /// page selection and progress reporting cannot drift apart.
+    fn run(
+        &self,
+        source: &Source,
+        pages: Option<&[usize]>,
+        progress: &mut (dyn FnMut(Progress) + Send),
+    ) -> Result<Document> {
         let started = Instant::now();
-        let raw_pages = ingest::load(source, &self.config.ingest)?;
+        let ingest_config = match pages {
+            // Page selection is per call, so it cannot live in the shared config.
+            Some(list) => IngestConfig {
+                pages: Some(list.to_vec()),
+                ..self.config.ingest.clone()
+            },
+            None => self.config.ingest.clone(),
+        };
+        let raw_pages = ingest::load(source, &ingest_config)?;
         let total = raw_pages.len();
 
         let mut doc = Document::new(source.name());
@@ -303,16 +332,7 @@ impl Engine {
 
     /// Scans only the given zero-based page indices of a multi-page source.
     pub fn scan_pages(&self, source: &Source, pages: &[usize]) -> Result<Document> {
-        let mut engine_ingest = self.config.ingest.clone();
-        engine_ingest.pages = Some(pages.to_vec());
-        let started = Instant::now();
-        let raw_pages = ingest::load(source, &engine_ingest)?;
-        let mut doc = Document::new(source.name());
-        for raw in raw_pages {
-            doc.pages.push(self.scan_page(raw)?);
-        }
-        doc.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        Ok(doc)
+        self.run(source, Some(pages), &mut |_| {})
     }
 
     /// Scans an already decoded frame.

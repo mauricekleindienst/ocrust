@@ -188,15 +188,18 @@ ocrust scan faint.png --min-confidence 0.2
 
 ## The PDF text layer has `?` where the text had letters
 
-The layer uses a WinAnsi base-14 font. CJK, Cyrillic and Greek have no WinAnsi
-code point, so they are counted in `unmappable_chars` and written as `?` **in the
-invisible layer only**. The recognized text is complete in every other format:
+That was the old behaviour, when the layer only had a WinAnsi font. Lines with
+CJK, Cyrillic or Greek now use a Type0 font with a `ToUnicode` map and come out
+intact; `report["unmappable_chars"]` says how many characters the layer really
+lost, and should read 0.
+
+If you still see `?`, check that the extractor reads `ToUnicode` — some very old
+tools ignore it. The recognized text is complete in every other format either
+way:
 
 ```bash
 ocrust scan scan.pdf -f json -o scan.json
 ```
-
-Unicode font embedding is on the [[Roadmap]].
 
 ## Selection in the searchable PDF does not line up
 

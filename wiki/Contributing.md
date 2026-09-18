@@ -8,11 +8,22 @@
 | Python | bindings, CLI, tests | 3.9 or newer |
 | maturin | builds the wheel | `>=1.7,<2.0` |
 
-**That is the whole list.** No C or C++ compiler, no CMake, no CUDA toolkit: the
-Rust dependency tree is pure Rust, and ONNX Runtime is loaded at run time from
-the `onnxruntime` wheel. If a change introduces a dependency with a build script
-that compiles native code, it breaks the promise the project is built on — check
-with `cargo tree --edges build`.
+**That is nearly the whole list.** No CMake, no CUDA toolkit, no system OCR
+library: ONNX Runtime is loaded at run time from the `onnxruntime` wheel, and the
+engine is pure Rust.
+
+The one exception is the optional model downloader, whose TLS stack (`ureq` →
+`rustls` → `ring`) compiles C and assembly, so a default source build needs a C
+compiler — gcc, clang or MSVC, whichever your platform already has for Rust.
+Without it:
+
+```bash
+cargo build -p ocrust-core --no-default-features --features pdf   # entirely Rust
+```
+
+Users never hit this: the wheels are prebuilt. Before adding a dependency, check
+what it drags in with `cargo tree -i cc`, and keep the engine itself free of
+native build scripts.
 
 ## Build and install
 
