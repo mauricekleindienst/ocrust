@@ -220,12 +220,15 @@ pub fn estimate_skew(img: &RgbImage, max_deg: f32) -> f32 {
         }
     };
 
-    let coarse_steps = (max_deg * 2.0).round() as i32;
+    // Coarse to fine: whole degrees first, then a tenth of a degree around the
+    // winner. Halving the coarse resolution halves the cost and the refinement
+    // recovers the precision.
+    let coarse_steps = max_deg.round() as i32;
     for i in -coarse_steps..=coarse_steps {
-        evaluate(i as f32 * 0.5, &mut best);
+        evaluate(i as f32, &mut best);
     }
     let around = best.1;
-    for i in -5..=5 {
+    for i in -9..=9 {
         let angle = around + i as f32 * 0.1;
         if angle.abs() <= max_deg {
             evaluate(angle, &mut best);
@@ -241,7 +244,8 @@ pub fn estimate_skew(img: &RgbImage, max_deg: f32) -> f32 {
 }
 
 fn downscale_for_skew(img: &RgbImage) -> GrayImage {
-    const TARGET: u32 = 600;
+    // 400 px is plenty to measure an angle and costs less than half of 600.
+    const TARGET: u32 = 400;
     let longest = img.width().max(img.height());
     let gray = image::imageops::grayscale(img);
     if longest <= TARGET {
@@ -278,6 +282,10 @@ fn profile_score(ink: &[f32], w: u32, h: u32, angle: f32) -> f32 {
     let mut rows = vec![0f32; h as usize];
     for y in 0..h {
         let base = y as usize * w as usize;
+        let row = &ink[base..base + w as usize];
+        if !row.iter().any(|&v| v > 0.0) {
+            continue; // blank rows cannot shift the profile
+        }
         for x in 0..w {
             let v = ink[base + x as usize];
             if v == 0.0 {
