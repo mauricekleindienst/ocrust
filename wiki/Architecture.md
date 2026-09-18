@@ -155,7 +155,7 @@ model without `ü` for German does not fail — it returns `Grusse`. So each
 language in the table carries the non-ASCII letters of its alphabet
 (cross-checked against PaddleOCR's dictionaries) or probe characters for
 non-alphabetic scripts, and `Engine::new` refuses when the loaded charset cannot
-produce them, naming what is missing. See [[Languages]].
+produce them, naming what is missing. See [Languages](Languages.md).
 
 ## PDF text layers
 
@@ -168,7 +168,7 @@ Two jobs, two writers:
   font are added.
 
 The overlay path has to get three things right — display-space rotation,
-inherited `/Resources`, and pages that already contain text. [[PDF workflows]]
+inherited `/Resources`, and pages that already contain text. [PDF workflows](PDF-workflows.md)
 covers each.
 
 ## Concurrency
@@ -179,7 +179,7 @@ covers each.
 - Pages of a document, and documents of a batch, run through rayon.
 - `page_workers` and ONNX Runtime intra-op threads **divide** the cores
   (`intra_threads = cores / page_workers`). Before that, eight workers were 20%
-  slower than one. See [[Performance]].
+  slower than one. See [Performance](Performance.md).
 - The Python bindings release the GIL for the whole scan, so a Python thread pool
   parallelizes too.
 

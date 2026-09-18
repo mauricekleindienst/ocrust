@@ -1,8 +1,8 @@
 # Roadmap
 
 Ordered by how much the measurements say it matters, not by how interesting it is
-to build. Every item here is a known gap, named in [[Accuracy]] or
-[[Languages]] with the number that justifies it.
+to build. Every item here is a known gap, named in [Accuracy](Accuracy.md) or
+[Languages](Languages.md) with the number that justifies it.
 
 ## 1. Table structure recognition
 
@@ -63,7 +63,7 @@ the calibration curve, and document a threshold that means something.
   UTF-16 through a Type0 font with a `ToUnicode` map, instead of `?`. Nothing is
   embedded, because nothing is drawn. Corpus `unmappable_chars`: 340 → 0.
 - **Swallowed word spaces are restored** from the column ink of each crop, which
-  took image-only PDFs from CER 0.014 to 0.004 — see [[Accuracy]].
+  took image-only PDFs from CER 0.014 to 0.004 — see [Accuracy](Accuracy.md).
 - **Directory and glob inputs**, in the CLI and in `scan_many`.
 - **Progress callbacks** (`Ocr.scan(progress=…)`, `ocrust scan --progress`).
 - **`doc.search()`** with word-level boxes, regex, case and whole-word options.
@@ -76,7 +76,7 @@ the calibration curve, and document a threshold that means something.
 - **Bundling ONNX Runtime in the wheel.** It would double the download to save one
   `pip install` line, and it would make GPU support harder, not easier.
 - **A "just works" auto-language mode.** Language detection that silently picks a
-  model is exactly the behaviour [[Languages]] exists to prevent.
+  model is exactly the behaviour [Languages](Languages.md) exists to prevent.
 
 ## Ideas worth measuring first
 

@@ -54,15 +54,15 @@ the GIL for the whole scan, so a thread pool in Python parallelizes properly.
 
 | Argument | When to change it |
 |---|---|
-| `pdf_dpi` | 200 is the default. Raise to 300 for small print; 100 is faster and, on ordinary scans, just as accurate ([[Performance]]). |
+| `pdf_dpi` | 200 is the default. Raise to 300 for small print; 100 is faster and, on ordinary scans, just as accurate ([Performance](Performance.md)). |
 | `page_workers` | Multi-page documents and batches. Defaults to 1 because workers and inference threads share the same cores. |
 | `preprocess` | `False` buys ~9% and costs nothing measurable in CER; it can hurt multi-column layout. |
 | `word_boxes` | `False` when you only want text — it skips the per-character bookkeeping. |
 | `drop_score` | Raise it to suppress noise lines, lower it to keep faint print. |
 | `det_limit_side` | The detector's working size (960). Large formats are tiled automatically above 3840 px. |
 | `det_unclip_ratio` | 1.5. Raise it when characters are clipped, lower it when neighbouring lines merge. |
-| `lang` | Always, in production. See [[Languages]]. |
-| `io_retries` | Reading off a network share. Two retries by default; raise it for a share that drops, set `0` to fail fast. See [[Network shares]]. |
+| `lang` | Always, in production. See [Languages](Languages.md). |
+| `io_retries` | Reading off a network share. Two retries by default; raise it for a share that drops, set `0` to fail fast. See [Network shares](Network-shares.md). |
 | `rec_space_gap` | Almost never. `0` disables space restoration, which you want only if a swallowed space is preferable to a wrongly inserted one. |
 
 ### Methods
@@ -232,4 +232,4 @@ ocrust.runtime_info()
  'ocrust': '0.1.0'}
 ```
 
-See [[Troubleshooting]] when a field says `unavailable`.
+See [Troubleshooting](Troubleshooting.md) when a field says `unavailable`.

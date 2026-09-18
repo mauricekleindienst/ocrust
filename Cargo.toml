@@ -7,8 +7,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
-repository = "https://github.com/mauricekleindienst/pake"
-homepage = "https://github.com/mauricekleindienst/pake"
+repository = "https://github.com/mauricekleindienst/ocrust"
+homepage = "https://github.com/mauricekleindienst/ocrust"
 authors = ["ocrust contributors"]
 
 [workspace.dependencies]

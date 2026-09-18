@@ -25,21 +25,21 @@ Français: déjà payé
 
 | Page | What it covers |
 |---|---|
-| **[[Installation]]** | `pip install`, offline installs, GPU builds, what needs no admin rights |
-| **[[Quickstart]]** | The five calls that cover most work |
-| **[[Python API]]** | `Ocr`, `Document`, every keyword argument, result objects |
-| **[[CLI]]** | `scan`, `ocr`, `pdf`, `tiff`, `languages`, `models`, `doctor` |
-| **[[PDF workflows]]** | Adding a text layer to existing PDFs versus building one from images |
-| **[[Network shares]]** | UNC paths, mapped drives, retries on a share that drops |
-| **[[Languages]]** | The 27 covered languages, and why declaring one is a check |
-| **[[Models]]** | Where models come from, how to bring your own, the one-GitHub-source rule |
-| **[[Performance]]** | Measured numbers, what the knobs do, worker scaling |
-| **[[Accuracy]]** | Error rates per document type, and where the engine is weak |
-| **[[Architecture]]** | The pipeline, module by module |
-| **[[Evaluation]]** | The generated corpus and how to reproduce the numbers |
-| **[[Troubleshooting]]** | Error messages and what they mean |
-| **[[Contributing]]** | Building, testing, the checks CI runs |
-| **[[Roadmap]]** | What is missing, in the order it matters |
+| **[Installation](Installation.md)** | `pip install`, offline installs, GPU builds, what needs no admin rights |
+| **[Quickstart](Quickstart.md)** | The five calls that cover most work |
+| **[Python API](Python-API.md)** | `Ocr`, `Document`, every keyword argument, result objects |
+| **[CLI](CLI.md)** | `scan`, `ocr`, `pdf`, `tiff`, `languages`, `models`, `doctor` |
+| **[PDF workflows](PDF-workflows.md)** | Adding a text layer to existing PDFs versus building one from images |
+| **[Network shares](Network-shares.md)** | UNC paths, mapped drives, retries on a share that drops |
+| **[Languages](Languages.md)** | The 27 covered languages, and why declaring one is a check |
+| **[Models](Models.md)** | Where models come from, how to bring your own, the one-GitHub-source rule |
+| **[Performance](Performance.md)** | Measured numbers, what the knobs do, worker scaling |
+| **[Accuracy](Accuracy.md)** | Error rates per document type, and where the engine is weak |
+| **[Architecture](Architecture.md)** | The pipeline, module by module |
+| **[Evaluation](Evaluation.md)** | The generated corpus and how to reproduce the numbers |
+| **[Troubleshooting](Troubleshooting.md)** | Error messages and what they mean |
+| **[Contributing](Contributing.md)** | Building, testing, the checks CI runs |
+| **[Roadmap](Roadmap.md)** | What is missing, in the order it matters |
 
 ## Why it exists
 

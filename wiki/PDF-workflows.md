@@ -171,7 +171,7 @@ open("scan.txt", "w").write(doc.text)
 ## Which DPI?
 
 Rasterization resolution is the one knob that matters for PDF accuracy. Measured
-over clean, aged and fax PDFs ([[Evaluation]]):
+over clean, aged and fax PDFs ([Evaluation](Evaluation.md)):
 
 | dpi | mean CER | word recall | time |
 |---:|---:|---:|---:|

@@ -112,13 +112,13 @@ hint: `ocrust languages` lists what this model covers
 Working as designed. The shipped model has no Cyrillic, and a model that cannot
 spell a language returns text that *looks* right and is wrong. Either drop the
 `lang` requirement (accepting partial results knowingly) or supply a recognizer
-for that script ([[Models]]). `ocrust languages` lists what is covered.
+for that script ([Models](Models.md)). `ocrust languages` lists what is covered.
 
 ## Text comes out in the wrong order
 
 Not a bug you can configure away: reading order is geometric. It handles columns,
 headings and paragraphs, and it does **not** understand table structure. Receipts,
-ruled forms and drawings are the known weak spots — see [[Accuracy]].
+ruled forms and drawings are the known weak spots — see [Accuracy](Accuracy.md).
 
 Two things help today:
 
@@ -148,12 +148,12 @@ ocrust.Ocr(io_retries=5)
 "No such file" and "permission denied" are never retried — a second attempt
 returns the same answer. If the message names a Windows error instead
 (`[WinError 53] The network path was not found`), the share itself is
-unreachable and no retry count will help. [[Network shares]] has the details.
+unreachable and no retry count will help. [Network shares](Network-shares.md) has the details.
 
 ## Words are run together, or a space appears where none belongs
 
 The recognizer drops word spaces on lossy input, so `ocrust` restores them from
-the column ink of each line crop (see [[Architecture]]). Two knobs, in the rare
+the column ink of each line crop (see [Architecture](Architecture.md)). Two knobs, in the rare
 case it gets one wrong:
 
 ```python
@@ -170,7 +170,7 @@ than tuning the threshold, because the blank columns then exist.
 Fixed: the deskew estimator ignores pages whose ink fraction is below 0.05% and
 prefers 0° when a rotation is not clearly better. If you see this on a page that
 does have content, `preprocess=False` disables deskew entirely — it costs nothing
-measurable in accuracy ([[Performance]]).
+measurable in accuracy ([Performance](Performance.md)).
 
 ## Small print is missed
 
@@ -231,7 +231,7 @@ PDF, not on a version you re-rasterized yourself at another DPI.
 Then `page_workers × threads` exceeds your core count. `ocrust` divides the cores
 between page workers and inference threads, but an explicit `threads=` overrides
 that. Leave `threads` alone, or keep the product at or below the core count
-([[Performance]]).
+([Performance](Performance.md)).
 
 ## Memory grows to ~800 MB
 
@@ -255,4 +255,4 @@ python -c "import ocrust, json; print(json.dumps(ocrust.runtime_info(), indent=2
 ```
 
 That output plus the file that fails is everything needed to reproduce a problem.
-See [[Contributing]] for where to put it.
+See [Contributing](Contributing.md) for where to put it.

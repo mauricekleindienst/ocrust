@@ -57,7 +57,7 @@ print(report)
 ```
 
 The pages keep their images and compression; only an invisible text layer is
-added. Pages that already contain text are skipped. See [[PDF workflows]].
+added. Pages that already contain text are skipped. See [PDF workflows](PDF-workflows.md).
 
 ## The same from the shell
 
@@ -88,4 +88,4 @@ ocr = ocrust.Ocr(lang="ru")     # OcrustError: cannot write А Б В Г Д Е Ж
 ```
 
 A model that cannot spell `ö` and `ß` does not fail on German text — it quietly
-returns `Grusse` for `Grüße`. `ocrust` refuses instead. See [[Languages]].
+returns `Grusse` for `Grüße`. `ocrust` refuses instead. See [Languages](Languages.md).

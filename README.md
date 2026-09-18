@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/ocrust.svg" alt="ocrust — blazing fast Rust OCR" width="640">
+  <img src="https://raw.githubusercontent.com/mauricekleindienst/ocrust/main/assets/ocrust.svg" alt="ocrust — blazing fast Rust OCR" width="640">
 </p>
 
 <p align="center">
@@ -140,6 +140,14 @@ Need a searchable PDF from images instead? That builds a new document:
 ocrust pdf photo.jpg -o photo.pdf
 ```
 
+## Documentation
+
+The full documentation is 18 pages under [`wiki/`](wiki/Home.md) — installation,
+quickstart, Python API, CLI, PDF workflows, network shares, languages, models,
+performance, accuracy, architecture, evaluation, troubleshooting, contributing
+and the roadmap. It reads as a wiki in the repository and can be pushed into the
+GitHub wiki verbatim (`wiki/_publish.md`).
+
 ## Try it in a browser
 
 ```bash
@@ -153,7 +161,7 @@ tiny HTTP API (`POST /scan`, `POST /pdf`, `GET /languages`) — see
 [`examples/README.md`](examples/README.md).
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="An aged German invoice, read and searched"
+  <img src="https://raw.githubusercontent.com/mauricekleindienst/ocrust/main/assets/screenshot.png" alt="An aged German invoice, read and searched"
        width="900">
 </p>
 

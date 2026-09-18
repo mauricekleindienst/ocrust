@@ -60,7 +60,7 @@ ocr = ocrust.Ocr(device="cuda")     # or "auto", "cuda:1", "coreml", "directml"
 
 `device="auto"` falls back to the CPU whenever a provider is unavailable, so the
 same code runs everywhere. Accelerated builds of the extension ship as separate
-wheels; see [[Performance]].
+wheels; see [Performance](Performance.md).
 
 ## Checking an install
 
@@ -84,7 +84,7 @@ models cache      /root/.cache/ocrust/models
 status: ready
 ```
 
-Anything other than `status: ready` is explained in [[Troubleshooting]].
+Anything other than `status: ready` is explained in [Troubleshooting](Troubleshooting.md).
 
 ## From source
 

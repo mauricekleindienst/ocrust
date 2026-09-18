@@ -28,6 +28,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 WHEEL_NAME = "ocrust_models"
 DIST_NAME = "ocrust-models"
 
@@ -51,12 +53,18 @@ Name: {dist}
 Version: {version}
 Summary: PP-OCR model files for ocrust
 License: Apache-2.0
+Project-URL: Homepage, https://github.com/mauricekleindienst/ocrust
+Project-URL: Source, https://github.com/mauricekleindienst/ocrust
 Requires-Python: >=3.9
 Description-Content-Type: text/markdown
 
-Model files used by [ocrust](https://pypi.org/project/ocrust/).
+Model files used by [ocrust](https://pypi.org/project/ocrust/), installed
+automatically by `pip install "ocrust[models]"`.
 
-Installed automatically by `pip install "ocrust[models]"`.
+The models are PP-OCR releases of the
+[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) project, redistributed
+unmodified under the Apache License 2.0; see the bundled NOTICE for the
+provenance of each file and its checksum.
 """
 
 WHEEL = """Wheel-Version: 1.0
@@ -116,6 +124,12 @@ def build(models_dir: Path, out_dir: Path, version: str) -> Path:
             )
             write(f"{dist_info}/WHEEL", WHEEL.encode())
             write(f"{dist_info}/top_level.txt", f"{WHEEL_NAME}\n".encode())
+            # The bundle redistributes someone else's Apache-2.0 work, so the
+            # license and the attribution travel with it.
+            for name in ("LICENSE", "NOTICE"):
+                source = REPO_ROOT / name
+                if source.is_file():
+                    write(f"{dist_info}/licenses/{name}", source.read_bytes())
             record = "\n".join(records + [f"{dist_info}/RECORD,,"]) + "\n"
             zf.writestr(f"{dist_info}/RECORD", record)
         shutil.rmtree(staging, ignore_errors=True)

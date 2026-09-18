@@ -40,7 +40,7 @@ ocrust scan photo.jpg -q                      # no summary line
 
 Inputs may be files, directories or glob patterns — including UNC paths like
 `\\\\fileserver\\scans`, where reads and writes are retried through a dropped
-connection ([[Network shares]]). A directory is walked
+connection ([Network shares](Network-shares.md)). A directory is walked
 recursively and filtered to readable extensions (images, TIFF, PDF); a pattern is
 expanded by `ocrust` itself, which is what makes `ocrust scan '*.pdf'` work on
 Windows too. Everything is sorted and de-duplicated, so a batch writes the same
@@ -67,7 +67,7 @@ Output rules worth knowing:
   overwriting one.
 - Several inputs default to `--workers 4`; a single input to 1. Pages and
   documents share the cores with the inference threads, so more is not better —
-  see [[Performance]].
+  see [Performance](Performance.md).
 - `--pages` is 1-based and accepts ranges: `1,3-5,9`. The Python API is
   0-based, as Python should be.
 
@@ -91,7 +91,7 @@ page 3: 595x842 pt -> skip (has text)
 2 of 3 page(s) would get a text layer
 ```
 
-Full details in [[PDF workflows]].
+Full details in [PDF workflows](PDF-workflows.md).
 
 ## `ocrust pdf` — searchable PDF from images
 
@@ -152,7 +152,7 @@ status: ready
 ```
 
 Exit code 0 means ready; anything else is a real problem, and the line above
-`status:` says which. `--json` for scripts. [[Troubleshooting]] decodes each case.
+`status:` says which. `--json` for scripts. [Troubleshooting](Troubleshooting.md) decodes each case.
 
 ## Exit codes
 
