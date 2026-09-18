@@ -30,6 +30,7 @@ Français: déjà payé
 | **[[Python API]]** | `Ocr`, `Document`, every keyword argument, result objects |
 | **[[CLI]]** | `scan`, `ocr`, `pdf`, `tiff`, `languages`, `models`, `doctor` |
 | **[[PDF workflows]]** | Adding a text layer to existing PDFs versus building one from images |
+| **[[Network shares]]** | UNC paths, mapped drives, retries on a share that drops |
 | **[[Languages]]** | The 27 covered languages, and why declaring one is a check |
 | **[[Models]]** | Where models come from, how to bring your own, the one-GitHub-source rule |
 | **[[Performance]]** | Measured numbers, what the knobs do, worker scaling |

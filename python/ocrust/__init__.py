@@ -221,6 +221,11 @@ class Ocr:
         threads: Threads per inference operator. ``None`` lets the runtime decide.
         page_workers: Pages scanned in parallel. ``None`` means one per core.
         pdf_dpi: Rasterization resolution for PDF pages (default 200).
+        io_retries: Extra attempts when reading a file fails transiently
+            (default 2). Reading off a network share is not a local read: SMB
+            and NFS time out and drop connections for reasons that have nothing
+            to do with the file, and a batch of four hundred documents should
+            not die on one of them. ``0`` disables it.
         preprocess: Auto-invert, deskew and rescale pages before OCR.
         word_boxes: Compute per-word boxes (needed for hOCR/ALTO word output).
         drop_score: Minimum mean confidence for a line to be kept.
@@ -238,6 +243,7 @@ class Ocr:
         threads: int | None = None,
         page_workers: int | None = None,
         pdf_dpi: float | None = None,
+        io_retries: int | None = None,
         preprocess: bool = True,
         deskew: bool | None = None,
         word_boxes: bool = True,
@@ -275,6 +281,7 @@ class Ocr:
             "threads": threads,
             "page_workers": page_workers,
             "pdf_dpi": pdf_dpi,
+            "io_retries": io_retries,
             "preprocess": preprocess,
             "deskew": deskew,
             "word_boxes": word_boxes,

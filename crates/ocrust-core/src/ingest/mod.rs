@@ -9,6 +9,7 @@ pub mod pdf;
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use image::{DynamicImage, ImageDecoder, RgbImage};
 
@@ -69,6 +70,16 @@ pub struct IngestConfig {
     pub pdf_max_side: u32,
     /// Restrict a multi-page source to these zero-based page indices.
     pub pages: Option<Vec<usize>>,
+    /// Extra attempts when reading a file fails with a transient error.
+    ///
+    /// Reading `\\\\fileserver\\scans\\invoice.pdf` is not a local read: SMB and
+    /// NFS drop connections, time out and return "the network name is no longer
+    /// available" for reasons that have nothing to do with the file. Those are
+    /// worth another attempt, and a batch over a share should not die on the
+    /// four hundredth document. `0` disables retrying.
+    pub read_retries: u32,
+    /// How long to wait before the first retry; it doubles after that.
+    pub retry_delay_ms: u64,
 }
 
 impl Default for IngestConfig {
@@ -77,6 +88,8 @@ impl Default for IngestConfig {
             pdf_dpi: 200.0,
             pdf_max_side: 4000,
             pages: None,
+            read_retries: 2,
+            retry_delay_ms: 150,
         }
     }
 }
@@ -127,10 +140,74 @@ pub fn load(source: &Source, cfg: &IngestConfig) -> Result<Vec<RawPage>> {
         }]),
         Source::Bytes { data, name } => load_bytes(data, name, cfg),
         Source::Path(path) => {
-            let data = std::fs::read(path).map_err(|e| Error::io(path, e))?;
+            let data = read_file(path, cfg).map_err(|e| Error::io(path, e))?;
             load_bytes(&data, &path.display().to_string(), cfg)
         }
     }
+}
+
+/// Reads a file, retrying the failures a network share produces under load.
+fn read_file(path: &Path, cfg: &IngestConfig) -> std::io::Result<Vec<u8>> {
+    retry_io(cfg.read_retries, cfg.retry_delay_ms, || std::fs::read(path))
+}
+
+/// Runs `attempt` again while it fails transiently, backing off between tries.
+///
+/// Kept separate from the filesystem so the policy can be tested: how many
+/// attempts, how long between them, and which errors are worth repeating.
+fn retry_io<T>(
+    retries: u32,
+    delay_ms: u64,
+    mut attempt: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut delay = Duration::from_millis(delay_ms);
+    for _ in 0..retries {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(e) if is_transient(&e) => {
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+                delay = delay.saturating_mul(2);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    attempt()
+}
+
+/// Whether an i/o error is the kind a second attempt can survive.
+///
+/// "Not found" and "permission denied" are answers; a reset connection, a
+/// timeout or a stale NFS handle are noise from the wire.
+fn is_transient(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    if matches!(
+        error.kind(),
+        Interrupted
+            | TimedOut
+            | WouldBlock
+            | ConnectionReset
+            | ConnectionAborted
+            | BrokenPipe
+            | NotConnected
+            | HostUnreachable
+            | NetworkUnreachable
+            | NetworkDown
+            | StaleNetworkFileHandle
+            | ResourceBusy
+            | UnexpectedEof
+    ) {
+        return true;
+    }
+    // Windows reports the interesting SMB failures as raw codes that Rust does
+    // not map onto an `ErrorKind`: the network name was deleted, an unexpected
+    // network error, the redirector ran out of resources.
+    #[cfg(windows)]
+    if let Some(code) = error.raw_os_error() {
+        return matches!(code, 51 | 52 | 54 | 59 | 64 | 121 | 1450);
+    }
+    false
 }
 
 fn load_bytes(data: &[u8], name: &str, cfg: &IngestConfig) -> Result<Vec<RawPage>> {
@@ -335,6 +412,83 @@ pub fn is_supported_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader that fails a given number of times before succeeding.
+    fn flaky(mut failures: u32, kind: std::io::ErrorKind) -> impl FnMut() -> std::io::Result<u8> {
+        move || {
+            if failures > 0 {
+                failures -= 1;
+                Err(std::io::Error::new(
+                    kind,
+                    "the network name is no longer available",
+                ))
+            } else {
+                Ok(42)
+            }
+        }
+    }
+
+    #[test]
+    fn a_transient_read_is_retried() {
+        // Two hiccups, three attempts allowed: the read still succeeds.
+        let result = retry_io(2, 0, flaky(2, std::io::ErrorKind::ConnectionReset));
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn retrying_gives_up_after_the_configured_attempts() {
+        let result = retry_io(2, 0, flaky(3, std::io::ErrorKind::TimedOut));
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+
+        // Zero retries means one attempt.
+        let mut calls = 0;
+        let result = retry_io(0, 0, || {
+            calls += 1;
+            Err::<u8, _>(std::io::Error::new(std::io::ErrorKind::TimedOut, "slow"))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_missing_file_is_not_retried() {
+        let mut calls = 0;
+        let result = retry_io(5, 0, || {
+            calls += 1;
+            Err::<u8, _>(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file",
+            ))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "a missing file will not appear on the next try");
+    }
+
+    #[test]
+    fn transient_errors_are_the_network_ones() {
+        use std::io::ErrorKind::*;
+        for kind in [
+            ConnectionReset,
+            TimedOut,
+            Interrupted,
+            BrokenPipe,
+            NetworkDown,
+            HostUnreachable,
+            StaleNetworkFileHandle,
+            UnexpectedEof,
+        ] {
+            assert!(
+                is_transient(&std::io::Error::new(kind, "x")),
+                "{kind:?} should be retried"
+            );
+        }
+        for kind in [NotFound, PermissionDenied, InvalidData, IsADirectory] {
+            assert!(
+                !is_transient(&std::io::Error::new(kind, "x")),
+                "{kind:?} should not be retried"
+            );
+        }
+    }
 
     fn png_bytes(w: u32, h: u32) -> Vec<u8> {
         let img = RgbImage::from_pixel(w, h, image::Rgb([200, 100, 50]));

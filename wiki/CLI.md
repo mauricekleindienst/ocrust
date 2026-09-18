@@ -33,11 +33,14 @@ ocrust scan 'scans/*.pdf' -o out/             # a pattern, even where the shell 
 ocrust scan book.pdf --pages 1,3-5            # 1-based on the command line
 ocrust scan faint.png --min-confidence 0.3    # keep faint lines
 ocrust scan book.pdf --progress               # page-by-page on stderr
+ocrust scan '\\\\fileserver\\scans' --io-retries 5   # a share that drops connections
 ocrust scan scan.pdf --dpi 300 --lang de,fr
 ocrust scan photo.jpg -q                      # no summary line
 ```
 
-Inputs may be files, directories or glob patterns. A directory is walked
+Inputs may be files, directories or glob patterns — including UNC paths like
+`\\\\fileserver\\scans`, where reads and writes are retried through a dropped
+connection ([[Network shares]]). A directory is walked
 recursively and filtered to readable extensions (images, TIFF, PDF); a pattern is
 expanded by `ocrust` itself, which is what makes `ocrust scan '*.pdf'` work on
 Windows too. Everything is sorted and de-duplicated, so a batch writes the same

@@ -133,6 +133,24 @@ First release.
   needs. The token is sent only to GitHub hosts — never to a mirror URL out of a
   manifest — and that is unit-tested.
 
+### Network shares
+
+- **Reads retry through a dropped connection.** Scanning `\\fileserver\scans` is
+  not a local read: SMB and NFS time out, reset and answer "the network name is
+  no longer available" for reasons that have nothing to do with the file. Reads
+  in the engine and writes from the CLI now retry twice with backoff. "Not
+  found" and "permission denied" are answers, not hiccups, and are never
+  retried; the Windows redirector's own codes (network name deleted, unexpected
+  network error, out of system resources) are.
+- `Ocr(io_retries=…)` and `--io-retries N` tune it; `0` fails on the first error.
+- **An unreachable share says why.** `Path.exists()` answers *False* both for a
+  missing file and for a server nobody can reach, so the CLI asks again and
+  reports the real reason: `\\fileserver\scans: [WinError 53] The network path
+  was not found` instead of a bare "no such file".
+- UNC paths, mapped drives and POSIX mounts work everywhere a path does,
+  including recursive directory walks and `'\\server\share\*.pdf'` patterns,
+  which `ocrust` expands itself because the Windows shell does not.
+
 ### A test application
 
 - `examples/app.py`: a local web app with **no dependencies beyond the library**
