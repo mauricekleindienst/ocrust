@@ -23,6 +23,36 @@ def test_runtime_info_finds_onnxruntime():
     assert "ONNX Runtime" in str(info["onnxruntime_loaded"]), info
 
 
+def test_library_is_found_under_every_platform_spelling(tmp_path, monkeypatch):
+    """Linux, macOS and Windows version the library's file name differently.
+
+    macOS puts the version before the extension, which a `name + "*"` glob does
+    not match — that is how a macOS wheel with the runtime installed could still
+    report "no ONNX Runtime".
+    """
+    from ocrust import _runtime
+
+    cases = {
+        "linux": "libonnxruntime.so.1.30.0",
+        "darwin": "libonnxruntime.1.30.0.dylib",
+        "win32": "onnxruntime.dll",
+    }
+    for platform, filename in cases.items():
+        directory = tmp_path / platform
+        directory.mkdir()
+        (directory / filename).write_bytes(b"not really a library")
+        monkeypatch.setattr(_runtime.sys, "platform", platform)
+        found = _runtime.library_in(directory)
+        assert found is not None, f"{platform}: {filename} not found"
+        assert found.name == filename
+
+    # A directory without one says so instead of guessing.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _runtime.library_in(empty) is None
+    assert _runtime.library_in(tmp_path / "nope") is None
+
+
 def test_models_cache_dir_is_absolute():
     assert Path(ocrust.models_cache_dir()).is_absolute()
 

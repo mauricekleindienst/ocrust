@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import ocrust
@@ -21,7 +23,7 @@ def test_known_languages_include_every_script():
 
 
 def test_requesting_a_covered_language_works(engine):
-    ocr = ocrust.Ocr(models_dir=engine.models["detection"].rsplit("/", 1)[0], lang="de,fr")
+    ocr = ocrust.Ocr(models_dir=Path(engine.models["detection"]).parent, lang="de,fr")
     assert ocr.charset_size == engine.charset_size
 
 
@@ -30,7 +32,7 @@ def test_requesting_an_uncovered_language_fails_with_detail(engine):
     uncovered = [e["code"] for e in ocrust.known_languages() if e["code"] not in covered]
     if not uncovered:
         pytest.skip("the installed model covers every known language")
-    directory = engine.models["detection"].rsplit("/", 1)[0]
+    directory = Path(engine.models["detection"]).parent
     with pytest.raises(ocrust.OcrustError) as excinfo:
         ocrust.Ocr(models_dir=directory, lang=uncovered[0])
     message = str(excinfo.value)
@@ -39,7 +41,7 @@ def test_requesting_an_uncovered_language_fails_with_detail(engine):
 
 
 def test_unknown_language_code_is_rejected(engine):
-    directory = engine.models["detection"].rsplit("/", 1)[0]
+    directory = Path(engine.models["detection"]).parent
     with pytest.raises((ValueError, ocrust.OcrustError), match="unknown language"):
         ocrust.Ocr(models_dir=directory, lang="klingon")
 
