@@ -8,38 +8,39 @@ with exact ground truth — and can be reproduced in about three minutes
 
 | metric | value |
 |---|---|
-| mean character error rate (CER) | **0.045** |
-| median CER | **0.013** |
-| mean word error rate (WER) | 0.176 |
-| mean word recall | 0.836 |
+| mean character error rate (CER) | **0.040** |
+| median CER | **0.006** |
+| mean word error rate (WER) | 0.120 |
+| mean word recall | 0.892 |
 | unexpected failures | **0** |
 
 The gap between mean and median is the whole story: most documents are read
 almost perfectly, and a handful of layout-heavy ones drag the mean up.
 
-A CER of 0.013 means about one wrong character in eighty — for scanned German
-text, roughly one typo every two lines.
+A CER of 0.006 means about one wrong character in 170 — for scanned German text,
+roughly one typo every four lines.
 
 ## By document type
 
 | category | mean CER | word recall | ms/page |
 |---|---:|---:|---:|
-| skewed (−7°…+6°) | 0.000 | 1.000 | 793 |
-| born-digital PDF | 0.002 | 0.990 | 610 |
-| newspaper, 3 columns | 0.003 | 0.977 | 1090 |
-| multi-page TIFF (47 pages) | 0.003 | 0.980 | 774 |
-| dark mode / inverted | 0.003 | 0.980 | 615 |
-| 60 dpi thumbnail | 0.006 | 0.889 | 428 |
-| every raster format (8) | 0.007 | 0.887 | 717 |
-| aged, stained, bled-through | 0.012 | 0.856 | 738 |
-| 1-bit fax with dropout | 0.014 | 0.867 | 557 |
-| multi-page PDF (47 pages) | 0.014 | 0.848 | 682 |
-| 3×24 inch receipt strip | 0.054 | 0.891 | 2565 |
-| ruled forms / tables | 0.063 | 0.744 | 679 |
-| rotated PDFs (/Rotate 90/180/270) | 0.082 | 0.514 | 874 |
-| A0 drawing at 300 dpi | 0.151 | 0.868 | 29978 |
-| technical drawings | 0.170 | 0.855 | 793 |
-| thermal receipts | 0.188 | 0.882 | 390 |
+| skewed (−7°…+6°) | 0.000 | 1.000 | 744 |
+| every raster format (8) | 0.001 | 0.977 | 638 |
+| born-digital PDF | 0.002 | 0.990 | 620 |
+| newspaper, 3 columns | 0.003 | 0.977 | 1131 |
+| multi-page TIFF (47 pages) | 0.003 | 0.983 | 623 |
+| dark mode / inverted | 0.003 | 0.980 | 604 |
+| multi-page PDF (47 pages) | 0.004 | 0.957 | 673 |
+| aged, stained, bled-through | 0.006 | 0.937 | 713 |
+| 60 dpi thumbnail | 0.006 | 0.889 | 412 |
+| 1-bit fax with dropout | 0.014 | 0.867 | 547 |
+| image-only PDF, clean render | 0.042 | 0.792 | 677 |
+| rotated PDFs (/Rotate 90/180/270) | 0.054 | 0.884 | 885 |
+| 3×24 inch receipt strip | 0.054 | 0.891 | 2594 |
+| ruled forms / tables | 0.063 | 0.744 | 628 |
+| A0 drawing at 300 dpi | 0.147 | 0.895 | 30290 |
+| technical drawings | 0.170 | 0.855 | 583 |
+| thermal receipts | 0.183 | 0.941 | 406 |
 
 Skew, inversion, aging, fax dithering, low resolution and multi-page containers
 are, for practical purposes, solved. What is left is **layout**, not character
@@ -49,23 +50,23 @@ recognition — see below.
 
 | language | files | mean CER | word recall |
 |---|---:|---:|---:|
-| Polish | 8 | 0.009 | 0.897 |
-| English | 14 | 0.011 | 0.906 |
-| French | 8 | 0.011 | 0.906 |
-| Czech | 4 | 0.019 | 0.856 |
-| German | 58 | 0.053 | 0.862 |
+| Polish | 8 | 0.004 | 0.954 |
+| French | 8 | 0.006 | 0.945 |
+| Czech | 4 | 0.008 | 0.942 |
+| English | 14 | 0.008 | 0.936 |
+| German | 58 | 0.049 | 0.926 |
 | Japanese | 4 | 0.065 | 0.328 |
-| Greek | 4 | 0.191 | 0.438 |
+| Greek | 4 | 0.180 | 0.536 |
 
 Reading these correctly matters:
 
-- **German's 0.053** is not a German problem — the German files include the
+- **German's 0.049** is not a German problem — the German files include the
   receipts, forms and drawings, which is where the layout losses live. On clean
   German renders CER is 0.001.
 - **Japanese word recall (0.328) is meaningless**: Japanese does not separate
   words with spaces, so a whitespace-based word metric cannot work. Its CER of
   0.065 is the number to read.
-- **Greek is genuinely the weakest** — 0.191, and recall 0.438. Lookalike letters
+- **Greek is genuinely the weakest** — 0.180, and recall 0.536. Lookalike letters
   (`Α`/`A`, `Ο`/`O`, `Ρ`/`P`) and accented vowels defeat the shared charset. If
   Greek is your main language, measure first.
 
@@ -73,17 +74,18 @@ Reading these correctly matters:
 
 ### Order, not characters
 
-Receipts (CER 0.188) keep a **word recall of 0.882**: the words are all there and
-almost all spelled right, but they come out in a different sequence than a human
-reads them. A thermal receipt puts the item on the left and the price on the
+Receipts (CER 0.183) keep a **word error rate of 0.059 and word recall of
+0.941**: the words are all there and almost all spelled right, but they come out
+in a different sequence than a human reads them. When a document's CER is ten
+times its WER, the problem is order. A thermal receipt puts the item on the left and the price on the
 right; whether that is one line or two is a judgement call, and the engine's
 geometric answer sometimes differs from the ground truth's.
 
 The same applies to forms (0.063 / recall 0.744) and drawings (0.170 / recall
 0.855), where labels are scattered across a sheet.
 
-The A0 sheet is the same story pointing the other way: **0.151** with word recall
-0.868, up from 0.042 before boxes were assembled into lines. Its title block is
+The A0 sheet is the same story pointing the other way: **0.147** with word recall
+0.895, up from 0.042 before boxes were assembled into lines. Its title block is
 now read row-wise, and that sheet's ground truth lists the fields one per line.
 Capping the merge gap so the A0 block stays split was tried, and it made the A3
 drawings much worse (0.197 → 0.391), because there the row-wise join is what
@@ -115,13 +117,19 @@ The corpus paid for itself on its first run. Each of these was a real defect:
 | Quarter-turned PDFs read in column order | 0.79 | 0.082 |
 | Drawings: labels merged across the sheet | 0.47 | 0.170 |
 | Ruled tables read column by column | 0.33 | 0.063 |
-| Eight page workers slower than one | 0.79× | 1.38× |
-| corpus mean | 0.118 | 0.045 |
+| Eight page workers slower than one | 0.79× | 1.33× |
+| corpus mean | 0.118 | 0.040 |
 
-Then a second pass, assembling lines from boxes: receipts 0.332 → 0.188, forms
-0.156 → 0.063, the worst drawing 0.433 → 0.206, and the A0 sheet 0.042 → 0.151 as
-described above. Clean pages, newspapers, faxes and multi-page scans did not
-move.
+Then a second pass, assembling lines from boxes: receipts 0.332 → 0.183, forms
+0.156 → 0.063, the worst drawing 0.433 → 0.206, and the A0 sheet 0.042 → 0.147 as
+described above.
+
+Then a third: **spaces the recognizer swallowed** are restored from the column ink
+of each crop. A JPEG-compressed scan would return `Gesamtbetrag:5.726,88EUR`; it
+now returns the spaces. That moved everything that goes through a lossy encoder —
+image-only PDFs 0.014 → 0.004 (recall 0.848 → 0.957), rotated PDFs 0.082 → 0.054
+(recall 0.514 → 0.884), aged scans 0.012 → 0.006, raster formats 0.007 → 0.001 —
+and no category got worse.
 
 ## Robustness
 

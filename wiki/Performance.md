@@ -8,8 +8,8 @@ All numbers below were measured on the generated corpus — 106 files, 191 pages
 
 | | |
 |---|---|
-| Throughput | **median 669 ms per page** (mean 873, dominated by one A0 sheet) |
-| Whole corpus | 166.7 s for 191 pages, 416 MB of input |
+| Throughput | **median 669 ms per page** (mean 823, dominated by one A0 sheet) |
+| Whole corpus | 157.3 s for 191 pages, 416 MB of input |
 | Typical A4 at 200 dpi | 0.6–1.0 s, one page worker |
 | Cold start | ~130 MB and a moment to load the models — once per `Ocr` |
 | Memory while scanning | ~700–800 MB resident on A4 pages at 200 dpi |
@@ -51,10 +51,10 @@ On a 12-page scan, four cores:
 
 | workers | seconds | pages/s | speed-up |
 |---:|---:|---:|---:|
-| 1 | 8.28 | 1.45 | 1.00× |
-| 2 | 7.14 | 1.68 | 1.16× |
-| 4 | 6.02 | 1.99 | **1.38×** |
-| 8 | 6.11 | 1.96 | 1.36× |
+| 1 | 7.89 | 1.52 | 1.00× |
+| 2 | 7.23 | 1.66 | 1.09× |
+| 4 | 5.95 | 2.02 | **1.33×** |
+| 8 | 6.58 | 1.82 | 1.20× |
 
 Scaling is real but sublinear, and that is not a bug: ONNX Runtime already
 parallelizes inside each inference. `ocrust` divides the cores between page
@@ -77,7 +77,7 @@ for doc in ocr.scan_many(paths):    # 1.01× versus one at a time
 ```
 
 `scan_many` hands the whole list to Rust and scans documents with rayon. Over 20
-files it is 13.4 s versus 13.5 s — effectively identical, because a single
+files it is 13.6 s versus 13.5 s — effectively identical, because a single
 document already saturates the cores. Use it for the ergonomics (one call, GIL
 released once, results streamed), not for a speed-up.
 
@@ -85,7 +85,7 @@ released once, results streamed), not for a speed-up.
 
 | Change | Effect on speed | Effect on accuracy |
 |---|---|---|
-| `preprocess=False` | +8% | **5× the CER** on skewed input (0.008 → 0.044) |
+| `preprocess=False` | +8% | **10× the CER** on skewed input (0.004 → 0.040) |
 | `pdf_dpi=100` instead of 200 | +16% on PDFs | none on ordinary scans |
 | `word_boxes=False` | small | no text change; hOCR/ALTO lose word geometry |
 | `det_limit_side=736` (from 960) | detection scales with the working area | worse on small print |
@@ -97,18 +97,18 @@ Deskewing was once a wash: every line is rectified individually before
 recognition, so the characters came out the same either way. Since lines are
 assembled from baselines, it also decides whether a *line* is assembled
 correctly — and on a skewed page the baselines are only horizontal after
-deskewing. Measured over the skewed, aged and inverted pages: CER 0.008 with
-preprocessing, **0.044 without**, to save 8% of the time. Turn it off only for
+deskewing. Measured over the skewed, aged and inverted pages: CER 0.004 with
+preprocessing, **0.040 without**, to save 8% of the time. Turn it off only for
 input you know is upright.
 
 ## Resolution
 
 | dpi | mean CER | word recall | seconds |
 |---:|---:|---:|---:|
-| 100 | 0.004 | 0.962 | 4.2 |
-| 150 | 0.006 | 0.931 | 4.2 |
-| 200 (default) | 0.012 | 0.849 | 4.3 |
-| 300 | 0.004 | 0.946 | 5.0 |
+| 100 | 0.003 | 0.969 | 4.2 |
+| 150 | 0.004 | 0.964 | 4.2 |
+| 200 (default) | 0.007 | 0.910 | 4.4 |
+| 300 | 0.002 | 0.980 | 5.2 |
 
 Over six PDFs, differences are small and non-monotonic — the detector rescales
 the page regardless. 200 dpi is the default because it is where scanner output

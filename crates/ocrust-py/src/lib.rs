@@ -67,6 +67,7 @@ impl PyEngine {
         det_unclip_ratio = None,
         rec_batch_size = None,
         rec_image_height = None,
+        rec_space_gap = None,
         fix_orientation = true,
         languages = None,
     ))]
@@ -91,6 +92,7 @@ impl PyEngine {
         det_unclip_ratio: Option<f32>,
         rec_batch_size: Option<usize>,
         rec_image_height: Option<u32>,
+        rec_space_gap: Option<f32>,
         fix_orientation: bool,
         languages: Option<Vec<String>>,
     ) -> PyResult<Self> {
@@ -139,6 +141,9 @@ impl PyEngine {
         }
         if let Some(v) = rec_image_height {
             config.recognizer.image_height = v;
+        }
+        if let Some(v) = rec_space_gap {
+            config.recognizer.space_gap_factor = v;
         }
 
         if let Some(codes) = languages {

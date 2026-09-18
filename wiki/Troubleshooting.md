@@ -132,6 +132,21 @@ for line in sorted(doc.lines, key=lambda l: (l.box.y0, l.box.x0)):   # your own 
 and evaluating with word recall rather than CER if order does not matter for your
 use case.
 
+## Words are run together, or a space appears where none belongs
+
+The recognizer drops word spaces on lossy input, so `ocrust` restores them from
+the column ink of each line crop (see [[Architecture]]). Two knobs, in the rare
+case it gets one wrong:
+
+```python
+ocrust.Ocr(rec_space_gap=0)      # never insert a space; live with 88EUR
+ocrust.Ocr(rec_space_gap=3.0)    # be stricter about which gaps qualify
+```
+
+Words still run together where the paper between them is not actually blank —
+touching glyphs on a heavy fax, or a very tight font. Raising `pdf_dpi` helps more
+than tuning the threshold, because the blank columns then exist.
+
 ## A blank or nearly blank page comes out rotated
 
 Fixed: the deskew estimator ignores pages whose ink fraction is below 0.05% and

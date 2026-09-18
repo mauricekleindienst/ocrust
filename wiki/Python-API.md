@@ -44,6 +44,7 @@ ocr = ocrust.Ocr(
     # tuning
     fix_orientation=True, det_limit_side=None, det_box_threshold=None,
     det_unclip_ratio=None, rec_batch_size=None, rec_image_height=None,
+    rec_space_gap=None,   # 0 turns off restoring swallowed word spaces
 )
 ```
 
@@ -60,6 +61,7 @@ the GIL for the whole scan, so a thread pool in Python parallelizes properly.
 | `det_limit_side` | The detector's working size (960). Large formats are tiled automatically above 3840 px. |
 | `det_unclip_ratio` | 1.5. Raise it when characters are clipped, lower it when neighbouring lines merge. |
 | `lang` | Always, in production. See [[Languages]]. |
+| `rec_space_gap` | Almost never. `0` disables space restoration, which you want only if a swallowed space is preferable to a wrongly inserted one. |
 
 ### Methods
 

@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from ocrust.cli import _parse_pages, main
+from ocrust.cli import _expand_inputs, _parse_pages, main
 
 
 def test_page_spec_parsing():
@@ -18,6 +18,52 @@ def test_page_spec_parsing():
         _parse_pages("0")
     with pytest.raises(SystemExit):
         _parse_pages("5-2")
+
+
+def test_expand_inputs_walks_directories(tmp_path):
+    (tmp_path / "sub").mkdir()
+    keep = [tmp_path / "a.png", tmp_path / "sub" / "b.pdf"]
+    for path in keep:
+        path.write_bytes(b"x")
+    (tmp_path / "notes.txt").write_text("skipped")
+
+    files, missing = _expand_inputs([tmp_path])
+    assert files == sorted(keep)
+    assert missing == []
+
+
+def test_expand_inputs_handles_patterns_and_duplicates(tmp_path):
+    first = tmp_path / "one.png"
+    second = tmp_path / "two.png"
+    for path in (first, second):
+        path.write_bytes(b"x")
+
+    files, missing = _expand_inputs([tmp_path / "*.png", first])
+    assert files == [first, second], "a repeated file is read once, in a stable order"
+    assert missing == []
+
+    files, missing = _expand_inputs([tmp_path / "*.tiff"])
+    assert files == []
+    assert missing == [tmp_path / "*.tiff"]
+
+
+def test_expand_inputs_reports_an_empty_directory(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    files, missing = _expand_inputs([empty])
+    assert files == []
+    assert missing == [empty]
+
+
+def test_scan_reads_a_directory(engine, invoice_pdf, tmp_path):
+    folder = tmp_path / "archive"
+    folder.mkdir()
+    (folder / "invoice.pdf").write_bytes(invoice_pdf.read_bytes())
+    outdir = tmp_path / "out"
+
+    code = main(["scan", str(folder), "-f", "text", "-o", str(outdir), "-q"])
+    assert code == 0
+    assert (outdir / "invoice.txt").read_text().strip()
 
 
 def test_doctor_reports_json(capsys):
@@ -72,9 +118,17 @@ def test_output_with_suffix_stays_a_file(engine, invoice_pdf, tmp_path):
 
 
 def test_batch_output_rejects_a_file_path(capsys, invoice_pdf, tmp_path):
-    code = main(["scan", str(invoice_pdf), str(invoice_pdf), "-o", str(tmp_path / "x.txt")])
+    second = tmp_path / "copy.pdf"
+    second.write_bytes(invoice_pdf.read_bytes())
+    code = main(["scan", str(invoice_pdf), str(second), "-o", str(tmp_path / "x.txt")])
     assert code == 2
     assert "must be a directory" in capsys.readouterr().err
+
+
+def test_a_repeated_input_is_read_once(engine, invoice_pdf, capsys):
+    code = main(["scan", str(invoice_pdf), str(invoice_pdf), "-q"])
+    assert code == 0
+    assert capsys.readouterr().out.upper().count("INVOICE") == 1
 
 
 def test_worker_default_scales_with_the_batch():

@@ -22,6 +22,7 @@ Source (path | bytes | RGB frame)
         │
         ▼
   recognize (CTC) ──────  batch by aspect ratio · greedy decode · char positions
+        │                 swallowed word spaces restored from the column ink
         │                 charset checked against the requested languages
         ▼
     layout ─────────────  XY-cut reading order · paragraph grouping · de-hyphenation
@@ -52,7 +53,7 @@ Source (path | bytes | RGB frame)
 | `preprocess` | Skew estimation (sheared projection profile), inversion, rescaling. |
 | `detect` | DB inference and post-processing into text-line quads. |
 | `classify` | 180° line-orientation classification. |
-| `recognize` | CTC recognition, batching, greedy decoding, per-character positions. |
+| `recognize` | CTC recognition, batching, greedy decoding, per-character positions, space restoration. |
 | `dict` | The recognizer's class list, from a file or the ONNX metadata. |
 | `lang` | Language table, script grouping and charset-coverage checks. |
 | `geom` | Points, rects, quads, convex hull, minimum-area rect, perspective crop. |
@@ -65,6 +66,33 @@ Source (path | bytes | RGB frame)
 | `models` | Model discovery, the cache directory, bundle manifests and downloads. |
 | `runtime` | ONNX Runtime sessions, execution providers, the per-model session pool. |
 | `pipeline` | `Engine`: wires the stages together and parallelizes pages. |
+
+## Restoring swallowed spaces
+
+A CTC recognizer emits a space only when it is confident about the space class,
+and on JPEG-compressed scans or faxes it drops them: `88 EUR` comes back as
+`88EUR`, which costs a word in every downstream metric and breaks search.
+
+The character positions alone cannot fix that, because the timeline leaves a wide
+gap after a capital `M` and between a doubled `mm` as well. The pixels can. Each
+crop that goes into the recognizer also yields a **column ink profile** — one pass
+over the image that is being copied into the input tensor anyway — and a gap is
+turned into a space only when three things hold:
+
+1. it is wide on the CTC timeline (at least `space_gap_factor` median glyph
+   widths, default 2),
+2. the paper inside it is blank for at least `space_ink_fraction` of the crop
+   height (default 0.3), and
+3. typography allows it — nothing is spaced off a following full stop or comma.
+
+Measured on 200 dpi invoices, a swallowed space leaves 0.38 to 0.40 of the crop
+height in blank columns, the gap after an `M` leaves 0.04 to 0.06, and the widest
+innocent case (the paper around a narrow `1` in `1187`) reaches 0.27. Setting
+`space_gap_factor` to 0 turns the pass off.
+
+Glyph widths matter for this, so the decoder also keeps the *run* of timesteps a
+class occupies instead of only its first step: `m` is wider than `i`, which makes
+both the gaps and the per-word boxes mean something.
 
 ## Language checking
 

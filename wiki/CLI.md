@@ -28,11 +28,20 @@ ocrust scan invoice.pdf                       # text on stdout
 ocrust scan scan.tiff -f markdown             # headings, lists, paragraphs
 ocrust scan page.png -f json -o page.json
 ocrust scan *.jpg -f hocr -o out/             # one file per input
+ocrust scan archive/ -f text -o sidecars/     # a directory, read recursively
+ocrust scan 'scans/*.pdf' -o out/             # a pattern, even where the shell keeps it
 ocrust scan book.pdf --pages 1,3-5            # 1-based on the command line
 ocrust scan faint.png --min-confidence 0.3    # keep faint lines
 ocrust scan scan.pdf --dpi 300 --lang de,fr
 ocrust scan photo.jpg -q                      # no summary line
 ```
+
+Inputs may be files, directories or glob patterns. A directory is walked
+recursively and filtered to readable extensions (images, TIFF, PDF); a pattern is
+expanded by `ocrust` itself, which is what makes `ocrust scan '*.pdf'` work on
+Windows too. Everything is sorted and de-duplicated, so a batch writes the same
+output twice in a row. A directory that contains nothing readable is an error, not
+a silent success.
 
 ```console
 $ ocrust scan rechnung.png

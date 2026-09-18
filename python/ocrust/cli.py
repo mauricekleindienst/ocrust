@@ -38,7 +38,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     scan = sub.add_parser("scan", help="read documents and write the text out")
-    scan.add_argument("inputs", nargs="+", type=Path, help="files to read")
+    scan.add_argument(
+        "inputs",
+        nargs="+",
+        type=Path,
+        help="files, directories (read recursively) or glob patterns",
+    )
     scan.add_argument(
         "-f",
         "--format",
@@ -156,6 +161,59 @@ def _parse_pages(spec: str | None) -> list[int] | None:
     return sorted(set(pages))
 
 
+#: Suffixes worth reading when a directory is handed in. Content sniffing
+#: decides what a file really is, but a folder should not be opened blind.
+READABLE_SUFFIXES = frozenset(
+    {
+        ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
+        ".pnm", ".pbm", ".pgm", ".ppm", ".tga", ".dds", ".hdr", ".exr",
+        ".qoi", ".ico", ".pdf",
+    }
+)  # fmt: skip
+
+
+def _expand_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[Path]]:
+    """Resolves directories and glob patterns into files.
+
+    `ocrust scan archive/` is what everyone tries first, and on Windows the shell
+    does not expand `*.pdf` either. Directories are walked recursively and
+    filtered by suffix; patterns are expanded; everything is sorted so a batch
+    writes the same output twice in a row.
+
+    Returns the files to read and the inputs that matched nothing.
+    """
+    files: list[Path] = []
+    missing: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            found = sorted(
+                child
+                for child in path.rglob("*")
+                if child.is_file() and child.suffix.lower() in READABLE_SUFFIXES
+            )
+            if found:
+                files.extend(found)
+            else:
+                missing.append(path)
+        elif path.exists():
+            files.append(path)
+        elif any(ch in str(path) for ch in "*?["):
+            # A pattern the shell left alone, e.g. every `ocrust scan *.pdf` on
+            # Windows. Anchor it at the pattern's own directory.
+            base = path.parent if str(path.parent) else Path()
+            found = sorted(item for item in base.glob(path.name) if item.is_file())
+            if found:
+                files.extend(found)
+            else:
+                missing.append(path)
+        else:
+            missing.append(path)
+    # Keep the first occurrence of each file: two patterns may overlap.
+    seen: set[Path] = set()
+    unique = [f for f in files if not (f in seen or seen.add(f))]
+    return unique, missing
+
+
 def _workers_for(args: argparse.Namespace, inputs: int) -> int | None:
     """Picks a sensible worker count when the user did not.
 
@@ -184,14 +242,18 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
 
 def _cmd_scan(args: argparse.Namespace) -> int:
     pages = _parse_pages(args.pages)
-    args._resolved_workers = _workers_for(args, len(args.inputs))
-    engine = _engine_from_args(args)
 
-    missing = [p for p in args.inputs if not p.exists()]
+    args.inputs, missing = _expand_inputs(args.inputs)
     if missing:
         for path in missing:
             print(f"ocrust: no such file: {path}", file=sys.stderr)
         return 2
+    if not args.inputs:
+        print("ocrust: nothing to read", file=sys.stderr)
+        return 2
+
+    args._resolved_workers = _workers_for(args, len(args.inputs))
+    engine = _engine_from_args(args)
 
     many = len(args.inputs) > 1
     if many and args.output and args.output.suffix:
