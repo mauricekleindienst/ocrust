@@ -11,17 +11,46 @@ import os
 import sys
 from pathlib import Path
 
-__all__ = ["ensure_runtime", "find_onnxruntime", "default_models_dir", "runtime_report"]
+__all__ = [
+    "ensure_runtime",
+    "find_onnxruntime",
+    "library_in",
+    "default_models_dir",
+    "runtime_report",
+]
 
-_DYLIB_NAMES = {
-    "win32": ("onnxruntime.dll",),
-    "darwin": ("libonnxruntime.dylib",),
+#: How each platform names the library, and how its wheels version that name.
+#:
+#: The versioned spellings differ in a way that matters: Linux appends the
+#: version (`libonnxruntime.so.1.30.0`), macOS puts it *before* the extension
+#: (`libonnxruntime.1.30.0.dylib`), and Windows normally ships an unversioned
+#: `onnxruntime.dll`. A single `name + "*"` glob finds the first and misses the
+#: second, which is why macOS could not load a runtime that was installed.
+_DYLIB_PATTERNS = {
+    "win32": ("onnxruntime.dll", "onnxruntime*.dll"),
+    "darwin": ("libonnxruntime.dylib", "libonnxruntime*.dylib"),
 }
-_DEFAULT_NAMES = ("libonnxruntime.so",)
+_DEFAULT_PATTERNS = ("libonnxruntime.so", "libonnxruntime.so*")
 
 
-def _candidate_names() -> tuple[str, ...]:
-    return _DYLIB_NAMES.get(sys.platform, _DEFAULT_NAMES)
+def _candidate_patterns() -> tuple[str, ...]:
+    """Exact name first, then the glob that matches versioned spellings."""
+    return _DYLIB_PATTERNS.get(sys.platform, _DEFAULT_PATTERNS)
+
+
+def library_in(directory: Path) -> Path | None:
+    """The ONNX Runtime library inside `directory`, if there is one.
+
+    The newest version wins when a directory holds several, which is what
+    sorting the matches gives.
+    """
+    if not directory.is_dir():
+        return None
+    exact, pattern = _candidate_patterns()
+    if (directory / exact).exists():
+        return directory / exact
+    matches = sorted(directory.glob(pattern))
+    return matches[-1] if matches else None
 
 
 def find_onnxruntime() -> Path | None:
@@ -42,18 +71,10 @@ def find_onnxruntime() -> Path | None:
 
     roots = [Path(p) for p in getattr(onnxruntime, "__path__", [])]
     for root in roots:
-        capi = root / "capi"
-        for directory in (capi, root):
-            if not directory.is_dir():
-                continue
-            for name in _candidate_names():
-                exact = directory / name
-                if exact.exists():
-                    return exact
-                # Wheels ship versioned names such as libonnxruntime.so.1.28.0.
-                matches = sorted(directory.glob(name + "*"))
-                if matches:
-                    return matches[-1]
+        for directory in (root / "capi", root):
+            found = library_in(directory)
+            if found is not None:
+                return found
     return None
 
 
