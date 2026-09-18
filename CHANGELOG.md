@@ -36,7 +36,7 @@ First release.
 
 ### Languages
 
-- 36 languages known, with per-language alphabets cross-checked against
+- 35 languages known, with per-language alphabets cross-checked against
   PaddleOCR's dictionaries.
 - `lang=` is a check, not a hint: building an engine fails when the recognition
   model cannot spell a requested language, naming the missing characters.
@@ -47,8 +47,15 @@ First release.
 - **Boxes on one baseline now become one line.** A detector returns boxes, not
   lines: a receipt's item and its right-aligned price are two boxes, and so are
   the cells of a table row. Joining them fixed receipts (CER 0.332 → 0.188),
-  ruled forms (0.156 → 0.062) and the worst drawing (0.433 → 0.206), while clean
-  pages, newspapers, faxes and multi-page scans stayed exactly as they were.
+  ruled forms (0.156 → 0.063) and drawings (0.197 on the worst sheet), while clean
+  pages, newspapers, faxes and multi-page scans stayed exactly as they were. The
+  corpus mean went 0.054 → 0.045. It costs one category: the A0 sheet's title
+  block is now read row-wise, which its ground truth lists field by field
+  (0.042 → 0.151, word recall unchanged at 0.868) — see `docs/evaluation.md`.
+- Preprocessing now **earns its keep**: because lines are assembled from
+  baselines, deskewing decides whether a skewed page's line is assembled
+  correctly. `preprocess=False` went from free to costing 5x the error rate on
+  skewed, aged and inverted pages.
 - Whether a wide gap belongs to one row is decided by **repeating columns**: a
   table or price list puts cells at the same x positions row after row, a
   drawing's labels merely share a height. The decision is taken per region, so a
@@ -56,10 +63,27 @@ First release.
 - A column split now also requires **two lines on each side** and a side that is
   wide relative to the gutter, which is what separates a newspaper's columns from
   a table's cells.
-- **12% faster per page** (788 → 696 ms on a 200 dpi A4 page): the line
-  orientation classifier now asks about a sample of crops and applies a unanimous
-  verdict to the rest (it was costing a fifth of the page budget), and the skew
-  estimate works on a smaller probe with a coarser first pass.
+- **Fewer calls per page**: the line orientation classifier asks about a sample of
+  crops and applies a unanimous verdict to the rest instead of classifying every
+  line, and the skew estimate works on a smaller probe with a coarser first pass.
+  A clean 200 dpi A4 page takes about 660 ms on four cores; the corpus median is
+  669 ms per page.
+
+### Models and offline installs
+
+- The model manifest points at this repository's own `models/ppocrv6/` on
+  `raw.githubusercontent.com`, so `ocrust install-models` and the repository are
+  the same source.
+- Model downloads authenticate with `OCRUST_GITHUB_TOKEN` or `GITHUB_TOKEN` when
+  one is set, which is what a private repository or a GitHub Enterprise mirror
+  needs. The token is sent only to GitHub hosts — never to a mirror URL out of a
+  manifest — and that is unit-tested.
+
+### Documentation
+
+- A 15-page wiki under `wiki/`: installation, quickstart, the Python API, the
+  CLI, PDF workflows, languages, models, performance, accuracy, architecture,
+  evaluation, troubleshooting, contributing and the roadmap.
 
 ### Found by the corpus, fixed
 

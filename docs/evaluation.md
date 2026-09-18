@@ -52,7 +52,8 @@ exact text it contains**. That is what makes error rates possible.
   that fails unexpectedly is called out in the report.
 
 Both a Markdown report and the raw JSON are written, so results can be diffed
-between runs or plotted.
+between runs or plotted. The last full run is checked in as
+[`evaluation-report.md`](evaluation-report.md).
 
 ## What the first run found
 
@@ -71,50 +72,61 @@ the engine or its defaults, not a measurement artifact:
 
 106 files, 191 pages, 416 MB on four CPU cores, with the shipped defaults:
 
-- **788 ms per page**, 150.6 s for the whole corpus
-- **median CER 0.013**, mean 0.054, mean word recall 0.834
+- **median 669 ms per page** (mean 873, which the A0 sheet dominates), 166.7 s for
+  the whole corpus
+- **median CER 0.013**, mean 0.045, mean word recall 0.836
 - **zero unexpected failures**; the seven deliberately broken files behave as
   designed (five error cleanly, the PNG named `.pdf` is read anyway, the blank
   page returns no text)
 
 | category | mean CER | ms/page | | category | mean CER | ms/page |
 |---|---:|---:|---|---|---:|---:|
-| skewed | 0.001 | 761 | | multipage (PDF) | 0.014 | 664 |
-| newspaper (3 columns) | 0.003 | 1113 | | drawings | 0.170 | 622 |
-| multipage (TIFF) | 0.003 | 607 | | forms (tables) | 0.156 | 637 |
-| dark mode | 0.003 | 639 | | A0 at 300 dpi | 0.042 | 24801 |
-| 60 dpi thumbnail | 0.006 | 431 | | rotated PDFs | 0.082 | 845 |
-| every raster format | 0.007 | 660 | | receipts | 0.332 | 394 |
-| aged and stained | 0.012 | 706 | | born-digital | 0.002 | 626 |
-| 1-bit fax | 0.014 | 594 | | clean | 0.033 | 681 |
+| skewed | 0.000 | 793 | | multipage (PDF) | 0.014 | 682 |
+| born-digital | 0.002 | 610 | | clean | 0.033 | 658 |
+| newspaper (3 columns) | 0.003 | 1090 | | forms (tables) | 0.063 | 679 |
+| multipage (TIFF) | 0.003 | 774 | | rotated PDFs | 0.082 | 874 |
+| dark mode | 0.003 | 615 | | A0 at 300 dpi | 0.151 | 29978 |
+| 60 dpi thumbnail | 0.006 | 428 | | drawings | 0.170 | 793 |
+| every raster format | 0.007 | 717 | | receipts | 0.188 | 390 |
+| aged and stained | 0.012 | 738 | | 1-bit fax | 0.014 | 557 |
 
-What moved after the fixes: A0 drawings 0.96 → 0.04, rotated PDFs 0.79 → 0.08,
-drawings 0.47 → 0.17, and the corpus mean 0.118 → 0.054.
+What moved, in the order the fixes landed: A0 drawings 0.96 → 0.042 (tiling),
+rotated PDFs 0.79 → 0.082, drawings 0.47 → 0.170, forms 0.156 → 0.063, receipts
+0.332 → 0.188 (line assembly), and the corpus mean 0.118 → 0.045.
 
 What is still weak, and why:
 
-- **Receipts (0.332)** and **forms (0.156)** lose on *order*, not on characters —
-  word recall stays at 0.88 and 0.74. Right-aligned prices and table cells end up
-  in a different sequence than a human would read them. Proper table structure
-  recognition is the fix, and it is not implemented.
-- **Drawings (0.170)** are the same story: recall 0.855 with labels scattered
-  across a sheet.
-- **Greek** is the weakest language in the bundle.
+- **Receipts (0.188)**, **forms (0.063)** and **drawings (0.170)** lose on
+  *order*, not on characters — word recall is 0.882, 0.744 and 0.855. Right-aligned
+  prices and scattered labels end up in a different sequence than a human would
+  read them. Proper table structure recognition is the fix, and it is not
+  implemented.
+- **The A0 sheet went the other way**: 0.042 before line assembly, **0.151**
+  after, with word recall unchanged at 0.868. Nothing is misread; the title
+  block's two-column fields are now joined into rows, and on that sheet the
+  resulting sequence differs from the ground truth's. Capping the merge gap so
+  that the A0 block stays split was tried and made the A3 drawings much worse
+  (0.197 → 0.391), because there the row-wise join is what matches. Both
+  behaviours are defensible readings of a title block, which is the honest
+  argument for treating table structure as unfinished rather than tuned.
+- **Greek** is the weakest language in the bundle (0.191, recall 0.438).
 
 ### Speed findings
 
 | measurement | result |
 |---|---|
-| worker scaling on a 12-page scan | 7.8 s at 1 worker, 6.0 s at 4, 5.8 s at 8 (1.34x) |
+| worker scaling on a 12-page scan | 8.3 s at 1 worker, 6.0 s at 4, 6.1 s at 8 (1.38x) |
 | batch API versus one at a time | 1.01x — the same, once threads stopped fighting |
-| rasterization resolution | 100 dpi is as accurate as 300 on these pages and 8% faster |
-| preprocessing on versus off | identical CER (0.008), 9% slower with it on |
+| rasterization resolution | 100 dpi is as accurate as 300 on these pages and 16% faster |
+| preprocessing on versus off | CER 0.008 with, 0.044 without; 8% faster without |
 
-That last row is worth stating plainly: on this corpus, deskewing and inversion
-do not improve recognition, because the detector finds rotated boxes and each
-line is rectified before it reaches the recognizer. They stay on by default
-because they do help *layout* on multi-column pages, and the cost is small — but
-`preprocess=False` is a legitimate way to buy 9%.
+That last row changed sign when line assembly landed, and the reason is worth
+recording: boxes are now joined into lines by their baselines, and on a skewed
+page the baselines are only horizontal *after* deskewing. Preprocessing used to
+be a wash (identical CER) because every line was rectified individually before
+recognition; now it also decides whether a line is assembled correctly. On the
+skewed, aged and inverted pages, turning it off costs 5x the error rate to save
+8% of the time. Leave it on.
 
 ## Reading the numbers
 
