@@ -2,7 +2,7 @@
 
 **Document OCR for Python, with a Rust core.** Images, multi-page TIFF and PDF in
 — text, Markdown, JSON, hOCR, ALTO, CSV, multi-page TIFF or a searchable PDF out.
-27 languages. One `pip install`, no system dependencies.
+26 languages. One `pip install`, no system dependencies.
 
 ```bash
 pip install "ocrust[models]"
@@ -61,7 +61,7 @@ three rules:
 |---|---|
 | Input | PNG, JPEG, WebP, BMP, GIF, PNM, TGA, DDS, HDR, OpenEXR, QOI, ICO, multi-page TIFF, PDF, `bytes`, numpy arrays, PIL images |
 | Output | text, Markdown, JSON, hOCR, ALTO XML, CSV, searchable PDF (Unicode text layer), PDF text layer, multi-page TIFF |
-| Languages | 27 complete (Latin, Greek, Japanese, Chinese); 35 known and checkable |
+| Languages | 26 complete (Latin, Japanese, Chinese); 35 known and checkable, Greek among the ones refused |
 | Models | PP-OCRv6, 18 708 characters, 31 MB, Apache-2.0 |
 | Speed | ~670 ms per 200 dpi A4 page on four CPU cores |
 | Accuracy | median CER 0.006 over a 118-file corpus of aged scans, faxes, drawings and forms |

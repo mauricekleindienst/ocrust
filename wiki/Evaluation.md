@@ -113,7 +113,8 @@ column layout. Fixing the generator exposed three reading-order bugs at once —
 columns read across the gutter, a table's rows split into columns, a page that is
 nothing but a table measuring its own gutters as word spaces. All three are fixed;
 the two- and three-column pages read at CER 0.000 and the corpus mean went
-0.040 → 0.036.
+0.040 → 0.036 — and to 0.031 once Greek, which the bundled charset cannot write,
+stopped being averaged in with the languages it can.
 
 The current numbers are on [Accuracy](Accuracy.md) and [Performance](Performance.md).
 

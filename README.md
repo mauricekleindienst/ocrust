@@ -12,7 +12,7 @@
 
 **Document OCR for Python, with a Rust core.** Images, multi-page TIFF and PDF in
 — text, Markdown, JSON, hOCR, ALTO, CSV, multi-page TIFF or a searchable PDF out.
-27 languages. One `pip install`, no system packages.
+26 languages. One `pip install`, no system packages.
 
 ```bash
 pip install "ocrust[models]"
@@ -101,14 +101,19 @@ the numbers and the limits. `--no-tables` turns it off.
 
 ## Languages
 
-The bundled PP-OCRv6 recognizer has 18 708 classes and covers **27 languages**
+The bundled PP-OCRv6 recognizer has 18 708 classes and covers **26 languages**
 completely:
 
 | script | languages |
 |---|---|
 | Latin | English, German, French, Spanish, Italian, Portuguese, Dutch, Swedish, Danish, Norwegian, Finnish, Icelandic, Polish, Czech, Slovak, Hungarian, Romanian, Turkish, Croatian, Slovenian, Estonian, Latvian, Lithuanian |
-| Greek | Greek |
 | Han / Kana | Chinese (Simplified and Traditional), Japanese |
+
+Greek is **not** among them. The bundle has the plain Greek letters but none of
+the accented vowels and no final sigma, and Greek cannot be written without
+them, so asking for `el` fails with the missing characters named rather than
+returning accent-stripped text. Point `--models` at a Greek-capable bundle and
+the check passes on its own.
 
 ```bash
 ocrust languages          # what the installed model covers

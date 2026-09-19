@@ -75,7 +75,9 @@ the engine or its defaults, not a measurement artifact:
 
 - **median 673 ms per page** (mean 805, which the A0 sheet dominates), 163.3 s for
   the whole corpus
-- **median CER 0.006**, mean 0.036, mean WER 0.107, mean word recall 0.904
+- **median CER 0.006**, mean 0.031, mean WER 0.093, mean word recall 0.918,
+  over the 108 files in a language the bundle can write (the four Greek pages
+  are held out and reported on their own)
 - **zero unexpected failures**; the seven deliberately broken files behave as
   designed (five error cleanly, the PNG named `.pdf` is read anyway, the blank
   page returns no text)
@@ -99,7 +101,8 @@ rotated PDFs 0.79 → 0.054, drawings 0.47 → 0.170, forms 0.156 → 0.063, rec
 columns before rows: three-column pages 0.003 → 0.000, two-column pages from
 being read across the gutter to 0.000, and a full-page price list from two
 columns to four — every document already in the corpus unchanged, the mean
-0.040 → 0.036 on a corpus grown by those two layouts.
+0.040 → 0.036 on a corpus grown by those two layouts (0.031 once Greek, which
+the bundle cannot write, stopped counting toward it).
 
 What is still weak, and why:
 
@@ -117,7 +120,13 @@ What is still weak, and why:
   (0.197 → 0.391), because there the row-wise join is what matches. Both
   behaviours are defensible readings of a title block, which is the honest
   argument for treating table structure as unfinished rather than tuned.
-- **Greek** is the weakest language in the bundle (0.180, recall 0.536).
+- **Greek was the weakest language in the bundle** (0.180, recall 0.536) — and
+  the reason turned out not to be the pages. The charset carries the plain Greek
+  letters and none of the 21 accented vowels, dialytika or the final sigma, so
+  ordinary Greek prose cannot be written with it at all; the recognizer reached
+  for Latin lookalikes (`Σúνoλo` for `Σύνολο`) and still reported 0.93
+  confidence. Greek is no longer claimed as covered, and these four files are
+  held out of every accuracy figure and reported on their own.
 
 The PDF text layer has nothing left to lose: over the 39 PDFs, **0 characters**
 fall outside what the layer can write (it was 340 before the Unicode font), and a
