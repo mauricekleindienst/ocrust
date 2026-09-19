@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 — 2026-09-19
 
 Three layout bugs, all found by probing pages the corpus did not have.
 Accuracy over the documents that were already there is unchanged file for file;
