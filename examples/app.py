@@ -408,7 +408,7 @@ function drawStage() {
     svg.setAttribute("viewBox", `0 0 ${page.width} ${page.height}`);
     svg.setAttribute("preserveAspectRatio", "none");
     const hits = new Set((current.matches || [])
-      .filter(m => m.page === 0).map(m => m.box.join(",")));
+      .filter(m => m.page === page.index).map(m => m.box.join(",")));
     for (const line of page.lines) {
       const r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
       const [x0, y0, x1, y1] = line.box;
@@ -419,7 +419,7 @@ function drawStage() {
       svg.append(r);
     }
     for (const m of current.matches || []) {
-      if (m.page !== 0) continue;
+      if (m.page !== page.index) continue;
       const r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
       const [x0, y0, x1, y1] = m.box;
       r.setAttribute("x", x0); r.setAttribute("y", y0);

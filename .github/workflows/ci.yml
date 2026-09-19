@@ -87,8 +87,15 @@ jobs:
         run: python scripts/build_models_wheel.py --models-dir models/ppocrv6 -o dist
       - name: Install and test
         if: matrix.test
+        # bash on every runner, so the wheel globs below expand on Windows too.
+        shell: bash
         run: |
-          pip install --find-links dist "ocrust[models]" pytest numpy pillow
+          # The wheels this job built, and nothing from an index: `--find-links`
+          # treats PyPI as an equal candidate for the same version number, so
+          # once 0.1.0 was released it started installing *that* and testing the
+          # release instead of the commit.
+          pip install onnxruntime pytest numpy pillow
+          pip install --no-index --no-deps dist/ocrust-*.whl dist/ocrust_models-*.whl
           python -c "import ocrust; print(ocrust.__version__); print(ocrust.runtime_info())"
           ocrust languages
           pytest -q
