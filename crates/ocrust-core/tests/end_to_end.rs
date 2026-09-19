@@ -303,10 +303,23 @@ fn charset_covers_the_advertised_languages() {
     // Scripts beyond WinAnsi cannot be rendered by the test fixture, so their
     // support is asserted at the character-set level instead.
     for code in [
-        "de", "fr", "es", "it", "pt", "nl", "sv", "da", "pl", "cs", "tr", "el",
+        "de", "fr", "es", "it", "pt", "nl", "sv", "da", "pl", "cs", "tr",
     ] {
         assert!(codes.contains(&code), "{code} missing from {codes:?}");
     }
+
+    // Greek is known but not covered: the bundle has the plain letters and
+    // none of the accented vowels, so it cannot write the language. Claiming
+    // it here would put accent-stripped text in front of a Greek reader at
+    // full confidence.
+    assert!(
+        !codes.contains(&"el"),
+        "Greek must not be offered as covered: {codes:?}"
+    );
+    assert!(
+        ocrust_core::lang::parse("el").is_some(),
+        "Greek must stay known so that asking for it explains itself"
+    );
 }
 
 #[test]

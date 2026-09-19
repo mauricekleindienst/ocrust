@@ -191,9 +191,8 @@ they were light-on-dark. `--gray` halves the size for bitonal scans.
 
 ```console
 $ ocrust languages
-27 language(s) covered by the installed model (18709 characters):
+26 language(s) covered by the installed model (18709 characters):
 
-  greek       el (Greek)
   han         zh (Chinese (Simplified)), zh-hant (Chinese (Traditional))
   kana        ja (Japanese)
   latin       cs (Czech), da (Danish), de (German), en (English), …

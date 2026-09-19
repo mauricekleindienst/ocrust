@@ -64,6 +64,13 @@ def load_font(kind: str, size: int) -> ImageFont.FreeTypeFont:
 
 # ---------------------------------------------------------------- content
 
+#: Corpus languages the bundled recognizer cannot write, kept as evidence.
+#:
+#: Their pages are still generated and still scanned — a reader deserves to see
+#: what an unsupported script actually looks like coming out — but they are held
+#: out of the accuracy figures, which describe the languages ocrust claims.
+UNSUPPORTED_SCRIPTS: frozenset[str] = frozenset({"el"})
+
 TEXTS: dict[str, list[str]] = {
     "de": [
         "RECHNUNG Nr. 2026-04-1187",
@@ -650,6 +657,7 @@ class Corpus:
         pages: int = 1,
         notes: str = "",
         expect_error: bool = False,
+        unsupported_script: bool = False,
     ) -> None:
         target = self.root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -661,6 +669,7 @@ class Corpus:
             "lines": lines,
             "notes": notes,
             "expect_error": expect_error,
+            "unsupported_script": unsupported_script,
             "bytes": len(data),
         }
 
@@ -696,6 +705,7 @@ def build(root: Path, small: bool = False) -> Corpus:
     print("clean pages ...")
     for language, lines in TEXTS.items():
         kind = "jp" if language == "ja" else "serif"
+        unsupported = language in UNSUPPORTED_SCRIPTS
         for dpi in (200, 300) if not small else (200,):
             spec = text_page(lines, dpi=dpi, font_kind=kind, point_size=12)
             name = f"clean/{language}_{dpi}dpi.png"
@@ -706,6 +716,7 @@ def build(root: Path, small: bool = False) -> Corpus:
                 lines=spec.lines,
                 language=language,
                 notes=f"crisp render at {dpi} dpi",
+                unsupported_script=unsupported,
             )
             pdf = image_only_pdf([spec.image], dpi=dpi)
             corpus.add(
@@ -715,6 +726,7 @@ def build(root: Path, small: bool = False) -> Corpus:
                 lines=spec.lines,
                 language=language,
                 notes="image-only PDF, no text layer",
+                unsupported_script=unsupported,
             )
 
     print("aged and damaged ...")

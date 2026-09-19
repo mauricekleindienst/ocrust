@@ -131,6 +131,10 @@ class FileResult:
     cer: float | None = None
     wer: float | None = None
     recall: float | None = None
+    #: True for a script the bundled model cannot write. Still scanned and
+    #: still scored, but held out of every accuracy figure below: averaging in
+    #: a language ocrust does not claim would understate the ones it does.
+    unsupported_script: bool = False
     text: str = ""
 
     @property
@@ -162,6 +166,7 @@ def scan_pass(engine: ocrust.Ocr, root: Path, truth: dict) -> list[FileResult]:
             language=entry.get("language", "de"),
             bytes=entry["bytes"],
             expected_pages=entry.get("pages", 1),
+            unsupported_script=entry.get("unsupported_script", False),
         )
         started = time.perf_counter()
         try:
@@ -417,7 +422,7 @@ def aggregate(results: list[FileResult]) -> dict[str, dict[str, float]]:
         buckets.setdefault(result.category, []).append(result)
     out = {}
     for category, items in sorted(buckets.items()):
-        scored = [i for i in items if i.cer is not None]
+        scored = [i for i in items if i.cer is not None and not i.unsupported_script]
         out[category] = {
             "files": len(items),
             "ok": sum(1 for i in items if i.ok),
@@ -443,7 +448,8 @@ def aggregate(results: list[FileResult]) -> dict[str, dict[str, float]]:
 
 def markdown(report: Report, truth: dict, meta: dict) -> str:
     results = report.files
-    scored = [r for r in results if r.cer is not None]
+    scored = [r for r in results if r.cer is not None and not r.unsupported_script]
+    held_out = [r for r in results if r.cer is not None and r.unsupported_script]
     total_pages = sum(r.pages for r in results)
     total_seconds = sum(r.seconds for r in results)
     expected_errors = {r for r, e in truth.items() if e.get("expect_error")}
@@ -473,6 +479,12 @@ def markdown(report: Report, truth: dict, meta: dict) -> str:
             f"mean WER {statistics.mean([r.wer for r in scored]):.3f}, "
             f"**mean word recall {statistics.mean([r.recall for r in scored]):.3f}**"
         )
+    if held_out:
+        add(
+            f"- held out of those figures: {len(held_out)} file(s) in a script the "
+            f"bundled model cannot write "
+            f"(mean CER {statistics.mean([r.cer for r in held_out]):.3f}) — see below"
+        )
     failures = [r for r in results if not r.ok]
     unexpected = [r for r in failures if r.path not in expected_errors]
     missed = [r for r in results if r.ok and r.path in expected_errors]
@@ -481,6 +493,26 @@ def markdown(report: Report, truth: dict, meta: dict) -> str:
         f"**{len(unexpected)} unexpected**, {len(missed)} broken file(s) that did not error"
     )
     add("")
+
+    if held_out:
+        add("## Scripts the bundled model cannot write")
+        add("")
+        add(
+            "Scanned and scored, but excluded from every figure above: `ocrust"
+            " languages` does not offer these, and asking for one fails with the"
+            " characters it cannot emit. They are here so the cost of that gap is"
+            " on the record rather than folded into an average."
+        )
+        add("")
+        add("| file | language | CER | WER | word recall | confidence |")
+        add("|---|---|---:|---:|---:|---:|")
+        for r in sorted(held_out, key=lambda r: r.path):
+            conf = f"{r.confidence:.3f}" if r.confidence is not None else "—"
+            add(
+                f"| `{r.path}` | {r.language} | {r.cer:.3f} | {r.wer:.3f} "
+                f"| {r.recall:.3f} | {conf} |"
+            )
+        add("")
 
     add("## By category")
     add("")

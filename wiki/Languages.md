@@ -1,13 +1,12 @@
 # Languages
 
-The shipped model covers **27 languages completely** and `ocrust` knows **35**,
+The shipped model covers **26 languages completely** and `ocrust` knows **35**,
 which is what lets it refuse the ones it cannot spell.
 
 ```console
 $ ocrust languages
-27 language(s) covered by the installed model (18709 characters):
+26 language(s) covered by the installed model (18709 characters):
 
-  greek       el (Greek)
   han         zh (Chinese (Simplified)), zh-hant (Chinese (Traditional))
   kana        ja (Japanese)
   latin       cs (Czech), da (Danish), de (German), en (English), es (Spanish),
@@ -64,7 +63,6 @@ Traditional Chinese, not `zh`.
 | Script | Languages |
 |---|---|
 | Latin | English, German, French, Spanish, Italian, Portuguese, Dutch, Swedish, Danish, Norwegian, Finnish, Icelandic, Polish, Czech, Slovak, Hungarian, Romanian, Turkish, Croatian, Slovenian, Estonian, Latvian, Lithuanian |
-| Greek | Greek |
 | Kana + Han | Japanese |
 | Han | Chinese (Simplified), Chinese (Traditional) |
 
@@ -73,6 +71,7 @@ Traditional Chinese, not `zh`.
 | Language | Coverage | Why |
 |---|---:|---|
 | Vietnamese | 98% | two tone-marked vowels (`ạ`, `ả`) are outside the charset |
+| Greek | 70% | the plain letters are there; every accented vowel and the final sigma are not |
 | Russian, Ukrainian, Bulgarian, Serbian | 0% | no Cyrillic in the PP-OCRv6 charset |
 | Korean | 0% | no Hangul |
 | Arabic | 0% | no Arabic script |
@@ -94,7 +93,7 @@ ocrust.Ocr().partial_languages(min_ratio=0.5)
 
 ## Mixed-language documents
 
-Nothing needs to be declared per page. One recognizer handles all 27 languages
+Nothing needs to be declared per page. One recognizer handles all 26 languages
 at once, so a German invoice with French line items and an English footer is read
 in one pass:
 
@@ -120,13 +119,19 @@ Measured on the generated corpus ([Evaluation](Evaluation.md)), clean renders at
 | English | 0.003 |
 | Czech | 0.007 |
 | Japanese | 0.049 |
-| Greek | 0.173 |
 
 Latin-script European text is essentially solved at this resolution, diacritics
 included. Japanese costs more because a single wrong kanji is a larger share of a
-shorter line. Greek is the weakest in the bundle: it loses on lookalike letters
-(`Α`/`A`, `Ο`/`O`, `Ρ`/`P`) and on accented vowels. If Greek is your main
-language, measure before you commit.
+shorter line.
+
+Greek is absent from this table on purpose. It used to sit at the bottom of it,
+at 0.173, which is what a language looks like when a fifth of its characters
+cannot be written at all: `Μηχανουργεία` came back as `Mηχανουργεα`, `Σύνολο` as
+`Σúνoλo` with Latin lookalikes standing in for the accented Greek, and every
+line still carried a confidence around 0.93. Measuring an accuracy for it implied
+a choice a Greek reader does not have, so the claim is gone instead of qualified.
+The pages are still in the corpus, scored in their own section of the
+[evaluation report](../docs/evaluation-report.md).
 
 ## Bringing your own model
 

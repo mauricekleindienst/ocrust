@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+
+- **Greek is no longer claimed as a supported language.** `ocrust languages` now
+  reports 26 covered, not 27, and `lang="el"` fails naming the characters the
+  model cannot emit.
+
+  The bundled PP-OCRv6 charset holds all 24 plain Greek letters in both cases and
+  not one accented vowel — no `ά έ ή ί ό ύ ώ`, no dialytika, and no final sigma
+  `ς`. Greek cannot be written without them: every polysyllabic word carries an
+  accent, and `ς` ends a large share of them. What came out instead was
+  accent-stripped text with Latin lookalikes standing in, `Μηχανουργεία
+  Θεσσαλονίκης` as `Mηχανουργεα Θεσσαλονη` and `Σύνολο` as `Σúνoλo`, at CER 0.180
+  and a reported confidence of 0.93 — the exact failure the language check exists
+  to prevent, waved through because the check was asked the wrong question.
+
+  The language table declared Greek as those 48 plain letters, so the coverage
+  check found nothing missing. It now declares monotonic Greek in full, 69
+  characters, of which the bundle has 48: coverage comes out at 70%, below the
+  threshold for a near miss, and Greek moves to where Russian and Korean already
+  were — known, refused with its missing characters listed, and covered again by
+  itself the moment a Greek-capable recognizer is installed. A unit test pins
+  that the plain letters alone do not count as coverage.
+
+  Accuracy figures now cover the 108 corpus files in a language the bundle can
+  write: mean CER **0.031**, median 0.006, WER 0.093, word recall **0.918**. No
+  document reads differently — the four Greek pages stay in the corpus and are
+  scored in a section of their own in the evaluation report, so the cost of the
+  gap stays on the record instead of being averaged into the languages that work.
+
 ## 0.2.1 — 2026-09-19
 
 Three layout bugs, all found by probing pages the corpus did not have.

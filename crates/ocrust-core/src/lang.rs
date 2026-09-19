@@ -213,7 +213,13 @@ static LANGUAGES: &[Language] = &[
         "Greek",
         Script::Greek,
         "",
-        "αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ",
+        // Monotonic Greek in full. The accented vowels and the final sigma are
+        // not decoration: every polysyllabic Greek word carries an accent, and
+        // ς ends a large share of them, so a model without them cannot write
+        // the language at all. Listing only the plain letters — as this entry
+        // once did — made the bundled recognizer look like it covered Greek
+        // while it silently dropped every accent it met.
+        "αβγδεζηθικλμνξοπρστυφχψωςάέήίόύώΐΰϊϋΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩΆΈΉΊΌΎΏΪΫ",
     ),
     lang(
         "ru",
@@ -473,6 +479,29 @@ mod tests {
         assert_eq!(near.first().map(|c| c.language.code), Some("de"));
         assert_eq!(near[0].missing, vec!['ß']);
         assert!(near[0].missing_display().contains('ß'));
+    }
+
+    /// The bundled PP-OCRv6 recognizer carries plain Greek and nothing else.
+    /// Greek is listed as known so that asking for it fails with the characters
+    /// named, rather than returning accent-stripped text at high confidence.
+    #[test]
+    fn plain_greek_letters_do_not_cover_greek() {
+        let el = parse("el").unwrap();
+        let required: String = el.required_letters().collect();
+        for c in ['ς', 'ά', 'έ', 'ή', 'ί', 'ό', 'ύ', 'ώ'] {
+            assert!(required.contains(c), "Greek must require {c}");
+        }
+
+        // Exactly what the bundle can emit: both cases, no accents, no final
+        // sigma — the charset that once passed as full Greek coverage.
+        let plain = "αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ";
+        let cov = coverage(&dict_of(&format!("{}{plain}", ascii())), el);
+        assert!(!cov.is_complete(), "plain Greek must not count as coverage");
+        assert!(cov.missing.contains(&'ς'));
+        assert!(cov.missing.contains(&'ά'));
+        // Below the 0.8 the CLI uses for "nearly covered", so Greek is not
+        // offered as a near miss either.
+        assert!(cov.ratio() < 0.8, "ratio {}", cov.ratio());
     }
 
     #[test]

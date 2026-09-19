@@ -3,15 +3,17 @@
 Every number here comes from the generated corpus — 118 files, 203 pages, all
 with exact ground truth — and can be reproduced in about three minutes
 ([Evaluation](Evaluation.md)). Nothing is cherry-picked, including the bad rows.
+The figures cover the 108 files in a language the bundled model can actually
+write; the four Greek pages are scored separately, for the reason below.
 
 ## Overall
 
 | metric | value |
 |---|---|
-| mean character error rate (CER) | **0.036** |
+| mean character error rate (CER) | **0.031** |
 | median CER | **0.006** |
-| mean word error rate (WER) | 0.107 |
-| mean word recall | 0.904 |
+| mean word error rate (WER) | 0.093 |
+| mean word recall | 0.918 |
 | unexpected failures | **0** |
 
 The gap between mean and median is the whole story: most documents are read
@@ -57,7 +59,6 @@ recognition — see below.
 | English | 14 | 0.008 | 0.936 |
 | German | 58 | 0.049 | 0.926 |
 | Japanese | 4 | 0.065 | 0.328 |
-| Greek | 4 | 0.180 | 0.536 |
 
 Reading these correctly matters:
 
@@ -67,9 +68,12 @@ Reading these correctly matters:
 - **Japanese word recall (0.328) is meaningless**: Japanese does not separate
   words with spaces, so a whitespace-based word metric cannot work. Its CER of
   0.065 is the number to read.
-- **Greek is genuinely the weakest** — 0.180, and recall 0.536. Lookalike letters
-  (`Α`/`A`, `Ο`/`O`, `Ρ`/`P`) and accented vowels defeat the shared charset. If
-  Greek is your main language, measure first.
+- **Greek is not in the table any more**, and that is the finding. It scored
+  0.180 with recall 0.536 while reporting confidence 0.93 — because a fifth of
+  the language is unwritable with the bundled charset, not because the pages were
+  hard. Greek is no longer offered as covered; `lang="el"` now fails naming the
+  21 characters it cannot emit. The four pages stay in the corpus, scored in
+  their own section of the [evaluation report](../docs/evaluation-report.md).
 
 ## Where it is weak, and why
 
@@ -140,7 +144,8 @@ being read straight across the gutter to 0.000, and a page that is nothing but a
 price list from two columns to four. Every document that was already in the
 corpus reads exactly as it did — the mean moved 0.040 → 0.036 because the corpus
 grew by the layouts it had been missing, which is also why these three bugs
-lasted as long as they did.
+lasted as long as they did. (It reads 0.031 now only because Greek, which the
+bundle cannot write, no longer counts toward it.)
 
 ## Robustness
 
@@ -300,7 +305,7 @@ figure.
 
 The estimate is narrow: 0.893 to 0.987 over the corpus. It ranks pages well and
 it does not claim to say "this page is 20% wrong". Widening it needs more ground
-truth than 112 files. Re-fit it for your own documents with
+truth than 108 files. Re-fit it for your own documents with
 `scripts/collect_quality.py` and `scripts/fit_quality.py`, which print their own
 held-out numbers.
 

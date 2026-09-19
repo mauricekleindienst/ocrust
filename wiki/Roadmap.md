@@ -49,10 +49,11 @@ by pixels rather than count.
 
 ## 4. Confidence calibration
 
-**Why:** mean line confidence is 0.99 on clean pages and 0.93 on Greek — usable
-for routing, but the absolute values are optimistic: a line can be confidently
-wrong when the model is out of its depth. Anyone using a threshold to trigger
-human review is guessing at the number.
+**Why:** mean line confidence is 0.99 on clean pages and 0.93 on Greek, which the
+bundled charset cannot even write — usable for routing, but the absolute values
+are optimistic: a line can be confidently wrong when the model is out of its
+depth, and Greek is the proof. Anyone using a threshold to trigger human review
+is guessing at the number.
 
 **Shape of the fix:** measure confidence against the corpus's ground truth, report
 the calibration curve, and document a threshold that means something.

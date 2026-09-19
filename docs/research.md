@@ -25,8 +25,10 @@ sizes.
 ## What this project ships
 
 **PP-OCRv6 mobile** (detection 9.5 MB, recognition 21 MB, orientation 0.6 MB).
-The recognizer has 18 708 classes and covers 27 languages completely — all of
-Western and Central Europe, Greek, Japanese and both Chinese scripts. Its
+The recognizer has 18 708 classes and covers 26 languages completely — all of
+Western and Central Europe, Japanese and both Chinese scripts. Greek is *not*
+among them: the charset holds the plain Greek letters but no accented vowel and
+no final sigma, so the language cannot be written with it. Its
 predecessor v5 (18 383 classes) is close but misses a handful of accents
 (`î ï œ À` for French, `ś ź` for Polish, `ď ť ů` for Czech), which is why v6 is
 the default.
