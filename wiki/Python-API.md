@@ -153,6 +153,7 @@ reliable enough to search on.
 Document(source, pages, elapsed_ms)
   .text                      # every page, reading order applied
   .lines  .words             # flattened across pages
+  .tables                    # every table, in reading order
   .confidence                # mean line confidence, or None
   .quality                   # estimated share of the text that is right, or None
   .render(format) / .markdown() / .json() / .hocr() / .alto() / .csv()
@@ -160,12 +161,20 @@ Document(source, pages, elapsed_ms)
   .to_dict()
 
 Page(index, width, height, rotation, origin, blocks, elapsed_ms)
-  .text  .lines  .confidence  .quality
+  .text  .lines  .tables  .confidence  .quality
 
-Block(kind, box, lines)       # kind: "paragraph", "heading", "list"
+Block(kind, box, lines, table)   # kind: "paragraph", "heading", "list", "table"
   .text
 
-Line(text, box, confidence, angle, margin, words, polygon)
+Table(rows, columns, cells)
+  .row(index)                # the cells of one row, left to right
+  .row_text(index)           # one string per column, "" for the gaps
+  .as_rows()                 # the whole grid as rows of strings
+  .to_csv()                  # quoted per RFC 4180
+
+Cell(row, column, text, box, confidence, column_span)
+Line(text, box, confidence, angle, margin, words, polygon, segments)
+Segment(text, box, confidence)   # a detector box, before it became part of a line
 Word(text, box, confidence)
 Box(x0, y0, x1, y1)  .width  .height  .as_tuple()
 Match(text, page, box, line)
@@ -189,6 +198,31 @@ for page in doc.pages:
 low = [l for l in doc.lines if l.confidence < 0.8]
 print(f"{len(low)} line(s) worth a human look")
 ```
+
+### Tables
+
+A block whose cells line up into columns is read as a table. `Table.cells` holds
+them in reading order with their own box and confidence; a row with nothing in a
+column simply has no cell for it, and `row_text` fills the gap with an empty
+string so every row has the same width.
+
+```python
+doc = ocrust.scan("rechnung.pdf")
+
+for table in doc.tables:
+    header, *body = table.as_rows()
+    for row in body:
+        print(dict(zip(header, row)))
+
+# Or hand the grid straight to something that eats CSV.
+import csv, io
+rows = list(csv.reader(io.StringIO(doc.tables[0].to_csv())))
+```
+
+`Ocr(tables=False)` leaves every block as running text. There is no table model
+behind this and no ruling lines are read — see
+[Accuracy](Accuracy.md#tables) for how the columns are found, what the guardrails
+are, and what it cannot see.
 
 ## Errors
 

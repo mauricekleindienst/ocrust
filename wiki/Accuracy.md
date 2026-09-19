@@ -147,6 +147,58 @@ Nothing panics, nothing hangs, nothing returns plausible nonsense. A blank page
 is especially worth calling out: the deskew estimator has an ink-fraction guard,
 because an earlier version confidently rotated an empty page by 12°.
 
+## Tables
+
+A block whose cells line up into columns comes back as a table: `Page.tables`,
+`Document.tables`, cells with their row, column and box, a Markdown pipe table
+from `render("markdown")` and `Table.to_csv()`.
+
+There is no table model and no ruling lines are read. Two things say where the
+cells are. The detector returns one box per cell when the columns are far enough
+apart, and the layout keeps those boxes on the row it joins them into
+(`Line.segments`). Inside a box, the recognizer's own word positions show the
+gaps. Either way a cell is a run of words, and a column is a stretch of the page
+that row after row puts ink in.
+
+**How wide a gap has to be is measured, not assumed.** Word spaces and column
+gutters are both gaps, and how wide each is depends entirely on the document:
+
+| corpus document | word spaces | column gutters |
+|---|---:|---:|
+| receipt | 0.71–0.87 × text height | 2.47–4.98 |
+| dense invoice | 0.33–0.66 | 0.83–2.18 |
+| a page of prose | 0.50–0.84 | none |
+
+No multiple of the text height sits between both pairs, so the threshold is twice
+the quarter-point of every word gap on the page. A page with no table has all its
+gaps within a factor of two of that point — the corpus's degraded scans run from
+18 to 36 pixels and nothing else — so nothing is split and no table is found,
+which is the right answer.
+
+**What keeps prose out** is not the threshold but three guardrails, each of which
+a real document passes and a page of sentences does not:
+
+- three rows and two columns, at least;
+- the gaps have to fall in the same places row after row — one gap in one place
+  is where a sentence happened to be split;
+- most rows have to carry more than one cell. Lines of similar length leave their
+  last word a little further out on every line, and three of those look like a
+  right-hand column; what gives them away is the lines between them carrying no
+  cells at all.
+
+Over the 102-file corpus that finds 16 tables: the four ruled forms as 5×4, the
+four receipts as 8×2 (items and totals are one column structure), and the eight
+engineering drawings' title blocks as 5×2 — `TITEL`, `WERKSTOFF`, `MASSSTAB`,
+`ZEICHNUNGS-NR` and the rest, which is a table and reads like one. Nothing at all
+in the newspapers, the letters, the screenshots, the faxes, the clean pages or the
+degraded scans.
+
+**What it does not do.** It does not read row spans: a cell belongs to the row its
+baseline is on. It does not see a header cell that spans two columns and has
+further header cells beneath it. And a table whose columns are separated by less
+than twice its own word spacing is read as text, because at that point nothing in
+the geometry distinguishes it from a paragraph.
+
 ## Which number to trust
 
 `confidence` and `quality` answer different questions, and the difference is

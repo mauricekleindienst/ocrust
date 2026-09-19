@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from ._runtime import default_models_dir, ensure_runtime, runtime_report
-from ._types import Block, Box, Document, Line, Match, Page, Word
+from ._types import Block, Box, Cell, Document, Line, Match, Page, Segment, Table, Word
 
 # The extension dlopens libonnxruntime on first use, so the path has to be in
 # the environment before it is imported.
@@ -49,6 +49,9 @@ __all__ = [
     "Block",
     "Line",
     "Word",
+    "Segment",
+    "Table",
+    "Cell",
     "Match",
     "Box",
     "read",
@@ -247,6 +250,10 @@ class Ocr:
             not die on one of them. ``0`` disables it.
         preprocess: Auto-invert, deskew and rescale pages before OCR.
         word_boxes: Compute per-word boxes (needed for hOCR/ALTO word output).
+        tables: Read blocks whose cells line up into columns as tables
+            (:attr:`Document.tables`, and Markdown pipe tables in
+            ``render("markdown")``). Set it to False to keep every block as
+            running text.
         drop_score: Minimum mean confidence for a line to be kept.
         lang: Languages the documents are in (``"de"``, ``["de", "fr"]``,
             ``"de,fr"``). Building the engine fails when the recognition model
@@ -279,6 +286,7 @@ class Ocr:
         rec_image_height: int | None = None,
         rec_space_gap: float | None = None,
         keep_page_images: bool = False,
+        tables: bool = True,
         lang: str | Sequence[str] | None = None,
     ) -> None:
         if isinstance(lang, str):
@@ -313,6 +321,7 @@ class Ocr:
             "rec_image_height": rec_image_height,
             "rec_space_gap": rec_space_gap,
             "fix_orientation": fix_orientation,
+            "tables": tables,
             "languages": languages,
         }
         self._keeps_images = keep_page_images

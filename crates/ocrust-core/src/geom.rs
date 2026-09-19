@@ -10,7 +10,7 @@ use imageproc::geometric_transformations::{warp_into, Interpolation, Projection}
 use serde::{Deserialize, Serialize};
 
 /// A point in image space.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -40,7 +40,7 @@ impl Point {
 }
 
 /// An axis-aligned rectangle, always normalized so `x1 >= x0` and `y1 >= y0`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x0: f32,
     pub y0: f32,
@@ -112,7 +112,7 @@ impl Rect {
 
 /// A four-point polygon around one text line, in `[top-left, top-right,
 /// bottom-right, bottom-left]` order once [`Quad::ordered`] has run.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Quad {
     pub points: [Point; 4],
 }

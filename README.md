@@ -75,6 +75,29 @@ pip install "ocrust[models]" rapidocr-onnxruntime pypdfium2 pillow
 python scripts/benchmark.py your-page.png --runs 5
 ```
 
+## Tables
+
+A block whose cells line up into columns is read as a table — invoices, receipts,
+statements, price lists, ruled or not:
+
+```console
+$ ocrust scan rechnung.pdf -f markdown
+| Position | Menge | Einzelpreis | Gesamt |
+| --- | --- | --- | --- |
+| Widget A | 12 | 49,90 | 598,80 |
+| Widget B | 3 | 233,70 | 701,10 |
+| Zwischensumme |  |  | 1.299,90 |
+```
+
+No table model and no ruling lines: the columns are the stretches of the page
+that row after row puts ink in, and how wide a gap has to be to separate two cells
+is measured from the document's own word spacing. What keeps a page of sentences
+from coming back as a table is that its gaps do not fall in the same places line
+after line. Over the evaluation corpus a table is found in every receipt and every
+form, a drawing's title block, and nothing in a newspaper, letter or screenshot —
+[Accuracy](https://github.com/mauricekleindienst/ocrust/wiki/Accuracy#tables) has
+the numbers and the limits. `--no-tables` turns it off.
+
 ## Languages
 
 The bundled PP-OCRv6 recognizer has 18 708 classes and covers **27 languages**
@@ -237,6 +260,12 @@ for line in doc.lines:
 if doc.quality is not None and doc.quality < 0.96:
     queue_for_review(doc)
 
+# Tables come back as rows and columns, from where the cells sit.
+for table in doc.tables:
+    print(table.as_rows())        # [["Position", "Menge", ...], ...]
+    print(table.to_csv())
+print(doc.render("markdown"))     # tables render as Markdown pipe tables
+
 # Find something, with the box to highlight it.
 for hit in doc.search("gesamtbetrag"):
     print(hit.page, hit.text, hit.box.as_tuple())
@@ -288,6 +317,7 @@ The result goes to stdout and everything about the run to stderr, so
 Colour is used sparingly — Rust orange for what was written, green, amber or red
 for how much of the page is likely to be right — and switches itself off when
 stderr is not a terminal (`NO_COLOR` honoured, `FORCE_COLOR` obeyed).
+
 
 ## Models
 

@@ -458,10 +458,8 @@ mod tests {
             confidence: 0.9,
             quad: Quad::from_rect(r),
             bbox: r,
-            angle: 0.0,
             det_score: 0.9,
-            margin: 0.0,
-            words: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -477,6 +475,7 @@ mod tests {
                 origin: PageOrigin::Image,
                 blocks: vec![Block {
                     kind: BlockKind::Paragraph,
+                    table: None,
                     bbox: Rect::new(20.0, 20.0, 380.0, 60.0),
                     lines: vec![
                         line("Rechnung (Nr. 42)", Rect::new(20.0, 20.0, 380.0, 44.0)),

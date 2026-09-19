@@ -11,7 +11,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["Box", "Word", "Line", "Block", "Match", "Page", "Document"]
+__all__ = ["Box", "Word", "Segment", "Cell", "Table", "Line", "Block", "Match", "Page", "Document"]
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,98 @@ class Word:
 
 
 @dataclass(frozen=True)
+class Segment:
+    """One of the detector's boxes, before it was merged into a line.
+
+    A table row arrives as one box per cell and becomes a single :class:`Line`;
+    these are the boxes it was made of, left to right.
+    """
+
+    text: str
+    box: Box
+    confidence: float
+
+    @classmethod
+    def _from_json(cls, data: dict[str, Any]) -> Segment:
+        return cls(data["text"], Box._from_json(data["bbox"]), data["confidence"])
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One cell of a :class:`Table`."""
+
+    row: int
+    column: int
+    text: str
+    box: Box
+    confidence: float
+    #: Columns this cell covers; 1 for an ordinary cell.
+    column_span: int = 1
+
+    @classmethod
+    def _from_json(cls, data: dict[str, Any]) -> Cell:
+        return cls(
+            row=data["row"],
+            column=data["column"],
+            text=data["text"],
+            box=Box._from_json(data["bbox"]),
+            confidence=data["confidence"],
+            column_span=data.get("column_span", 1),
+        )
+
+
+@dataclass(frozen=True)
+class Table:
+    """Rows and columns recovered from where the cells sit on the page.
+
+    No table model and no ruling lines are read: the columns are the bands of the
+    page that every row leaves a gap beside. That finds the tables people
+    actually scan — invoices, receipts, statements, price lists — ruled or not,
+    and it says nothing about header cells stacked two deep, which it cannot see.
+    """
+
+    rows: int
+    columns: int
+    #: Cells in reading order, row by row. A row with nothing in a column simply
+    #: has no cell for it.
+    cells: Sequence[Cell]
+
+    def row(self, index: int) -> tuple[Cell, ...]:
+        """The cells of one row, left to right."""
+        return tuple(cell for cell in self.cells if cell.row == index)
+
+    def row_text(self, index: int) -> list[str]:
+        """One string per column, with empty strings for the gaps."""
+        out = [""] * self.columns
+        for cell in self.row(index):
+            if 0 <= cell.column < self.columns:
+                out[cell.column] = f"{out[cell.column]} {cell.text}".strip()
+        return out
+
+    def as_rows(self) -> list[list[str]]:
+        """The whole grid as rows of strings."""
+        return [self.row_text(index) for index in range(self.rows)]
+
+    def to_csv(self) -> str:
+        """The grid as CSV, quoted per RFC 4180."""
+        import csv
+        import io
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerows(self.as_rows())
+        return buffer.getvalue()
+
+    @classmethod
+    def _from_json(cls, data: dict[str, Any]) -> Table:
+        return cls(
+            rows=data["rows"],
+            columns=data["columns"],
+            cells=tuple(Cell._from_json(c) for c in data.get("cells", ())),
+        )
+
+
+@dataclass(frozen=True)
 class Line:
     text: str
     box: Box
@@ -62,6 +154,9 @@ class Line:
     words: Sequence[Word] = field(default_factory=tuple)
     #: Corner points of the detection polygon, clockwise from the top left.
     polygon: Sequence[tuple[float, float]] = field(default_factory=tuple)
+    #: The detector's boxes this line was merged from, left to right. Empty for a
+    #: line that came from one box, which is the ordinary case for running text.
+    segments: Sequence[Segment] = field(default_factory=tuple)
 
     @classmethod
     def _from_json(cls, data: dict[str, Any]) -> Line:
@@ -73,16 +168,19 @@ class Line:
             margin=data.get("margin", 0.0),
             words=tuple(Word._from_json(w) for w in data.get("words", ())),
             polygon=tuple((p["x"], p["y"]) for p in data["quad"]["points"]),
+            segments=tuple(Segment._from_json(s) for s in data.get("segments", ())),
         )
 
 
 @dataclass(frozen=True)
 class Block:
-    """A paragraph, heading or list item."""
+    """A paragraph, heading, list item or table."""
 
     kind: str
     box: Box
     lines: Sequence[Line]
+    #: The grid, when :attr:`kind` is ``"table"``.
+    table: Table | None = None
 
     @property
     def text(self) -> str:
@@ -90,10 +188,12 @@ class Block:
 
     @classmethod
     def _from_json(cls, data: dict[str, Any]) -> Block:
+        raw_table = data.get("table")
         return cls(
             kind=data["kind"],
             box=Box._from_json(data["bbox"]),
             lines=tuple(Line._from_json(item) for item in data["lines"]),
+            table=Table._from_json(raw_table) if raw_table else None,
         )
 
 
@@ -134,6 +234,11 @@ class Page:
     @property
     def lines(self) -> tuple[Line, ...]:
         return tuple(line for block in self.blocks for line in block.lines)
+
+    @property
+    def tables(self) -> tuple[Table, ...]:
+        """Every table on this page, in reading order."""
+        return tuple(block.table for block in self.blocks if block.table is not None)
 
     @property
     def confidence(self) -> float | None:
@@ -188,6 +293,15 @@ class Document:
     @property
     def words(self) -> tuple[Word, ...]:
         return tuple(word for line in self.lines for word in line.words)
+
+    @property
+    def tables(self) -> tuple[Table, ...]:
+        """Every table in the document, in reading order.
+
+        >>> for table in ocrust.scan("invoice.pdf").tables:   # doctest: +SKIP
+        ...     print(table.to_csv())
+        """
+        return tuple(table for page in self.pages for table in page.tables)
 
     @property
     def confidence(self) -> float | None:

@@ -542,6 +542,7 @@ impl Engine {
                 quad,
                 det_score: det.score,
                 words,
+                segments: Vec::new(),
             });
         }
 

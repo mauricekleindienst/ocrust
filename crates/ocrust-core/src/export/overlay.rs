@@ -533,16 +533,15 @@ mod tests {
             origin: PageOrigin::PdfPage,
             blocks: vec![Block {
                 kind: BlockKind::Paragraph,
+                table: None,
                 bbox,
                 lines: vec![Line {
                     text: text.into(),
                     confidence: 0.9,
                     quad: Quad::from_rect(bbox),
                     bbox,
-                    angle: 0.0,
                     det_score: 0.9,
-                    margin: 0.0,
-                    words: Vec::new(),
+                    ..Default::default()
                 }],
             }],
             elapsed_ms: 1.0,

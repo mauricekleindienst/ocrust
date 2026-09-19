@@ -72,8 +72,11 @@ def _pdf_with_text(lines: list[tuple[str, int]], pages: int = 1, rotate: int = 0
         content.append(f"/F1 {size} Tf 1 0 0 1 60 {y} Tm ({_winansi_literal(text)}) Tj")
         y -= 70
     content.append("ET")
-    stream = "\n".join(content)
+    return _pdf_from_stream("\n".join(content), pages=pages, rotate=rotate)
 
+
+def _pdf_from_stream(stream: str, pages: int = 1, rotate: int = 0) -> bytes:
+    """Wraps one content stream into a PDF of `pages` identical pages."""
     # Object layout: catalog, page tree, then one page + content per page,
     # with the font last.
     first_page_obj = 3
@@ -117,6 +120,41 @@ def invoice_pdf_bytes() -> bytes:
             ("Thank you for your business", 22),
         ]
     )
+
+
+def _pdf_with_table(rows: list[list[tuple[str, int]]], size: int = 26) -> bytes:
+    """A PDF whose text sits in columns: each row is `(text, x)` pairs."""
+    content = ["BT"]
+    y = 700
+    for row in rows:
+        for text, x in row:
+            content.append(f"/F1 {size} Tf 1 0 0 1 {x} {y} Tm ({_winansi_literal(text)}) Tj")
+        y -= 44
+    content.append("ET")
+    stream = "\n".join(content)
+    return _pdf_from_stream(stream)
+
+
+@pytest.fixture(scope="session")
+def table_pdf(tmp_path_factory) -> Path:
+    """An invoice: a heading, a four-column table, a closing line.
+
+    The columns are set far enough apart to be gutters and the words inside a
+    cell a normal space apart, which is the geometry a table has to be read from.
+    """
+    data = _pdf_with_table(
+        [
+            [("RECHNUNG 2026-0042", 60)],
+            [("Position", 60), ("Menge", 250), ("Preis", 380), ("Summe", 490)],
+            [("Widget A", 60), ("12", 250), ("49,90", 380), ("598,80", 490)],
+            [("Widget B", 60), ("3", 250), ("233,70", 380), ("701,10", 490)],
+            [("Kabel C", 60), ("7", 250), ("12,50", 380), ("87,50", 490)],
+            [("Vielen Dank fuer Ihren Auftrag.", 60)],
+        ]
+    )
+    path = tmp_path_factory.mktemp("docs") / "table.pdf"
+    path.write_bytes(data)
+    return path
 
 
 @pytest.fixture(scope="session")

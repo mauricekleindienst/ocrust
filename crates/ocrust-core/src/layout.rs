@@ -63,6 +63,8 @@ pub struct LayoutConfig {
     pub dehyphenate: bool,
     /// Detect columns and read them one after another.
     pub detect_columns: bool,
+    /// Read a block whose cells line up into columns as a table.
+    pub detect_tables: bool,
 }
 
 impl Default for LayoutConfig {
@@ -80,6 +82,7 @@ impl Default for LayoutConfig {
             max_merge_gap_factor: 4.0,
             dehyphenate: true,
             detect_columns: true,
+            detect_tables: true,
         }
     }
 }
@@ -352,6 +355,8 @@ fn join_group(mut group: Vec<Line>) -> Option<Line> {
     let mut margin_sum = 0.0;
     let mut words = Vec::new();
     let mut angle_sum = 0.0;
+    // Where the boxes were, kept so a table row's columns survive the merge.
+    let mut segments = Vec::with_capacity(group.len());
 
     for (index, part) in group.iter().enumerate() {
         if index > 0 && !text.ends_with(' ') && !part.text.starts_with(' ') {
@@ -364,6 +369,17 @@ fn join_group(mut group: Vec<Line>) -> Option<Line> {
         margin_sum += part.margin;
         angle_sum += part.angle;
         words.extend(part.words.iter().cloned());
+        // A part that was itself merged contributes its own boxes, not a box
+        // around them: two merges in a row must not lose the innermost cells.
+        if part.segments.is_empty() {
+            segments.push(crate::doc::Segment {
+                text: part.text.trim().to_string(),
+                bbox: part.bbox,
+                confidence: part.confidence,
+            });
+        } else {
+            segments.extend(part.segments.iter().cloned());
+        }
     }
     let count = group.len() as f32;
 
@@ -382,6 +398,7 @@ fn join_group(mut group: Vec<Line>) -> Option<Line> {
         angle: angle_sum / count,
         det_score: det_sum / count,
         words,
+        segments,
     })
 }
 
@@ -431,6 +448,46 @@ pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
     }
     let scale = median_height(&lines);
     let text_height = median_text_height(&lines);
+
+    // Tables are looked for over the whole page, not inside each block. The
+    // blocks come from vertical gaps, and a ruled form's rows are spaced widely
+    // enough that the gap rule cuts its table in two; a word space, meanwhile, is
+    // a property of the page rather than of one block.
+    let tables = if cfg.detect_tables {
+        let gutter = crate::table::gutter_width(&lines, text_height);
+        crate::table::find(&lines, text_height, gutter)
+    } else {
+        Vec::new()
+    };
+
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut lines = lines;
+    // From the back, so the indices the detector reported still hold.
+    let mut tail = lines.len();
+    for found in tables.into_iter().rev() {
+        let after = lines.split_off(found.end);
+        let table_lines = lines.split_off(found.start);
+        if !after.is_empty() {
+            blocks.extend(paragraphs(after, scale, text_height, cfg));
+        }
+        blocks.push(Block {
+            kind: BlockKind::Table,
+            bbox: bounds_of(&table_lines),
+            lines: table_lines,
+            table: Some(found.table),
+        });
+        tail = found.start;
+    }
+    debug_assert!(lines.len() == tail);
+    if !lines.is_empty() {
+        blocks.extend(paragraphs(lines, scale, text_height, cfg));
+    }
+    blocks.reverse();
+    blocks
+}
+
+/// Groups lines into paragraphs, headings and list items by their vertical gaps.
+fn paragraphs(lines: Vec<Line>, scale: f32, text_height: f32, cfg: &LayoutConfig) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     let mut current: Vec<Line> = Vec::new();
 
@@ -452,6 +509,8 @@ pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
     if !current.is_empty() {
         blocks.push(finish_block(current, text_height, cfg));
     }
+    // Emitted back to front by the caller, which reverses the whole list.
+    blocks.reverse();
     blocks
 }
 
@@ -459,14 +518,24 @@ fn finish_block(mut lines: Vec<Line>, text_height: f32, cfg: &LayoutConfig) -> B
     if cfg.dehyphenate {
         dehyphenate(&mut lines);
     }
-    let bbox = lines
+    plain_block(lines, text_height, cfg)
+}
+
+fn plain_block(lines: Vec<Line>, text_height: f32, cfg: &LayoutConfig) -> Block {
+    Block {
+        kind: classify_block(&lines, text_height, cfg),
+        bbox: bounds_of(&lines),
+        lines,
+        table: None,
+    }
+}
+
+fn bounds_of(lines: &[Line]) -> Rect {
+    lines
         .iter()
         .map(|l| l.bbox)
         .reduce(|a, b| a.union(&b))
-        .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
-
-    let kind = classify_block(&lines, text_height, cfg);
-    Block { kind, bbox, lines }
+        .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
 }
 
 /// Characters a list item may start with.
@@ -641,10 +710,8 @@ mod tests {
             confidence: 0.9,
             quad: Quad::from_rect(r),
             bbox: r,
-            angle: 0.0,
             det_score: 0.9,
-            margin: 0.0,
-            words: Vec::new(),
+            ..Default::default()
         }
     }
 

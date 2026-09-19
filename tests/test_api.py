@@ -392,3 +392,70 @@ def test_quality_is_none_without_text():
     doc = ocrust.Document._from_json({"source": "blank.png", "elapsed_ms": 1.0, "pages": []})
     assert doc.quality is None
     assert doc.confidence is None
+
+
+def test_a_table_is_read_as_rows_and_columns(engine, table_pdf):
+    """The grid an invoice actually has, from where its cells sit."""
+    doc = engine.scan(table_pdf)
+    assert len(doc.tables) == 1, doc.render("markdown")
+    table = doc.tables[0]
+    assert (table.rows, table.columns) == (4, 4)
+    assert table.row_text(0) == ["Position", "Menge", "Preis", "Summe"]
+    assert table.row_text(1) == ["Widget A", "12", "49,90", "598,80"]
+    assert table.as_rows()[3] == ["Kabel C", "7", "12,50", "87,50"]
+    # Every cell carries its own box and confidence.
+    for cell in table.cells:
+        assert cell.box.width > 0 and cell.box.height > 0
+        assert 0.0 <= cell.confidence <= 1.0
+        assert cell.column_span >= 1
+
+
+def test_the_prose_around_a_table_is_not_part_of_it(engine, table_pdf):
+    """A heading above and a closing line below stay text."""
+    doc = engine.scan(table_pdf)
+    kinds = [block.kind for block in doc.pages[0].blocks]
+    assert kinds.count("table") == 1
+    assert len(kinds) >= 2, kinds
+    table_text = "\n".join(block.text for block in doc.pages[0].blocks if block.kind == "table")
+    assert "RECHNUNG" not in table_text
+    assert "Vielen Dank" not in table_text
+    # And the text of the document still has all of it.
+    assert "RECHNUNG" in doc.text and "Vielen Dank" in doc.text
+
+
+def test_a_table_renders_as_markdown_and_csv(engine, table_pdf):
+    doc = engine.scan(table_pdf)
+    markdown = doc.render("markdown")
+    assert "| Position | Menge | Preis | Summe |" in markdown
+    assert "| --- | --- | --- | --- |" in markdown
+
+    csv = doc.tables[0].to_csv()
+    rows = csv.strip().splitlines()
+    assert rows[0] == "Position,Menge,Preis,Summe"
+    # A German decimal comma has to be quoted, or the row grows two columns.
+    assert rows[1] == 'Widget A,12,"49,90","598,80"'
+
+
+def test_tables_can_be_turned_off(table_pdf):
+    import ocrust
+
+    plain = ocrust.Ocr(tables=False)
+    doc = plain.scan(table_pdf)
+    assert doc.tables == ()
+    assert all(block.kind != "table" for block in doc.pages[0].blocks)
+    # The text is still all there; only the grid is not read.
+    assert "Widget A" in doc.text
+
+
+def test_a_merged_row_keeps_the_boxes_it_was_merged_from(engine, table_pdf):
+    """`Line.segments` is what makes a row's columns recoverable."""
+    doc = engine.scan(table_pdf)
+    merged = [line for line in doc.lines if line.segments]
+    assert merged, "a table row arrives as several detection boxes"
+    for line in merged:
+        assert len(line.segments) >= 2
+        # The row's box covers every box it was merged from.
+        for segment in line.segments:
+            assert segment.box.x0 >= line.box.x0 - 1
+            assert segment.box.x1 <= line.box.x1 + 1
+            assert segment.text.strip()
