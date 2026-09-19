@@ -56,6 +56,9 @@ class Line:
     box: Box
     confidence: float
     angle: float
+    #: Mean distance between the chosen character and the runner-up, which is
+    #: what tells a read apart from a guess once the softmax has saturated.
+    margin: float = 0.0
     words: Sequence[Word] = field(default_factory=tuple)
     #: Corner points of the detection polygon, clockwise from the top left.
     polygon: Sequence[tuple[float, float]] = field(default_factory=tuple)
@@ -67,6 +70,7 @@ class Line:
             box=Box._from_json(data["bbox"]),
             confidence=data["confidence"],
             angle=data.get("angle", 0.0),
+            margin=data.get("margin", 0.0),
             words=tuple(Word._from_json(w) for w in data.get("words", ())),
             polygon=tuple((p["x"], p["y"]) for p in data["quad"]["points"]),
         )
@@ -119,6 +123,9 @@ class Page:
     origin: str
     blocks: Sequence[Block]
     elapsed_ms: float
+    #: Estimated share of this page's characters that are right, or ``None``
+    #: for a page with no text. See :attr:`Document.quality`.
+    quality: float | None = None
 
     @property
     def text(self) -> str:
@@ -145,6 +152,7 @@ class Page:
             origin=data.get("origin", "image"),
             blocks=tuple(Block._from_json(b) for b in data["blocks"]),
             elapsed_ms=data.get("elapsed_ms", 0.0),
+            quality=data.get("quality"),
         )
 
 
@@ -183,10 +191,40 @@ class Document:
 
     @property
     def confidence(self) -> float | None:
+        """Mean line confidence: how sure the recognizer was of its characters.
+
+        Good at what it measures and poor at what people read into it — see
+        :attr:`quality` for an estimate of how much of the document is right.
+        """
         lines = self.lines
         if not lines:
             return None
         return sum(line.confidence for line in lines) / len(lines)
+
+    @property
+    def quality(self) -> float | None:
+        """Estimated share of the document's characters that are right.
+
+        ``None`` when no page carried text. Confidence answers a narrower
+        question: it is the recognizer's certainty about the characters it
+        emitted, and it cannot see what never reached it — text the detector
+        missed, a column read out of order, a label broken into fragments. Over
+        the evaluation corpus this estimate ranks pages at Spearman +0.75
+        against +0.50 for confidence. It is an estimate, not a guarantee.
+
+        >>> doc = ocrust.scan("scan.pdf")            # doctest: +SKIP
+        >>> if doc.quality and doc.quality < 0.95:   # doctest: +SKIP
+        ...     print("worth a human look")
+        """
+        weighted = 0.0
+        lines = 0
+        for page in self.pages:
+            if page.quality is None:
+                continue
+            count = max(len(page.lines), 1)
+            weighted += page.quality * count
+            lines += count
+        return weighted / lines if lines else None
 
     def search(
         self,

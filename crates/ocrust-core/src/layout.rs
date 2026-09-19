@@ -349,6 +349,7 @@ fn join_group(mut group: Vec<Line>) -> Option<Line> {
     let mut quad_points = group[0].quad.ordered().points;
     let mut confidence_sum = 0.0;
     let mut det_sum = 0.0;
+    let mut margin_sum = 0.0;
     let mut words = Vec::new();
     let mut angle_sum = 0.0;
 
@@ -360,6 +361,7 @@ fn join_group(mut group: Vec<Line>) -> Option<Line> {
         bbox = bbox.union(&part.bbox);
         confidence_sum += part.confidence;
         det_sum += part.det_score;
+        margin_sum += part.margin;
         angle_sum += part.angle;
         words.extend(part.words.iter().cloned());
     }
@@ -374,6 +376,7 @@ fn join_group(mut group: Vec<Line>) -> Option<Line> {
     Some(Line {
         text,
         confidence: confidence_sum / count,
+        margin: margin_sum / count,
         quad: Quad::new(quad_points).ordered(),
         bbox,
         angle: angle_sum / count,
@@ -640,6 +643,7 @@ mod tests {
             bbox: r,
             angle: 0.0,
             det_score: 0.9,
+            margin: 0.0,
             words: Vec::new(),
         }
     }

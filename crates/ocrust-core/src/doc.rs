@@ -51,6 +51,13 @@ pub struct Line {
     pub angle: f32,
     /// Text-detector score for the box, in `0..=1`.
     pub det_score: f32,
+    /// Mean distance between the chosen character and the runner-up.
+    ///
+    /// A saturated softmax says `0.99` for a character it read and `0.98` for
+    /// one it guessed; how far ahead the winner was still tells them apart, and
+    /// it is part of what [`Page::quality`] is built from.
+    #[serde(default)]
+    pub margin: f32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Word>,
 }
@@ -87,6 +94,15 @@ pub struct Page {
     pub blocks: Vec<Block>,
     /// Wall-clock time spent on this page, in milliseconds.
     pub elapsed_ms: f64,
+    /// Estimated share of this page's characters that are right, in `0..=1`.
+    ///
+    /// `None` for a page with no text. Unlike [`Page::confidence`], which is the
+    /// recognizer's certainty about the characters it emitted, this accounts for
+    /// what recognition cannot see — text that was missed, a layout that broke
+    /// into fragments — and so ranks pages far better. It is an estimate fitted
+    /// against a ground-truth corpus, not a guarantee.
+    #[serde(default)]
+    pub quality: Option<f32>,
     /// The preprocessed page image, kept only when
     /// `EngineConfig::keep_page_images` is set (needed to write searchable
     /// PDFs). Never serialized.
@@ -110,6 +126,9 @@ impl Page {
     }
 
     /// Mean line confidence, or `None` for an empty page.
+    ///
+    /// This is what the recognizer was sure of, character by character. For how
+    /// much of the page is likely to be *right*, see [`Page::quality`].
     pub fn confidence(&self) -> Option<f32> {
         let mut sum = 0.0;
         let mut n = 0u32;
@@ -147,6 +166,22 @@ impl Document {
             .map(|p| p.text())
             .collect::<Vec<_>>()
             .join("\n\u{000c}\n")
+    }
+
+    /// Mean page quality, weighted by how much text each page carries.
+    ///
+    /// See [`Page::quality`] for what it estimates and what it cannot promise.
+    pub fn quality(&self) -> Option<f32> {
+        let mut weighted = 0.0f64;
+        let mut lines = 0usize;
+        for page in &self.pages {
+            if let Some(quality) = page.quality {
+                let count = page.lines().count().max(1);
+                weighted += f64::from(quality) * count as f64;
+                lines += count;
+            }
+        }
+        (lines > 0).then(|| (weighted / lines as f64) as f32)
     }
 
     /// Mean line confidence across all pages.
@@ -194,6 +229,7 @@ mod tests {
             bbox: r,
             angle: 0.0,
             det_score: 1.0,
+            margin: 0.0,
             words: Vec::new(),
         }
     }
@@ -211,6 +247,7 @@ mod tests {
                 lines,
             }],
             elapsed_ms: 1.0,
+            quality: None,
             image: None,
         }
     }

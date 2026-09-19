@@ -460,6 +460,7 @@ mod tests {
             bbox: r,
             angle: 0.0,
             det_score: 0.9,
+            margin: 0.0,
             words: Vec::new(),
         }
     }
@@ -483,6 +484,7 @@ mod tests {
                     ],
                 }],
                 elapsed_ms: 1.0,
+                quality: None,
                 image: None,
             });
             images.push(RgbImage::from_pixel(400, 200, image::Rgb([250, 250, 250])));

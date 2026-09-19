@@ -536,6 +536,7 @@ impl Engine {
             lines.push(Line {
                 text: text.to_string(),
                 confidence: rec.confidence,
+                margin: rec.margin,
                 bbox: quad.bounds(),
                 angle: quad.angle_deg() + *flip,
                 quad,
@@ -548,7 +549,18 @@ impl Engine {
         let blocks = layout::group_blocks(ordered, &self.config.layout);
 
         let (width, height) = image.dimensions();
+        let signals: Vec<crate::quality::LineSignals> = blocks
+            .iter()
+            .flat_map(|block| block.lines.iter())
+            .map(|line| crate::quality::LineSignals {
+                chars: line.text.chars().count(),
+                confidence: line.confidence,
+                margin: line.margin,
+                height_ratio: line.bbox.height() / height.max(1) as f32,
+            })
+            .collect();
         Ok(Page {
+            quality: crate::quality::page_quality(&signals),
             index: raw.index,
             width,
             height,

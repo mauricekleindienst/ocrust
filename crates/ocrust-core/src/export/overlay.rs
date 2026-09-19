@@ -541,10 +541,12 @@ mod tests {
                     bbox,
                     angle: 0.0,
                     det_score: 0.9,
+                    margin: 0.0,
                     words: Vec::new(),
                 }],
             }],
             elapsed_ms: 1.0,
+            quality: None,
             image: None,
         }
     }

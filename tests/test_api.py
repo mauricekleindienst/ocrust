@@ -327,3 +327,68 @@ def test_recursive_glob_patterns_are_expanded(tmp_path):
     # A plain pattern in one directory keeps working.
     found = _expand_sources([str(tmp_path / "*.pdf")])
     assert [Path(p).name for p in found] == ["top.pdf"]
+
+
+def test_quality_is_reported_and_bounded():
+    """`quality` estimates how much of a document is right, `confidence` does not."""
+    payload = {
+        "source": "two.pdf",
+        "elapsed_ms": 2.0,
+        "pages": [
+            {
+                "index": 0,
+                "width": 200,
+                "height": 100,
+                "rotation": 0.0,
+                "origin": "pdf_page",
+                "elapsed_ms": 1.0,
+                "quality": 0.98,
+                "blocks": [
+                    {
+                        "kind": "paragraph",
+                        "bbox": {"x0": 0.0, "y0": 0.0, "x1": 200.0, "y1": 20.0},
+                        "lines": [
+                            {
+                                "text": "a long clean line of text",
+                                "confidence": 0.99,
+                                "angle": 0.0,
+                                "margin": 0.97,
+                                "bbox": {"x0": 0.0, "y0": 0.0, "x1": 200.0, "y1": 20.0},
+                                "quad": {
+                                    "points": [
+                                        {"x": 0.0, "y": 0.0},
+                                        {"x": 200.0, "y": 0.0},
+                                        {"x": 200.0, "y": 20.0},
+                                        {"x": 0.0, "y": 20.0},
+                                    ]
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "index": 1,
+                "width": 200,
+                "height": 100,
+                "rotation": 0.0,
+                "origin": "pdf_page",
+                "elapsed_ms": 1.0,
+                "quality": None,
+                "blocks": [],
+            },
+        ],
+    }
+    doc = ocrust.Document._from_json(payload)
+    assert doc.pages[0].quality == 0.98
+    assert doc.pages[1].quality is None
+    # A page with no text has nothing to judge, so it does not drag the mean down.
+    assert doc.quality == 0.98
+    assert doc.lines[0].margin == 0.97
+    assert doc.confidence == 0.99, "confidence still means what it always meant"
+
+
+def test_quality_is_none_without_text():
+    doc = ocrust.Document._from_json({"source": "blank.png", "elapsed_ms": 1.0, "pages": []})
+    assert doc.quality is None
+    assert doc.confidence is None

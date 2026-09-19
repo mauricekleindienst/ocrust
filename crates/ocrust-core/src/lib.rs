@@ -47,6 +47,7 @@ pub mod layout;
 pub mod models;
 pub mod pipeline;
 pub mod preprocess;
+mod quality;
 pub mod recognize;
 pub mod runtime;
 
