@@ -745,18 +745,22 @@ def _scan_watching(
     written are remembered, so a file is scanned once; a file still being copied
     is left until its size stops changing, because half a PDF is not a PDF.
     """
-    watched = [p for p in requested if str(p) != STDIN]
-    if len(watched) != len(requested):
+    if any(str(p) == STDIN for p in requested):
         _fail("--watch reads directories, not stdin")
         return 2
-    folders = [p for p in watched if p.is_dir()]
+    folders = [p for p in requested if p.is_dir()]
     if not folders:
         _fail("--watch needs a directory to watch")
         return 2
+    # Watching a single file has nothing to wait for, and silently ignoring it
+    # would leave the user watching a directory they did not ask about.
+    for other in (p for p in requested if not p.is_dir()):
+        _fail(f"--watch needs a directory, and {other} is not one")
+        return 2
 
-    args._resolved_workers = _workers_for(args, 2)
+    args._resolved_workers = _workers_for(args, len(folders) + 1)
     engine = _engine_from_args(args)
-    destination = _destination(args, 2)
+    destination = _destination(args, len(folders))
     if destination is None:
         return 2
 
