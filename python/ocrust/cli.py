@@ -24,6 +24,10 @@ from pathlib import Path
 
 from . import FORMATS, Ocr, OcrustError, __version__, _glob, runtime_info
 
+#: The input that means "read the document from standard input", the convention
+#: every unix tool uses. A file really called `-` is reachable as `./-`.
+STDIN = "-"
+
 _EXTENSIONS = {
     "text": "txt",
     "markdown": "md",
@@ -209,7 +213,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "inputs",
         nargs="+",
         type=Path,
-        help="files, directories (read recursively) or glob patterns",
+        help="files, directories (read recursively), glob patterns, or - for stdin",
     )
     scan.add_argument(
         "-f",
@@ -268,6 +272,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--progress",
         action="store_true",
         help="report each page on stderr while reading (long PDFs)",
+    )
+    scan.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="leave inputs whose output file is already there (resume a batch)",
+    )
+    scan.add_argument(
+        "--watch",
+        action="store_true",
+        help="keep running and scan files as they appear in the input directories",
+    )
+    scan.add_argument(
+        "--watch-interval",
+        type=float,
+        default=2.0,
+        metavar="SECONDS",
+        help="how often --watch looks for new files (default: 2)",
     )
     scan.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
@@ -332,6 +353,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="show runtime and model diagnostics")
     doctor.add_argument("--json", action="store_true", help="machine-readable output")
+
+    completions = sub.add_parser(
+        "completions",
+        help="print a shell completion script",
+        description="Print a completion script for your shell.\n\n"
+        "  bash:       ocrust completions bash       > /etc/bash_completion.d/ocrust\n"
+        '  zsh:        ocrust completions zsh        > "${fpath[1]}/_ocrust"\n'
+        "  fish:       ocrust completions fish       > ~/.config/fish/completions/ocrust.fish\n"
+        "  powershell: ocrust completions powershell >> $PROFILE",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    completions.add_argument("shell", choices=sorted(_COMPLETION_SHELLS))
 
     models = sub.add_parser("models", help="show which model files would be used")
     models.add_argument("--models", type=Path, dest="models_dir")
@@ -454,6 +487,11 @@ def _expand_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[tuple[Path, 
     files: list[Path] = []
     missing: list[tuple[Path, str]] = []
     for path in paths:
+        if str(path) == STDIN:
+            # Kept as-is; the caller reads the bytes. Every other branch here
+            # asks the filesystem about it, and stdin is not on the filesystem.
+            files.append(path)
+            continue
         try:
             is_directory = path.is_dir()
             exists = is_directory or path.exists()
@@ -535,29 +573,68 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
 
 def _cmd_scan(args: argparse.Namespace) -> int:
     pages = _parse_pages(args.pages)
+    requested = list(args.inputs)
 
-    args.inputs, missing = _expand_inputs(args.inputs)
+    if args.watch:
+        return _scan_watching(args, requested, pages)
+
+    inputs, missing = _expand_inputs(requested)
     if missing:
         for path, reason in missing:
             _fail(f"{path}: {reason}")
         return 2
-    if not args.inputs:
+    if not inputs:
         _fail("nothing to read")
         return 2
 
-    args._resolved_workers = _workers_for(args, len(args.inputs))
+    args._resolved_workers = _workers_for(args, len(inputs))
     engine = _engine_from_args(args)
+    destination = _destination(args, len(inputs))
+    if destination is None:
+        return 2
+    return _scan_batch(args, engine, inputs, pages, destination)
 
-    many = len(args.inputs) > 1
+
+class _Destination:
+    """Where a batch writes, resolved once so every file agrees on it."""
+
+    def __init__(self, output: Path | None, as_directory: bool) -> None:
+        self.output = output
+        self.as_directory = as_directory
+
+    def target_for(self, source: Path, fmt: str) -> Path | None:
+        """The file `source` will be written to, or `None` for stdout."""
+        if self.output is None:
+            return None
+        if self.as_directory:
+            stem = "stdin" if str(source) == STDIN else source.stem
+            return self.output / f"{stem}.{_EXTENSIONS[fmt]}"
+        return self.output
+
+
+def _destination(args: argparse.Namespace, inputs: int) -> _Destination | None:
+    """Resolves `--output` against the number of inputs, or reports why not."""
+    many = inputs > 1 or bool(getattr(args, "watch", False))
     if many and args.output and args.output.suffix:
         _fail("--output must be a directory when reading several files")
-        return 2
+        return None
     # A path without a suffix is a directory: `-o out` writes out/<name>.<ext>,
     # so switching --format does not overwrite the previous run's output.
-    write_to_dir = bool(args.output) and (many or args.output.is_dir() or not args.output.suffix)
-    if write_to_dir:
+    as_directory = bool(args.output) and (many or args.output.is_dir() or not args.output.suffix)
+    if as_directory and args.output is not None:
         args.output.mkdir(parents=True, exist_ok=True)
+    return _Destination(args.output, as_directory)
 
+
+def _scan_batch(
+    args: argparse.Namespace,
+    engine: Ocr,
+    inputs: Sequence[Path],
+    pages: Sequence[int] | None,
+    destination: _Destination,
+    *,
+    summarize: bool = True,
+) -> int:
     live = _colourful(sys.stderr)
 
     def report(page: int, total: int, lines: int) -> None:
@@ -571,12 +648,27 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     progress = report if getattr(args, "progress", False) else None
 
-    failures = 0
+    failures = skipped = 0
     total_pages = total_lines = 0
     total_ms = 0.0
-    for path in args.inputs:
+    for path in inputs:
+        target = destination.target_for(path, args.format)
+        if args.skip_existing and target is not None and target.exists():
+            skipped += 1
+            if not args.quiet:
+                print(f"  {_paint(f'{path}: already written', 'dim')}", file=sys.stderr)
+            continue
+
         try:
-            doc = engine.scan(path, pages=pages, progress=progress)
+            if str(path) == STDIN:
+                data = _read_stdin()
+                if not data:
+                    _fail("nothing arrived on stdin")
+                    failures += 1
+                    continue
+                doc = engine.scan(data, pages=pages, name="stdin", progress=progress)
+            else:
+                doc = engine.scan(path, pages=pages, progress=progress)
         except (OcrustError, OSError, ValueError) as exc:
             _fail(f"{path}: {exc}")
             failures += 1
@@ -587,14 +679,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             print("\r\033[K" if live else "", end="" if live else "\n", file=sys.stderr)
 
         rendered = doc.render(args.format)
-        if args.output is None:
+        if target is None:
             sys.stdout.write(rendered)
             if not rendered.endswith("\n"):
                 sys.stdout.write("\n")
         else:
-            target = args.output
-            if write_to_dir:
-                target = target / f"{path.stem}.{_EXTENSIONS[args.format]}"
             _write(target, rendered, retries=_io_retries(args))
             if not args.quiet:
                 print(_arrow(path, target), file=sys.stderr)
@@ -617,16 +706,424 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 body = f"{page_count}, no text found, {elapsed}"
             print(f"  {body}", file=sys.stderr)
 
-    if not args.quiet and len(args.inputs) > 1:
-        done = len(args.inputs) - failures
+    if summarize and not args.quiet and len(inputs) > 1:
+        done = len(inputs) - failures - skipped
         total = (
             f"{_count(done, 'file')}, {_count(total_pages, 'page')}, "
             f"{_count(total_lines, 'line')}, {_duration(total_ms)}"
         )
+        if skipped:
+            total += f", {skipped} already written"
         if failures:
             total += f", {_paint(_count(failures, 'failure'), 'red')}"
         print(_paint("done:", "rust", "bold") + " " + total, file=sys.stderr)
     return 1 if failures else 0
+
+
+def _read_stdin() -> bytes:
+    """Reads a whole document from standard input.
+
+    `ocrust scan -` is how this fits into a pipeline — `curl … | ocrust scan -`,
+    or a scanner writing to a pipe — and the document has to be decoded as a
+    whole, so it is read as a whole.
+    """
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is None:  # a test or a host that replaced stdin with text
+        text = sys.stdin.read()
+        return text.encode("utf-8", "surrogateescape") if text else b""
+    return stream.read()
+
+
+def _scan_watching(
+    args: argparse.Namespace,
+    requested: Sequence[Path],
+    pages: Sequence[int] | None,
+) -> int:
+    """Scans what is there, then keeps scanning whatever else turns up.
+
+    For a directory a scanner or a colleague drops files into. Files already
+    written are remembered, so a file is scanned once; a file still being copied
+    is left until its size stops changing, because half a PDF is not a PDF.
+    """
+    watched = [p for p in requested if str(p) != STDIN]
+    if len(watched) != len(requested):
+        _fail("--watch reads directories, not stdin")
+        return 2
+    folders = [p for p in watched if p.is_dir()]
+    if not folders:
+        _fail("--watch needs a directory to watch")
+        return 2
+
+    args._resolved_workers = _workers_for(args, 2)
+    engine = _engine_from_args(args)
+    destination = _destination(args, 2)
+    if destination is None:
+        return 2
+
+    done: set[Path] = set()
+    sizes: dict[Path, int] = {}
+    # Whether anything failed, which decides the exit status. A count would be
+    # misleading: `_scan_batch` reports per round, not per file.
+    anything_failed = False
+    interval = max(0.1, args.watch_interval)
+    if not args.quiet:
+        where = ", ".join(str(f) for f in folders)
+        _note(f"watching {where} — press Ctrl-C to stop")
+
+    try:
+        while True:
+            found, _ = _expand_inputs(folders)
+            fresh = [f for f in found if f not in done]
+            ready = []
+            for path in fresh:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    # Gone again before we got to it; nothing to report.
+                    done.add(path)
+                    continue
+                if sizes.get(path) == size and size > 0:
+                    ready.append(path)
+                else:
+                    # Seen at a new size: still arriving, look again next round.
+                    sizes[path] = size
+            if ready:
+                if _scan_batch(args, engine, ready, pages, destination, summarize=False):
+                    anything_failed = True
+                for path in ready:
+                    done.add(path)
+                    sizes.pop(path, None)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        if not args.quiet:
+            print(file=sys.stderr)
+            _note(f"stopped after {_count(len(done), 'file')}")
+        return 1 if anything_failed else 0
+
+
+#: Shells `ocrust completions` can write a script for.
+_COMPLETION_SHELLS = ("bash", "fish", "powershell", "zsh")
+
+
+class _Option:
+    """One flag as a completion script needs to know it."""
+
+    def __init__(self, flags: Sequence[str], takes_value: bool, choices: Sequence[str], help_: str):
+        self.flags = list(flags)
+        self.takes_value = takes_value
+        self.choices = [str(c) for c in choices]
+        self.help = " ".join((help_ or "").split())
+
+
+class _Command:
+    def __init__(
+        self,
+        name: str,
+        help_: str,
+        options: Sequence[_Option],
+        takes_files: bool,
+        words: Sequence[str] = (),
+    ):
+        self.name = name
+        self.help = " ".join((help_ or "").split())
+        self.options = list(options)
+        self.takes_files = takes_files
+        #: Values its positional accepts, when it accepts a fixed set of them.
+        self.words = [str(w) for w in words]
+
+
+def _completion_model() -> tuple[list[_Command], list[_Option]]:
+    """Reads the parser and describes it as commands and flags.
+
+    Generated rather than written out: a completion script that lists yesterday's
+    flags is worse than none, and hand-maintaining four of them guarantees it.
+    argparse has no public way to walk a built parser, so this reaches for
+    `_actions` and `_subparsers` — the shape of both has been stable since
+    Python 2.7.
+    """
+
+    def options_of(parser: argparse.ArgumentParser) -> tuple[list[_Option], bool, list[str]]:
+        options: list[_Option] = []
+        takes_files = False
+        words: list[str] = []
+        for action in parser._actions:
+            if not action.option_strings:
+                # A positional. `type=Path` is the tell that it wants files; a
+                # fixed set of choices is a list of words to offer instead.
+                if isinstance(action, argparse._SubParsersAction):
+                    continue
+                takes_files = takes_files or action.type is Path
+                words.extend(str(c) for c in action.choices or ())
+                continue
+            if isinstance(action, argparse._SubParsersAction):
+                continue
+            takes_value = not isinstance(
+                action,
+                (
+                    argparse._StoreTrueAction,
+                    argparse._StoreFalseAction,
+                    argparse._StoreConstAction,
+                    argparse._HelpAction,
+                    argparse._VersionAction,
+                    argparse._CountAction,
+                ),
+            )
+            options.append(
+                _Option(action.option_strings, takes_value, action.choices or (), action.help or "")
+            )
+        return options, takes_files, words
+
+    parser = _build_parser()
+    top, _, _ = options_of(parser)
+    commands: list[_Command] = []
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        helps = {c.dest: c.help for c in action._choices_actions}
+        for name, sub in action.choices.items():
+            options, takes_files, words = options_of(sub)
+            commands.append(_Command(name, helps.get(name, ""), options, takes_files, words))
+    commands.sort(key=lambda c: c.name)
+    return commands, top
+
+
+def _completions_bash(commands: Sequence[_Command], top: Sequence[_Option]) -> str:
+    lines = [
+        "# ocrust completion for bash. Source it, or drop it in",
+        "# /etc/bash_completion.d/ocrust (or /usr/local/etc/bash_completion.d on macOS).",
+        "_ocrust() {",
+        "  local cur prev command i",
+        '  cur="${COMP_WORDS[COMP_CWORD]}"',
+        '  prev="${COMP_WORDS[COMP_CWORD-1]}"',
+        '  command=""',
+        "  for ((i = 1; i < COMP_CWORD; i++)); do",
+        '    case "${COMP_WORDS[i]}" in',
+        "      -*) ;;",
+        '      *) command="${COMP_WORDS[i]}"; break ;;',
+        "    esac",
+        "  done",
+        "",
+        '  case "$prev" in',
+    ]
+    # Options whose value is one of a fixed set: complete the set, not files.
+    valued = {}
+    for command in commands:
+        for option in command.options:
+            if option.choices:
+                for flag in option.flags:
+                    valued.setdefault(flag, set()).update(option.choices)
+    for flag, choices in sorted(valued.items()):
+        words = " ".join(sorted(choices))
+        lines.append(f'    {flag}) COMPREPLY=($(compgen -W "{words}" -- "$cur")); return ;;')
+    lines += [
+        "  esac",
+        "",
+        '  if [[ -z "$command" ]]; then',
+        f'    COMPREPLY=($(compgen -W "{" ".join(c.name for c in commands)} '
+        f'{" ".join(f for o in top for f in o.flags)}" -- "$cur"))',
+        "    return",
+        "  fi",
+        "",
+        '  case "$command" in',
+    ]
+    for command in commands:
+        flags = " ".join(flag for option in command.options for flag in option.flags)
+        lines.append(f"    {command.name})")
+        if command.takes_files or command.words:
+            # A flag if it starts with a dash, otherwise what the command reads:
+            # file names, or the words its positional accepts.
+            rest = (
+                f'COMPREPLY=($(compgen -W "{" ".join(command.words)}" -- "$cur"))'
+                if command.words
+                else 'COMPREPLY=($(compgen -f -- "$cur"))'
+            )
+            lines += [
+                '      if [[ "$cur" == -* ]]; then',
+                f'        COMPREPLY=($(compgen -W "{flags}" -- "$cur"))',
+                "      else",
+                f"        {rest}",
+                "      fi",
+            ]
+        else:
+            lines.append(f'      COMPREPLY=($(compgen -W "{flags}" -- "$cur"))')
+        lines.append("      ;;")
+    lines += ["  esac", "}", "complete -F _ocrust ocrust", ""]
+    return "\n".join(lines)
+
+
+def _completions_zsh(commands: Sequence[_Command], top: Sequence[_Option]) -> str:
+    def quote(text: str) -> str:
+        return (
+            text.replace("\\", "\\\\")
+            .replace("'", "'\\''")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+            .replace(":", "\\:")
+        )
+
+    lines = [
+        "#compdef ocrust",
+        "# ocrust completion for zsh. Save as _ocrust somewhere on your $fpath,",
+        '# e.g. "${fpath[1]}/_ocrust", then restart the shell.',
+        "",
+        "_ocrust() {",
+        "  local context state state_descr line",
+        "  typeset -A opt_args",
+        "  _arguments -C \\",
+        "    '1: :->command' \\",
+        "    '*:: :->argument' && return",
+        "",
+        "  case $state in",
+        "    command)",
+        "      local -a commands",
+        "      commands=(",
+    ]
+    for command in commands:
+        lines.append(f"        '{command.name}:{quote(command.help)}'")
+    for option in top:
+        for flag in option.flags:
+            lines.append(f"        '{flag}:{quote(option.help)}'")
+    lines += [
+        "      )",
+        "      _describe -t commands 'ocrust command' commands && return",
+        "      ;;",
+        "    argument)",
+        "      case $words[1] in",
+    ]
+    for command in commands:
+        lines.append(f"        {command.name})")
+        lines.append("          _arguments \\")
+        for option in command.options:
+            spec = "{" + ",".join(option.flags) + "}" if len(option.flags) > 1 else option.flags[0]
+            described = f"'[{quote(option.help)}]'" if not option.takes_value else None
+            if option.takes_value:
+                if option.choices:
+                    body = f"'[{quote(option.help)}]:value:({' '.join(option.choices)})'"
+                else:
+                    body = f"'[{quote(option.help)}]:value:_files'"
+            else:
+                body = described
+            lines.append(f"            {spec}{body} \\")
+        if command.words:
+            lines.append(f"            '1:value:({' '.join(command.words)})'")
+        elif command.takes_files:
+            lines.append("            '*:file:_files'")
+        else:
+            lines.append("            && return")
+        lines.append("          ;;")
+    lines += ["      esac", "      ;;", "  esac", "}", "", '_ocrust "$@"', ""]
+    return "\n".join(lines)
+
+
+def _completions_fish(commands: Sequence[_Command], top: Sequence[_Option]) -> str:
+    def quote(text: str) -> str:
+        return text.replace("\\", "\\\\").replace("'", "\\'")
+
+    names = " ".join(c.name for c in commands)
+    lines = [
+        "# ocrust completion for fish. Save as",
+        "# ~/.config/fish/completions/ocrust.fish",
+        "",
+        f"complete -c ocrust -n 'not __fish_seen_subcommand_from {names}' -f",
+    ]
+    for command in commands:
+        lines.append(
+            f"complete -c ocrust -n 'not __fish_seen_subcommand_from {names}' "
+            f"-a {command.name} -d '{quote(command.help)}'"
+        )
+    for option in top:
+        parts = [f"complete -c ocrust -n 'not __fish_seen_subcommand_from {names}'"]
+        for flag in option.flags:
+            parts.append(f"-l {flag[2:]}" if flag.startswith("--") else f"-s {flag[1:]}")
+        parts.append(f"-d '{quote(option.help)}'")
+        lines.append(" ".join(parts))
+    lines.append("")
+    for command in commands:
+        guard = f"-n '__fish_seen_subcommand_from {command.name}'"
+        if command.words:
+            lines.append(f"complete -c ocrust {guard} -f -a '{' '.join(command.words)}'")
+        elif command.takes_files:
+            lines.append(f"complete -c ocrust {guard} -F")
+        for option in command.options:
+            parts = [f"complete -c ocrust {guard}"]
+            for flag in option.flags:
+                parts.append(f"-l {flag[2:]}" if flag.startswith("--") else f"-s {flag[1:]}")
+            if option.takes_value:
+                # `-x` rather than `-r` for a fixed set: it also stops fish
+                # offering file names alongside the values, which the command's
+                # own file completion would otherwise mix in.
+                parts.append("-x" if option.choices else "-r")
+                if option.choices:
+                    parts.append(f"-a '{' '.join(option.choices)}'")
+            parts.append(f"-d '{quote(option.help)}'")
+            lines.append(" ".join(parts))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _completions_powershell(commands: Sequence[_Command], top: Sequence[_Option]) -> str:
+    def quote(text: str) -> str:
+        return text.replace("'", "''")
+
+    top_flags = "', '".join(flag for option in top for flag in option.flags)
+
+    lines = [
+        "# ocrust completion for PowerShell. Append to your profile:",
+        "#   ocrust completions powershell >> $PROFILE",
+        "",
+        "Register-ArgumentCompleter -Native -CommandName ocrust -ScriptBlock {",
+        "  param($wordToComplete, $commandAst, $cursorPosition)",
+        "",
+        "  $commands = @{",
+    ]
+    for command in commands:
+        flags = "', '".join(flag for option in command.options for flag in option.flags)
+        lines.append(f"    '{command.name}' = @('{flags}')")
+    lines += [
+        "  }",
+        "  $descriptions = @{",
+    ]
+    for command in commands:
+        lines.append(f"    '{command.name}' = '{quote(command.help)}'")
+    lines += [
+        "  }",
+        "",
+        "  $words = $commandAst.CommandElements | Select-Object -Skip 1 |",
+        "    ForEach-Object { $_.ToString() }",
+        "  $command = $words | Where-Object { $commands.ContainsKey($_) } | Select-Object -First 1",
+        "",
+        "  if (-not $command) {",
+        f"    $top = @('{top_flags}')",
+        "    return ($commands.Keys + $top) | Sort-Object |",
+        '      Where-Object { $_ -like "$wordToComplete*" } |',
+        "      ForEach-Object {",
+        "        [System.Management.Automation.CompletionResult]::new(",
+        "          $_, $_, 'ParameterValue', $descriptions[$_])",
+        "      }",
+        "  }",
+        "",
+        "  return $commands[$command] |",
+        '    Where-Object { $_ -like "$wordToComplete*" } |',
+        "    ForEach-Object {",
+        "      [System.Management.Automation.CompletionResult]::new(",
+        "        $_, $_, 'ParameterName', $_)",
+        "    }",
+        "}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _cmd_completions(args: argparse.Namespace) -> int:
+    commands, top = _completion_model()
+    writers = {
+        "bash": _completions_bash,
+        "zsh": _completions_zsh,
+        "fish": _completions_fish,
+        "powershell": _completions_powershell,
+    }
+    sys.stdout.write(writers[args.shell](commands, top))
+    return 0
 
 
 def _cmd_pdf(args: argparse.Namespace) -> int:
@@ -911,6 +1408,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _cmd_install_models(args)
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "completions":
+        return _cmd_completions(args)
     if args.command == "models":
         return _cmd_models(args)
     return 2

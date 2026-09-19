@@ -298,6 +298,10 @@ ocrust scan *.tiff -f json -o results/       # batch, one file per input
 ocrust scan archive/ -f text -o sidecars/    # a whole folder, read recursively
 ocrust scan book.pdf --progress              # page-by-page on stderr
 ocrust scan book.pdf --pages 1,4-8 --dpi 300 --lang de
+curl -s https://host/x.pdf | ocrust scan -   # read a document from stdin
+ocrust scan in/ -o out/ --skip-existing      # resume an interrupted batch
+ocrust scan inbox/ -o out/ --watch           # scan files as they land
+ocrust completions zsh > "${fpath[1]}/_ocrust"
 ocrust ocr scan.pdf -o scan.ocr.pdf          # add a text layer
 ocrust pdf photo.jpg -o photo.pdf            # searchable PDF from an image
 ocrust tiff scan.pdf --gray --sidecar text   # archive TIFF plus text
@@ -317,6 +321,13 @@ The result goes to stdout and everything about the run to stderr, so
 Colour is used sparingly — Rust orange for what was written, green, amber or red
 for how much of the page is likely to be right — and switches itself off when
 stderr is not a terminal (`NO_COLOR` honoured, `FORCE_COLOR` obeyed).
+
+For batches: `--skip-existing` leaves inputs whose output file is already there,
+so a run that was interrupted at file 300 of 400 picks up where it stopped;
+`--watch` keeps running and scans whatever appears in the input directories,
+waiting until a file stops growing so half a copy is never read; and `-` reads
+one document from stdin. `ocrust completions bash|zsh|fish|powershell` prints a
+completion script, generated from the parser so it cannot fall behind the flags.
 
 A long document costs no more memory than a short one — pages are rasterized one
 at a time, and ONNX Runtime is told not to hold an allocation arena, which

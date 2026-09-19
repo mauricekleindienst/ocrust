@@ -330,3 +330,121 @@ def test_an_engine_that_cannot_be_built_prints_one_line(tmp_path, capsys):
     assert "Traceback" not in err, err
     assert err.startswith("ocrust:"), err
     assert len(err.splitlines()) <= 4, err
+
+
+def test_completion_scripts_cover_every_command_and_flag():
+    """Generated from the parser, so a new flag cannot be forgotten."""
+    from ocrust.cli import _COMPLETION_SHELLS, _completion_model
+
+    commands, top = _completion_model()
+    names = {c.name for c in commands}
+    assert {"scan", "pdf", "ocr", "tiff", "completions", "doctor"} <= names
+    assert any("--version" in o.flags for o in top)
+
+    scan = next(c for c in commands if c.name == "scan")
+    flags = {flag for option in scan.options for flag in option.flags}
+    assert {"--skip-existing", "--watch", "--watch-interval", "--memory"} <= flags
+    assert scan.takes_files
+    fmt = next(o for o in scan.options if "--format" in o.flags)
+    assert fmt.takes_value and "markdown" in fmt.choices
+    watch = next(o for o in scan.options if o.flags == ["--watch"])
+    assert not watch.takes_value
+
+    # `ocrust completions <shell>` offers the shells, not file names.
+    subject = next(c for c in commands if c.name == "completions")
+    assert sorted(subject.words) == sorted(_COMPLETION_SHELLS)
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh", "fish", "powershell"])
+def test_a_completion_script_is_printed_and_mentions_the_commands(shell, capsys):
+    assert main(["completions", shell]) == 0
+    script = capsys.readouterr().out
+    assert script.strip()
+    for command in ("scan", "tiff", "doctor"):
+        assert command in script
+    # fish spells a long option `-l skip-existing`; everyone else writes it out.
+    assert ("skip-existing" if shell == "fish" else "--skip-existing") in script
+
+
+def test_an_unknown_shell_is_rejected():
+    with pytest.raises(SystemExit) as raised:
+        main(["completions", "csh"])
+    assert raised.value.code == 2
+
+
+def test_stdin_is_an_input_like_any_other(invoice_pdf, tmp_path, monkeypatch, capsys):
+    """`curl … | ocrust scan -` has to work, and write somewhere sensible."""
+    from ocrust.cli import STDIN, _expand_inputs
+
+    # `-` is never asked about on disk: it is not on disk.
+    files, missing = _expand_inputs([Path(STDIN)])
+    assert [str(f) for f in files] == [STDIN]
+    assert missing == []
+
+    out = tmp_path / "out"
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(invoice_pdf.read_bytes()))
+    assert main(["scan", "-", "-o", str(out), "-q"]) == 0
+    # A document with no name of its own is written as stdin.<ext>.
+    assert (out / "stdin.txt").read_text().strip()
+
+
+class _FakeStdin:
+    """Stdin as the CLI sees it: a text stream with a `.buffer`."""
+
+    def __init__(self, data: bytes) -> None:
+        self.buffer = _Bytes(data)
+
+    def read(self) -> str:  # pragma: no cover - the buffer is what gets used
+        return self.buffer.data.decode("utf-8", "replace")
+
+
+class _Bytes:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+    def read(self) -> bytes:
+        return self.data
+
+
+def test_skip_existing_leaves_finished_files_alone(invoice_pdf, tmp_path, capsys):
+    """Resuming an interrupted batch must not redo the expensive part."""
+    folder = tmp_path / "in"
+    folder.mkdir()
+    for name in ("a.pdf", "b.pdf"):
+        (folder / name).write_bytes(invoice_pdf.read_bytes())
+    out = tmp_path / "out"
+
+    assert main(["scan", str(folder), "-o", str(out)]) == 0
+    written = {p.name: p.read_text() for p in out.iterdir()}
+    assert sorted(written) == ["a.txt", "b.txt"]
+
+    # Mark one output so a re-run can be seen to have left it alone.
+    (out / "a.txt").write_text("untouched")
+    assert main(["scan", str(folder), "-o", str(out), "--skip-existing"]) == 0
+    assert (out / "a.txt").read_text() == "untouched"
+    report = capsys.readouterr().err
+    assert "already written" in report
+
+
+def test_skip_existing_knows_the_format_it_would_have_written(invoice_pdf, tmp_path):
+    """A text run must not make a markdown run think it is done."""
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "a.pdf").write_bytes(invoice_pdf.read_bytes())
+    (folder / "b.pdf").write_bytes(invoice_pdf.read_bytes())
+    out = tmp_path / "out"
+
+    assert main(["scan", str(folder), "-o", str(out), "-q"]) == 0
+    assert (
+        main(["scan", str(folder), "-o", str(out), "-f", "markdown", "--skip-existing", "-q"]) == 0
+    )
+    assert sorted(p.name for p in out.iterdir()) == ["a.md", "a.txt", "b.md", "b.txt"]
+
+
+def test_watch_needs_a_directory(tmp_path, capsys):
+    lonely = tmp_path / "a.pdf"
+    lonely.write_bytes(b"%PDF-1.4\n")
+    assert main(["scan", str(lonely), "--watch"]) == 2
+    assert "needs a directory" in capsys.readouterr().err
+    assert main(["scan", "-", "--watch"]) == 2
+    assert "not stdin" in capsys.readouterr().err
