@@ -70,7 +70,10 @@ Output rules worth knowing:
   see [Performance](Performance.md).
 - `--pages` is 1-based and accepts ranges: `1,3-5,9`. The Python API is
   0-based, as Python should be. Asking for a page the document does not have is
-  an error, not an empty file.
+  an error, not an empty file; a page spec that is not a number or a range is a
+  bad argument and exits 2.
+- `-q` works on `scan`, `ocr`, `pdf` and `tiff`: it silences the summary on
+  stderr, which is what a `find | xargs -P4` pipeline wants.
 
 ## `ocrust ocr` — text layer over an existing PDF
 
@@ -79,6 +82,7 @@ ocrust ocr scan.pdf                      # -> scan.ocr.pdf
 ocrust ocr scan.pdf -o searchable.pdf
 ocrust ocr scan.pdf --dpi 300            # small print
 ocrust ocr scan.pdf --dry-run            # decide per page, change nothing
+ocrust ocr scan.pdf -q                   # no summary line, for xargs pipelines
 ocrust ocr scan.pdf --force              # also OCR pages that already have text
 ocrust ocr archive.pdf --lang de,fr --workers 4
 ```

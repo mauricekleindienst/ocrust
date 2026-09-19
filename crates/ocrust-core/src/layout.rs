@@ -85,6 +85,22 @@ impl Default for LayoutConfig {
 }
 
 /// Median of the line heights, used as the page's scale reference.
+/// Median height of the text itself, taken from the detection polygons.
+///
+/// De-hyphenation unions two lines' boxes into one, so a box is no measure of
+/// how tall the text is; the quad it came from still is.
+fn median_text_height(lines: &[Line]) -> f32 {
+    if lines.is_empty() {
+        return 1.0;
+    }
+    let mut hs: Vec<f32> = lines
+        .iter()
+        .map(|l| l.quad.edge_height().max(1.0))
+        .collect();
+    hs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    hs[hs.len() / 2]
+}
+
 fn median_height(lines: &[Line]) -> f32 {
     if lines.is_empty() {
         return 1.0;
@@ -411,6 +427,7 @@ pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
         return Vec::new();
     }
     let scale = median_height(&lines);
+    let text_height = median_text_height(&lines);
     let mut blocks: Vec<Block> = Vec::new();
     let mut current: Vec<Line> = Vec::new();
 
@@ -425,17 +442,17 @@ pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
             }
         };
         if starts_new {
-            blocks.push(finish_block(std::mem::take(&mut current), scale, cfg));
+            blocks.push(finish_block(std::mem::take(&mut current), text_height, cfg));
         }
         current.push(line);
     }
     if !current.is_empty() {
-        blocks.push(finish_block(current, scale, cfg));
+        blocks.push(finish_block(current, text_height, cfg));
     }
     blocks
 }
 
-fn finish_block(mut lines: Vec<Line>, scale: f32, cfg: &LayoutConfig) -> Block {
+fn finish_block(mut lines: Vec<Line>, text_height: f32, cfg: &LayoutConfig) -> Block {
     if cfg.dehyphenate {
         dehyphenate(&mut lines);
     }
@@ -445,7 +462,7 @@ fn finish_block(mut lines: Vec<Line>, scale: f32, cfg: &LayoutConfig) -> Block {
         .reduce(|a, b| a.union(&b))
         .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
 
-    let kind = classify_block(&lines, scale, cfg);
+    let kind = classify_block(&lines, text_height, cfg);
     Block { kind, bbox, lines }
 }
 
@@ -469,7 +486,7 @@ pub(crate) fn strip_bullet(line: &str) -> &str {
     rest.trim_start()
 }
 
-fn classify_block(lines: &[Line], scale: f32, cfg: &LayoutConfig) -> BlockKind {
+fn classify_block(lines: &[Line], text_height: f32, cfg: &LayoutConfig) -> BlockKind {
     let first = match lines.first() {
         Some(l) => l,
         None => return BlockKind::Paragraph,
@@ -482,7 +499,9 @@ fn classify_block(lines: &[Line], scale: f32, cfg: &LayoutConfig) -> BlockKind {
     {
         return BlockKind::ListItem;
     }
-    let tall = first.bbox.height() > scale * cfg.heading_height_factor;
+    // The quad, not the box: a de-hyphenated line's box spans both of the lines
+    // it came from, which would make every short hyphenated paragraph a heading.
+    let tall = first.quad.edge_height() > text_height * cfg.heading_height_factor;
     if tall && lines.len() <= 2 && first.text.chars().count() <= 120 {
         return BlockKind::Heading;
     }
@@ -877,6 +896,27 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text(), "a\nb");
         assert_eq!(blocks[1].text(), "c");
+    }
+
+    #[test]
+    fn a_hyphenated_paragraph_is_not_a_heading() {
+        // De-hyphenation unions the two boxes, which used to read as one line of
+        // twice the height and came out of the Markdown exporter as `## `.
+        let lines = vec![
+            line_at("Die Unterneh-", 0.0, 0.0, 200.0, 10.0),
+            line_at("mensberatung prueft", 0.0, 12.0, 200.0, 22.0),
+            line_at("die Bilanz und be-", 0.0, 24.0, 200.0, 34.0),
+            line_at("richtet dem Vorstand", 0.0, 36.0, 200.0, 46.0),
+        ];
+        let blocks = group_blocks(lines, &LayoutConfig::default());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0].kind,
+            BlockKind::Paragraph,
+            "{:?}",
+            blocks[0].text()
+        );
+        assert!(blocks[0].text().contains("Unternehmensberatung"));
     }
 
     #[test]

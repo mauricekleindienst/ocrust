@@ -41,7 +41,17 @@ wrong page, a crash or a build that would not compile.
   anchored at its parent directory (`archive/**`) and only its last component was
   globbed. Both now glob from the last directory that is spelled out.
 - **`--pages 1-x` is a message, not a traceback**: a malformed page spec exits
-  with *'1-x' is not a page or a page range*.
+  with *'1-x' is not a page or a page range* — and with code 2, which the
+  documented table reserves for a bad argument, rather than 1.
+- **A de-hyphenated paragraph is no longer a heading.** Joining a word across a
+  line break unions the two line boxes, and the result read as one line of twice
+  the page's median height: short hyphenated paragraphs came out of the Markdown
+  exporter as `## `. The classifier now measures the detection polygon, which
+  de-hyphenation does not touch.
+- **`-q` works on `ocr`, `pdf` and `tiff`**, not only `scan`; the wiki's own
+  `find | xargs -P4 ocrust ocr` recipe had no way to silence the per-file
+  summary. A `--sidecar` file is written through the same retrying path as every
+  other output, so a network share hiccup no longer fails it alone.
 - **`ocrust scan book.pdf | head -1` no longer ends in a traceback.** A reader
   that closes the pipe early is its own business; the CLI flushes stdout while it
   can still see the error and exits quietly instead of raising `BrokenPipeError`,

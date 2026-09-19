@@ -102,6 +102,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pdf.add_argument("--quality", type=int, default=80, help="JPEG quality (default 80)")
     pdf.add_argument("--models", type=Path)
     pdf.add_argument("--device")
+    pdf.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
     ocr = sub.add_parser(
         "ocr",
@@ -124,6 +125,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ocr.add_argument("--device")
     ocr.add_argument("--workers", type=int)
     ocr.add_argument("--io-retries", type=int, metavar="N")
+    ocr.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
     tiff = sub.add_parser("tiff", help="convert a document into a deskewed multi-page TIFF")
     tiff.add_argument("input", type=Path)
@@ -133,6 +135,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tiff.add_argument("--dpi", type=float)
     tiff.add_argument("--models", type=Path)
     tiff.add_argument("--lang")
+    tiff.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
     languages = sub.add_parser("languages", help="list the languages the installed model covers")
     languages.add_argument("--models", type=Path)
@@ -154,6 +157,16 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _bad_argument(message: str) -> SystemExit:
+    """Exits 2, which is what the documented table calls a bad argument.
+
+    `SystemExit("text")` prints the text but exits 1, the code reserved for a
+    file that failed to scan.
+    """
+    print(f"ocrust: {message}", file=sys.stderr)
+    return SystemExit(2)
+
+
 def _parse_pages(spec: str | None) -> list[int] | None:
     """Turns ``"1,3-5"`` into zero-based indices ``[0, 2, 3, 4]``."""
     if not spec:
@@ -168,16 +181,16 @@ def _parse_pages(spec: str | None) -> list[int] | None:
                 start, _, end = part.partition("-")
                 first, last = int(start), int(end)
                 if first < 1 or last < first:
-                    raise SystemExit(f"ocrust: bad page range {part!r}")
+                    raise _bad_argument(f"bad page range {part!r}")
                 pages.extend(range(first - 1, last))
             else:
                 number = int(part)
                 if number < 1:
-                    raise SystemExit("ocrust: page numbers start at 1")
+                    raise _bad_argument("page numbers start at 1")
                 pages.append(number - 1)
         except ValueError:
             # `--pages 1-x` is a typo, not a crash.
-            raise SystemExit(f"ocrust: {part!r} is not a page or a page range") from None
+            raise _bad_argument(f"{part!r} is not a page or a page range") from None
     return sorted(set(pages))
 
 
@@ -415,7 +428,8 @@ def _cmd_pdf(args: argparse.Namespace) -> int:
         return 1
     target = args.output or args.input.with_suffix(".ocr.pdf")
     _write(target, data)
-    print(f"{args.input} -> {target} ({len(data) / 1e6:.1f} MB)", file=sys.stderr)
+    if not args.quiet:
+        print(f"{args.input} -> {target} ({len(data) / 1e6:.1f} MB)", file=sys.stderr)
     return 0
 
 
@@ -467,11 +481,12 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
 
     target = args.output or args.input.with_suffix(".ocr.pdf")
     _write(target, pdf)
-    print(
-        f"{args.input} -> {target}: {report['pages_with_layer']} of {report['pages']} page(s) "
-        f"got a text layer, {report['pages_skipped']} skipped, {report['lines']} line(s)",
-        file=sys.stderr,
-    )
+    if not args.quiet:
+        print(
+            f"{args.input} -> {target}: {report['pages_with_layer']} of {report['pages']} page(s) "
+            f"got a text layer, {report['pages_skipped']} skipped, {report['lines']} line(s)",
+            file=sys.stderr,
+        )
     if report["unmappable_chars"]:
         print(
             f"note: {report['unmappable_chars']} character(s) are outside WinAnsi and were "
@@ -493,14 +508,16 @@ def _cmd_tiff(args: argparse.Namespace) -> int:
         return 1
     target = args.output or args.input.with_suffix(".ocr.tiff")
     _write(target, data)
-    print(
-        f"{args.input} -> {target}: {len(doc.pages)} page(s), {len(data) / 1e6:.1f} MB",
-        file=sys.stderr,
-    )
+    if not args.quiet:
+        print(
+            f"{args.input} -> {target}: {len(doc.pages)} page(s), {len(data) / 1e6:.1f} MB",
+            file=sys.stderr,
+        )
     if args.sidecar:
         sidecar = target.with_suffix("." + _EXTENSIONS[args.sidecar])
-        sidecar.write_text(doc.render(args.sidecar), encoding="utf-8")
-        print(f"{args.input} -> {sidecar}", file=sys.stderr)
+        _write(sidecar, doc.render(args.sidecar), retries=_io_retries(args))
+        if not args.quiet:
+            print(f"{args.input} -> {sidecar}", file=sys.stderr)
     return 0
 
 
