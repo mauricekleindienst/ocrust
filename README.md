@@ -256,8 +256,8 @@ for line in doc.lines:
         print("   ", word.text, word.box.as_tuple())
 
 # Route what needs a human: `quality` ranks pages by how wrong they are
-# (Spearman -0.75 over the evaluation corpus), which `confidence` does not
-# (-0.46) — it answers the narrower question of how sure the recognizer was.
+# (Spearman -0.71 over the evaluation corpus), which `confidence` does not
+# (-0.47) — it answers the narrower question of how sure the recognizer was.
 if doc.quality is not None and doc.quality < 0.96:
     queue_for_review(doc)
 

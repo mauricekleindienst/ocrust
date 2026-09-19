@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased
+
+Three layout bugs, all found by probing pages the corpus did not have.
+Accuracy over the documents that were already there is unchanged file for file;
+the corpus itself grew by the shapes that were missing, and over all 112 files
+with ground truth it now reads mean CER 0.036, median 0.006, WER 0.107 and word
+recall 0.904.
+
+### Fixed
+
+- **A page laid out in columns was read across them** when its columns sat on one
+  baseline grid — a newspaper, a journal paper, anything set on a leading that
+  leaves white space between every pair of lines. The XY-cut took the horizontal
+  gap first, which cut the columns into rows, and the two columns of each row
+  were then joined into one line: `Der Stadtrat hat beschlossen, Anwohner fordern
+  mehr Raum`. Columns are now looked for before rows, and only where they are a
+  property of the page: a wide corridor that runs the height of the region, with
+  a column of text on either side of it — several baselines tall, one box on each
+  — and columns of near enough the same width. A drawing's title block is two
+  such sides and is not two columns, so a corridor has to divide a region that
+  covers most of the page's width. Three-column and two-column corpus pages now
+  read at CER 0.000; they read at 0.003 and as nonsense before.
+- **A table's rows were split into columns** when its cells were wide enough that
+  neither side of a gutter looked narrow: a price list came back as every article
+  name, then every figure. What says the gutter runs through the rows rather than
+  between columns is that one side puts several boxes on each baseline, which is
+  a row of cells and never a column of text.
+- **A page that is nothing but a table measured its own gutters as word spaces.**
+  Its cells hold a word each, so almost every gap on the page is a column gap and
+  even the quarter point lands among them; a nine-row price list came back as two
+  columns instead of four. Where the gaps fall into two groups — word spaces well
+  below, gutters well above — the threshold is now taken from the stretch between
+  them, and the quarter point stands in only where there is no such stretch,
+  which is what a page of prose looks like. The highest stretch wins, not the
+  widest: a heading whose two words sit further apart than the rows beneath it
+  opens one of its own, and a threshold taken from that cuts the heading into
+  cells and hands it to the table as a header row. The estimate is never widened
+  by this either, so no table that was found before is lost: the corpus still
+  finds the same 16, plus the 8 new price lists as 9×4.
+
+### Changed
+
+- The corpus generator's `columns` option now spreads the lines over the columns
+  instead of filling each to the bottom of the page, so a page asked for in three
+  columns is in three columns. It was not, which is why nothing in the corpus
+  exercised column layout and why the bug above survived. It also refuses to draw
+  a line wider than its column — that caught `extremes/long_receipt.png`, whose
+  invoice lines ran off the edge of the strip while its ground truth claimed the
+  text was there (CER 0.054 → 0.000 once the strip is wide enough for them).
+- New corpus fixtures for the shapes that were missing: an unruled full-page
+  price list (PNG and PDF) and a two-column page set on one baseline grid.
+- `scripts/collect_quality.py` matched a recognized line against at most three
+  ground-truth lines in a row. The layout joins a table row into one line, so a
+  five-column form's rows scored as though most of each row had been invented.
+  Matching runs of up to five puts the gap between a line's confidence and its
+  measured precision at 1.2% over the corpus rather than 2.2%, and at 1.4% rather
+  than 12.2% over the forms.
+- A CLI test built an engine it expected to fail, which it did not on a machine
+  with `OCRUST_MODELS_DIR` set — the model search falls back to the environment.
+  The test now clears it.
+
 ## 0.2.0 — 2026-09-19
 
 Accuracy is unchanged throughout: the corpus run reproduces mean CER 0.040,

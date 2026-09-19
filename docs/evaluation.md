@@ -23,10 +23,11 @@ exact text it contains**. That is what makes error rates possible.
 | `drawings` | A3 technical drawings: frame, title block, hatching, dimension labels, vertical section labels |
 | `forms` | ruled five-column tables |
 | `receipts` | narrow thermal strips in a monospaced face, faint print |
-| `newspaper` | three-column layout |
+| `newspaper` | three columns, and two columns set on one baseline grid |
+| `pricelists` | a page that is nothing but an unruled four-column price list |
 | `rotated` | skew from −7° to +6°, and PDFs with `/Rotate 90/180/270` |
 | `screenshots` | dark mode, light text on dark background |
-| `extremes` | A0 drawing at 300 dpi (~9900×7000 px), a 60 dpi thumbnail, a 3×24 inch receipt |
+| `extremes` | A0 drawing at 300 dpi (~9900×7000 px), a 60 dpi thumbnail, a 4×24 inch receipt |
 | `multipage` | 5, 12 and 30-page image-only PDFs and TIFFs, some pages aged |
 | `borndigital` | PDFs with a real text layer, which the overlay tool must skip |
 | `formats` | the same page as PNG, JPEG, WebP, BMP, GIF, PPM, TGA, TIFF |
@@ -70,31 +71,35 @@ the engine or its defaults, not a measurement artifact:
 
 ## Results after the fixes
 
-106 files, 191 pages, 416 MB on four CPU cores, with the shipped defaults:
+118 files, 203 pages, 416 MB on four CPU cores, with the shipped defaults:
 
-- **median 669 ms per page** (mean 823, which the A0 sheet dominates), 157.3 s for
+- **median 673 ms per page** (mean 805, which the A0 sheet dominates), 163.3 s for
   the whole corpus
-- **median CER 0.006**, mean 0.040, mean WER 0.120, mean word recall 0.892
+- **median CER 0.006**, mean 0.036, mean WER 0.107, mean word recall 0.904
 - **zero unexpected failures**; the seven deliberately broken files behave as
   designed (five error cleanly, the PNG named `.pdf` is read anyway, the blank
   page returns no text)
 
 | category | mean CER | ms/page | | category | mean CER | ms/page |
 |---|---:|---:|---|---|---:|---:|
-| skewed | 0.000 | 744 | | multipage (PDF) | 0.004 | 673 |
-| every raster format | 0.001 | 638 | | 60 dpi thumbnail | 0.006 | 412 |
-| born-digital | 0.002 | 620 | | aged and stained | 0.006 | 713 |
-| newspaper (3 columns) | 0.003 | 1131 | | 1-bit fax | 0.014 | 547 |
-| multipage (TIFF) | 0.003 | 623 | | clean | 0.033 | 663 |
-| dark mode | 0.003 | 604 | | forms (tables) | 0.063 | 628 |
-| rotated PDFs | 0.054 | 885 | | A0 at 300 dpi | 0.147 | 30290 |
-| image-only PDF (clean) | 0.042 | 677 | | drawings | 0.170 | 583 |
-|  |  |  | | receipts | 0.183 | 406 |
+| newspaper (2 and 3 columns) | 0.000 | 585 | | aged and stained | 0.006 | 714 |
+| skewed | 0.000 | 773 | | price lists | 0.013 | 506 |
+| every raster format | 0.001 | 699 | | 1-bit fax | 0.014 | 576 |
+| born-digital | 0.002 | 615 | | clean | 0.033 | 692 |
+| multipage (TIFF) | 0.003 | 636 | | forms (tables) | 0.063 | 648 |
+| dark mode | 0.003 | 670 | | A0 at 300 dpi | 0.147 | 28309 |
+| multipage (PDF) | 0.004 | 681 | | drawings | 0.170 | 602 |
+| image-only PDF (clean) | 0.042 | 693 | | receipts | 0.183 | 339 |
+| rotated PDFs | 0.054 | 919 | | 60 dpi thumbnail | 0.006 | 433 |
 
 What moved, in the order the fixes landed: A0 drawings 0.96 → 0.042 (tiling),
 rotated PDFs 0.79 → 0.054, drawings 0.47 → 0.170, forms 0.156 → 0.063, receipts
 0.332 → 0.183 (line assembly), image-only PDFs 0.014 → 0.004 and word recall
-0.836 → 0.892 (space restoration), and the corpus mean 0.118 → 0.040.
+0.836 → 0.892 (space restoration), and the corpus mean 0.118 → 0.040. Then
+columns before rows: three-column pages 0.003 → 0.000, two-column pages from
+being read across the gutter to 0.000, and a full-page price list from two
+columns to four — every document already in the corpus unchanged, the mean
+0.040 → 0.036 on a corpus grown by those two layouts.
 
 What is still weak, and why:
 
@@ -102,8 +107,8 @@ What is still weak, and why:
   *order*, not on characters. Their word-level numbers say it plainly: a receipt's
   WER is 0.059 with recall 0.941, so the words are right and their sequence is
   not. Right-aligned prices and scattered labels end up in a different order than
-  a human would read them. Proper table structure recognition is the fix, and it
-  is not implemented.
+  a human would read them. The cells themselves are recovered — `Page.tables` —
+  and that structure does not depend on the order the text came out in.
 - **The A0 sheet went the other way** when lines started being assembled from
   boxes: 0.042 before, **0.147** now, with word recall 0.895. Nothing is misread;
   the title block's two-column fields are joined into rows, and on that sheet the

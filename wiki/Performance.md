@@ -1,6 +1,6 @@
 # Performance
 
-All numbers below were measured on the generated corpus — 106 files, 191 pages,
+All numbers below were measured on the generated corpus — 118 files, 203 pages,
 416 MB — on **four CPU cores**, with the shipped defaults. Reproduce them with
 `scripts/evaluate_corpus.py` ([Evaluation](Evaluation.md)).
 
@@ -8,8 +8,8 @@ All numbers below were measured on the generated corpus — 106 files, 191 pages
 
 | | |
 |---|---|
-| Throughput | **median 669 ms per page** (mean 823, dominated by one A0 sheet) |
-| Whole corpus | 157.3 s for 191 pages, 416 MB of input |
+| Throughput | **median 673 ms per page** (mean 805, dominated by one A0 sheet) |
+| Whole corpus | 163.3 s for 203 pages, 416 MB of input |
 | Typical A4 at 200 dpi | 0.6–1.0 s, one page worker |
 | Cold start | ~130 MB and a moment to load the models — once per `Ocr` |
 | Memory while scanning | ~700–800 MB resident on A4 pages at 200 dpi |
@@ -31,8 +31,8 @@ time ≈ 320 ms + 30 ms × (number of text lines)
 
 on four cores at 200 dpi. The fixed part is decoding, preprocessing and one
 detection pass over the page; the per-line part is recognition, which runs once
-per detected line. That is why a dense newspaper page costs 1113 ms while a
-narrow receipt costs 394 ms, and why *line count*, not file size, predicts the
+per detected line. That is why an A4 page of prose costs about 680 ms while a
+narrow receipt costs 339 ms, and why *line count*, not file size, predicts the
 bill. Treat the fit as a rule of thumb — run-to-run noise on a shared machine is
 easily ±30%.
 
