@@ -33,6 +33,9 @@ wrong page, a crash or a build that would not compile.
   unconditionally, so `- Gutschrift` and `-19,90 EUR` in one block turned a credit
   into a charge. A `-` counts as a bullet only when a space follows it, and the
   exporter and the block classifier now share one definition of what a bullet is.
+- **Deskewing could exceed its own limit.** The coarse angle search stepped in
+  whole degrees without checking them against `max_skew_deg`, so a limit below one
+  degree still allowed a one-degree rotation.
 - **Recursive glob patterns are expanded.** `ocrust scan 'archive/**/*.pdf'` and
   `scan_many(["archive/**/*.pdf"])` matched nothing, because the pattern was
   anchored at its parent directory (`archive/**`) and only its last component was

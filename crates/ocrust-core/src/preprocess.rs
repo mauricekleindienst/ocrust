@@ -223,9 +223,15 @@ pub fn estimate_skew(img: &RgbImage, max_deg: f32) -> f32 {
     // Coarse to fine: whole degrees first, then a tenth of a degree around the
     // winner. Halving the coarse resolution halves the cost and the refinement
     // recovers the precision.
+    // The coarse step is a whole degree, which can overshoot a tight limit:
+    // `max_skew_deg = 0.5` rounds to one step and would rotate a page by a
+    // degree. Both loops stay inside what the caller allowed.
     let coarse_steps = max_deg.round() as i32;
     for i in -coarse_steps..=coarse_steps {
-        evaluate(i as f32, &mut best);
+        let angle = i as f32;
+        if angle.abs() <= max_deg {
+            evaluate(angle, &mut best);
+        }
     }
     let around = best.1;
     for i in -9..=9 {
@@ -333,6 +339,16 @@ mod tests {
     fn skew_estimate_is_near_zero_for_straight_text() {
         let img = striped_page(400, 300, 0.0);
         assert!(estimate_skew(&img, 12.0).abs() < 0.4);
+    }
+
+    #[test]
+    fn skew_never_exceeds_the_configured_limit() {
+        // A tenth of a degree is a legitimate limit, and the coarse search used
+        // to answer with a whole one.
+        for limit in [0.2f32, 0.5, 1.0, 12.0] {
+            let est = estimate_skew(&striped_page(500, 400, 6.0), limit);
+            assert!(est.abs() <= limit, "limit {limit}, estimated {est}");
+        }
     }
 
     #[test]
