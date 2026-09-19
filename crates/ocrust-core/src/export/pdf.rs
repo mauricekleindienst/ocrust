@@ -35,27 +35,63 @@ impl Default for PdfOptions {
     }
 }
 
+/// One page's picture, already compressed.
+///
+/// A page of a scan is around 11 MB of pixels and 200 kB of JPEG, so a document
+/// being turned into a searchable PDF should hold the second: compressing each
+/// page as it is scanned is what keeps a 100-page job in tens of megabytes
+/// instead of a gigabyte.
+#[derive(Debug, Clone)]
+pub struct EncodedPage {
+    pub width: u32,
+    pub height: u32,
+    /// JPEG bytes, embedded in the PDF as a `DCTDecode` stream.
+    pub jpeg: Vec<u8>,
+}
+
+/// Compresses one page image for [`build_with_encoded`].
+pub fn encode_page(image: &RgbImage, jpeg_quality: u8) -> Result<EncodedPage> {
+    Ok(EncodedPage {
+        width: image.width(),
+        height: image.height(),
+        jpeg: encode_jpeg(image, jpeg_quality)?,
+    })
+}
+
 /// Builds a searchable PDF from a scanned document.
 ///
 /// Every page needs its image: scan with `EngineConfig::keep_page_images`
 /// enabled, or pass the images explicitly with [`build_with_images`].
 pub fn build(doc: &Document, opts: &PdfOptions) -> Result<Vec<u8>> {
-    let mut images = Vec::with_capacity(doc.pages.len());
+    let mut encoded = Vec::with_capacity(doc.pages.len());
     for page in &doc.pages {
-        let img = page.image.as_ref().ok_or_else(|| {
+        let image = page.image.as_ref().ok_or_else(|| {
             Error::config(
                 "searchable PDF needs the page images: scan with keep_page_images enabled",
             )
         })?;
-        images.push(img.as_ref().clone());
+        encoded.push(encode_page(image, opts.jpeg_quality)?);
     }
-    build_with_images(doc, &images, opts)
+    build_with_encoded(doc, &encoded, opts)
 }
 
 /// Same as [`build`], with the page images supplied separately.
 pub fn build_with_images(
     doc: &Document,
     images: &[RgbImage],
+    opts: &PdfOptions,
+) -> Result<Vec<u8>> {
+    let mut encoded = Vec::with_capacity(images.len());
+    for image in images {
+        encoded.push(encode_page(image, opts.jpeg_quality)?);
+    }
+    build_with_encoded(doc, &encoded, opts)
+}
+
+/// Same as [`build`], with the pages already compressed.
+pub fn build_with_encoded(
+    doc: &Document,
+    images: &[EncodedPage],
     opts: &PdfOptions,
 ) -> Result<Vec<u8>> {
     if images.len() != doc.pages.len() {
@@ -84,19 +120,18 @@ pub fn build_with_images(
 
     let mut page_ids = Vec::with_capacity(doc.pages.len());
     for (page, image) in doc.pages.iter().zip(images) {
-        let w_pt = image.width() as f32 * px_to_pt;
-        let h_pt = image.height() as f32 * px_to_pt;
+        let w_pt = image.width as f32 * px_to_pt;
+        let h_pt = image.height as f32 * px_to_pt;
 
-        let jpeg = encode_jpeg(image, opts.jpeg_quality)?;
         let image_id = pdf.stream_object(
             &format!(
                 "<< /Type /XObject /Subtype /Image /Width {} /Height {} \
                  /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>",
-                image.width(),
-                image.height(),
-                jpeg.len()
+                image.width,
+                image.height,
+                image.jpeg.len()
             ),
-            &jpeg,
+            &image.jpeg,
         );
 
         let mut content = String::new();
@@ -634,5 +669,40 @@ mod tests {
         let s = horizontal_scale_em("0123456789", 10.0, 100.0, 0.5);
         assert!((s - 200.0).abs() < 1.0, "{s}");
         assert_eq!(horizontal_scale_em("x", 10.0, 0.0, 0.5), 100.0);
+    }
+
+    #[test]
+    fn pre_encoded_pages_build_the_same_pdf() {
+        // The searchable-PDF path compresses each page as it is scanned so the
+        // raw pixels can be dropped; the file must come out identical.
+        let (doc, images) = scanned_doc(2);
+        let opts = PdfOptions::default();
+        let from_images = build_with_images(&doc, &images, &opts).unwrap();
+        let encoded: Vec<EncodedPage> = images
+            .iter()
+            .map(|i| encode_page(i, opts.jpeg_quality).unwrap())
+            .collect();
+        assert_eq!(
+            build_with_encoded(&doc, &encoded, &opts).unwrap(),
+            from_images
+        );
+        // A JPEG page is a fraction of its pixels, which is the whole point.
+        assert!(
+            encoded[0].jpeg.len() * 4 < images[0].as_raw().len(),
+            "jpeg {} vs raw {}",
+            encoded[0].jpeg.len(),
+            images[0].as_raw().len()
+        );
+    }
+
+    #[test]
+    fn a_page_count_mismatch_is_reported() {
+        let (doc, images) = scanned_doc(2);
+        let one = vec![encode_page(&images[0], 80).unwrap()];
+        let err = build_with_encoded(&doc, &one, &PdfOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("1 image(s) for 2 page(s)"),
+            "{err}"
+        );
     }
 }

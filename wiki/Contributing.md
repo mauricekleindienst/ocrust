@@ -110,7 +110,7 @@ in the white space between two columns is not evidence of a boundary between the
 | `crates/ocrust-core/tests/end_to_end.rs` | the real pipeline against the bundled models | yes |
 | `tests/test_*.py` | Python API, CLI, formats, languages, PDF layer, TIFF export, the example app | yes |
 
-Current state: 193 Rust unit tests, 8 Rust end-to-end tests, 106 Python tests.
+Current state: 203 Rust unit tests, 8 Rust end-to-end tests, 106 Python tests.
 
 The unit tests deliberately need neither models nor ONNX Runtime, which is what
 keeps them fast enough to run on every save — and why CI can check three

@@ -142,17 +142,50 @@ bottleneck people expect it to be — measure before you buy hardware.
 
 ## Memory
 
-| stage | resident |
-|---|---:|
-| after `import ocrust` | ~50 MB |
-| after `Ocr()` (models loaded) | ~130 MB |
-| while scanning A4 pages at 200 dpi | ~700–800 MB |
-| a second engine (e.g. the PDF-layer sibling) | adds ~100 MB |
+Measured with `/proc/<pid>/status` `VmHWM` over a synthetic A4 invoice at
+200 dpi, one page worker unless stated:
 
-Most of the growth is ONNX Runtime's CPU arena, which keeps allocations for
-reuse rather than returning them. It plateaus — repeated scans of the same page
-size do not keep climbing — but a container limit of 1 GB is too tight for the
-default settings. Smaller `rec_batch_size` and `det_limit_side` reduce the peak.
+| job | peak | before |
+|---|---:|---:|
+| one page | 233 MB | 413 MB |
+| 40 pages | 249 MB | 999 MB |
+| 120 pages | 289 MB | 1811 MB |
+| 40 pages, 4 workers | 935 MB | — |
+| 40 pages → searchable PDF | 260 MB | — |
+| 40 pages → archive TIFF | 261 MB | — |
+
+A long document does not cost more than a short one. Two things make that true.
+
+**Pages are read one at a time.** A PDF is parsed once and its pages are
+rasterized on demand, sharing one render cache, so a 120-page scan holds one page
+of pixels rather than 120; a TIFF's directories are walked forward. Before that,
+the same job grew by about 10 MB per page — a 500-page document needed more
+memory than most laptops have. The searchable-PDF path compresses each page as it
+is scanned and keeps the JPEG, roughly a fiftieth of the pixels; the TIFF path
+encodes each page into the archive and lets it go.
+
+**ONNX Runtime is told not to cache allocations.** Its arena and its
+tensor-reuse plan are both speed optimizations that assume the shapes repeat.
+Pages do not — every scan is a different size — so the arena accumulates blocks
+it never reuses. Turning both off is the default here:
+
+| 40 pages | peak | time |
+|---|---:|---:|
+| `memory="frugal"` (default) | 249 MB | 26.5 s |
+| `memory="fast"` | 584 MB | 23.4 s |
+| `memory="frugal"`, 4 workers | 935 MB | 17.0 s |
+| `memory="fast"`, 4 workers | 2010 MB | 17.6 s |
+
+So frugal costs about 10% of the clock at one worker and nothing at four (it came
+out marginally faster there), for less than half the memory. Pass
+`memory="fast"` to `Ocr(...)` or `--memory fast` on the command line when the time
+matters more. Recognized text is identical either way.
+
+Workers are the one thing that still multiplies memory: each needs its own
+inference session, because `Session::run` wants `&mut self` and the sessions
+would otherwise serialize on one lock. Four workers is roughly four times one.
+If a container limit is tight, lower `--workers` before anything else; smaller
+`rec_batch_size` and `det_limit_side` help after that.
 
 Note also that `ocr_pdf` / `searchable_pdf` need page images, so they build a
 sibling engine unless the first one was created with `keep_page_images=True`;

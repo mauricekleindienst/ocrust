@@ -16,62 +16,135 @@ use super::{IngestConfig, RawPage};
 /// PDF user-space unit: 72 points per inch.
 const POINTS_PER_INCH: f32 = 72.0;
 
-/// Renders the requested pages of a PDF document.
+/// A parsed PDF that rasterizes pages one at a time.
+///
+/// Parsing happens once; rendering is what costs memory, and handing out one
+/// page at a time rather than all of them is what lets a 500-page document be
+/// scanned on a laptop.
+pub struct Renderer {
+    pdf: hayro::hayro_syntax::Pdf,
+    dpi: f32,
+    max_side: u32,
+}
+
+impl std::fmt::Debug for Renderer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Renderer")
+            .field("pages", &self.page_count())
+            .field("dpi", &self.dpi)
+            .finish()
+    }
+}
+
+impl Renderer {
+    /// Parses `data`, which the renderer then shares rather than copies.
+    pub fn new(data: Arc<Vec<u8>>, cfg: &IngestConfig) -> Result<Self> {
+        let pdf = hayro::hayro_syntax::Pdf::new(data)
+            .map_err(|e| Error::Pdf(format!("could not parse PDF: {e:?}")))?;
+        if pdf.pages().is_empty() {
+            return Err(Error::Pdf("document has no pages".into()));
+        }
+        Ok(Self {
+            pdf,
+            dpi: cfg.pdf_dpi,
+            max_side: cfg.pdf_max_side,
+        })
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.pdf.pages().len()
+    }
+
+    /// Rasterizes each of `indices` in turn and hands it to `sink`.
+    ///
+    /// One call, one render cache: hayro asks for a cache per document, because
+    /// it holds the parsed embedded fonts, and re-parsing a CJK font for every
+    /// page of a report is not free. The cache borrows from the parsed PDF, so
+    /// it cannot be stored next to it — which is why this renders through a
+    /// callback instead of returning pages. The caller still only ever holds the
+    /// page it was just given.
+    pub fn render_each(
+        &self,
+        indices: &[usize],
+        sink: &mut dyn FnMut(usize, RgbImage) -> Result<()>,
+    ) -> Result<()> {
+        // `Pages` derefs to a slice, so a page is a lookup rather than a walk.
+        let pages = self.pdf.pages();
+        let cache = RenderCache::new();
+        for &index in indices {
+            let page = pages
+                .get(index)
+                .ok_or_else(|| Error::Pdf(format!("the document has no page {}", index + 1)))?;
+            let media = page.media_box();
+            let w_pt = (media.x1 - media.x0) as f32;
+            let h_pt = (media.y1 - media.y0) as f32;
+            if !(w_pt > 0.0 && h_pt > 0.0) {
+                return Err(Error::Pdf(format!(
+                    "page {} has an empty media box",
+                    index + 1
+                )));
+            }
+
+            let scale = render_scale(w_pt, h_pt, self.dpi, self.max_side);
+            let settings = RenderSettings {
+                x_scale: scale,
+                y_scale: scale,
+                // hayro defaults to a transparent background; documents need
+                // white so that dropping the alpha channel does not turn the
+                // page black.
+                bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+                ..Default::default()
+            };
+            let pixmap = hayro::render(
+                page,
+                &cache,
+                &hayro::hayro_interpret::InterpreterSettings::default(),
+                &settings,
+            );
+
+            let (width, height) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
+            let rgb = drop_alpha(pixmap.data_as_u8_slice());
+            // The pixmap is four bytes a pixel and the image three; dropping it
+            // here keeps the page's transient cost to seven rather than ten.
+            drop(pixmap);
+            let image = RgbImage::from_raw(width, height, rgb).ok_or_else(|| {
+                Error::Pdf(format!("page {} produced an invalid pixmap", index + 1))
+            })?;
+            sink(index, image)?;
+        }
+        Ok(())
+    }
+}
+
+/// Copies RGBA pixels into a tight RGB buffer.
+///
+/// Written as a row of `copy_from_slice`s rather than a byte-at-a-time push:
+/// this runs over every pixel of every page, and a full-page pixmap is a
+/// four-megapixel buffer.
+fn drop_alpha(rgba: &[u8]) -> Vec<u8> {
+    let pixels = rgba.len() / 4;
+    let mut rgb = vec![0u8; pixels * 3];
+    for (dst, src) in rgb.chunks_exact_mut(3).zip(rgba.chunks_exact(4)) {
+        dst.copy_from_slice(&src[..3]);
+    }
+    rgb
+}
+
+/// Renders the requested pages of a PDF document, all of them at once.
 pub fn load(data: &[u8], cfg: &IngestConfig) -> Result<Vec<RawPage>> {
-    let pdf = hayro::hayro_syntax::Pdf::new(Arc::new(data.to_vec()))
-        .map_err(|e| Error::Pdf(format!("could not parse PDF: {e:?}")))?;
-    let cache = RenderCache::new();
-    let pages = pdf.pages();
-
+    let renderer = Renderer::new(Arc::new(data.to_vec()), cfg)?;
+    let wanted: Vec<usize> = (0..renderer.page_count())
+        .filter(|i| cfg.wants(*i))
+        .collect();
     let mut out = Vec::new();
-    for (index, page) in pages.iter().enumerate() {
-        if !cfg.wants(index) {
-            continue;
-        }
-        let media = page.media_box();
-        let w_pt = (media.x1 - media.x0) as f32;
-        let h_pt = (media.y1 - media.y0) as f32;
-        if !(w_pt > 0.0 && h_pt > 0.0) {
-            return Err(Error::Pdf(format!(
-                "page {} has an empty media box",
-                index + 1
-            )));
-        }
-
-        let scale = render_scale(w_pt, h_pt, cfg);
-        let settings = RenderSettings {
-            x_scale: scale,
-            y_scale: scale,
-            // hayro defaults to a transparent background; documents need white
-            // so that dropping the alpha channel does not turn the page black.
-            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-            ..Default::default()
-        };
-        let pixmap = hayro::render(
-            page,
-            &cache,
-            &hayro::hayro_interpret::InterpreterSettings::default(),
-            &settings,
-        );
-
-        let rgba = pixmap.data_as_u8_slice();
-        let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-        for px in rgba.chunks_exact(4) {
-            rgb.extend_from_slice(&px[..3]);
-        }
-        let image = RgbImage::from_raw(u32::from(pixmap.width()), u32::from(pixmap.height()), rgb)
-            .ok_or_else(|| Error::Pdf(format!("page {} produced an invalid pixmap", index + 1)))?;
-
+    renderer.render_each(&wanted, &mut |index, image| {
         out.push(RawPage {
             index,
             image,
             origin: PageOrigin::PdfPage,
         });
-    }
-
-    if out.is_empty() && cfg.pages.is_none() {
-        return Err(Error::Pdf("document has no pages".into()));
-    }
+        Ok(())
+    })?;
     Ok(out)
 }
 
@@ -83,12 +156,12 @@ pub fn page_count(data: &[u8]) -> Result<usize> {
 }
 
 /// DPI-based scale, capped so huge pages cannot exhaust memory.
-fn render_scale(w_pt: f32, h_pt: f32, cfg: &IngestConfig) -> f32 {
-    let dpi = cfg.pdf_dpi.clamp(36.0, 1200.0);
+fn render_scale(w_pt: f32, h_pt: f32, dpi: f32, max_side: u32) -> f32 {
+    let dpi = dpi.clamp(36.0, 1200.0);
     let mut scale = dpi / POINTS_PER_INCH;
-    if cfg.pdf_max_side > 0 {
+    if max_side > 0 {
         let longest_pt = w_pt.max(h_pt);
-        let max_scale = cfg.pdf_max_side as f32 / longest_pt;
+        let max_scale = max_side as f32 / longest_pt;
         if max_scale > 0.0 {
             scale = scale.min(max_scale);
         }
@@ -170,12 +243,7 @@ mod tests {
 
     #[test]
     fn scale_is_capped_by_max_side() {
-        let cfg = IngestConfig {
-            pdf_dpi: 1200.0,
-            pdf_max_side: 1000,
-            ..Default::default()
-        };
-        let scale = render_scale(612.0, 792.0, &cfg);
+        let scale = render_scale(612.0, 792.0, 1200.0, 1000);
         assert!((scale * 792.0) <= 1000.5, "scale {scale}");
     }
 

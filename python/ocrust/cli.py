@@ -228,6 +228,13 @@ def _build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--device", help="cpu (default), auto, cuda[:n], coreml, directml")
     scan.add_argument("--threads", type=int, help="threads per inference operator")
     scan.add_argument(
+        "--memory",
+        choices=("frugal", "fast"),
+        default="frugal",
+        help="frugal (default) keeps peak memory low; fast is ~10%% quicker and "
+        "holds roughly twice as much",
+    )
+    scan.add_argument(
         "--workers",
         type=int,
         help="pages scanned in parallel (default: 4 for several inputs, 1 otherwise)",
@@ -300,6 +307,12 @@ def _build_parser() -> argparse.ArgumentParser:
     tiff.add_argument("input", type=Path)
     tiff.add_argument("-o", "--output", type=Path, help="defaults to <input>.ocr.tiff")
     tiff.add_argument("--gray", action="store_true", help="write greyscale instead of colour")
+    tiff.add_argument(
+        "--compression",
+        default="lzw",
+        choices=("lzw", "deflate", "none"),
+        help="how to pack the pages (default: lzw; none is roughly ten times the size)",
+    )
     tiff.add_argument("--sidecar", choices=FORMATS, help="also write the text in this format")
     tiff.add_argument("--dpi", type=float)
     tiff.add_argument("--models", type=Path)
@@ -509,6 +522,7 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
         device=getattr(args, "device", None),
         threads=getattr(args, "threads", None),
         page_workers=getattr(args, "_resolved_workers", None) or getattr(args, "workers", None),
+        memory=getattr(args, "memory", None),
         pdf_dpi=getattr(args, "dpi", None),
         preprocess=not getattr(args, "no_preprocess", False),
         word_boxes=not getattr(args, "no_word_boxes", False),
@@ -705,7 +719,7 @@ def _cmd_tiff(args: argparse.Namespace) -> int:
         return 2
     engine = Ocr(models_dir=args.models, pdf_dpi=args.dpi, lang=args.lang)
     try:
-        data, doc = engine.to_tiff(args.input, gray=args.gray)
+        data, doc = engine.to_tiff(args.input, gray=args.gray, compression=args.compression)
     except (OcrustError, OSError, ValueError) as exc:
         _fail(str(exc))
         return 1

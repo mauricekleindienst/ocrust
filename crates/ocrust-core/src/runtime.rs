@@ -64,6 +64,16 @@ pub struct SessionOptions {
     /// Number of independent sessions per model, so that page-level workers do
     /// not serialize on a single session lock.
     pub replicas: usize,
+    /// Let ONNX Runtime keep an allocation arena and plan tensor reuse.
+    ///
+    /// Both are speed optimizations that assume the tensor shapes repeat. Pages
+    /// do not: every scan is a different size, so the arena holds high-water
+    /// blocks it will not reuse and the reuse plan is redrawn anyway. Measured
+    /// over a 40-page PDF, turning both off costs 10% more time at one worker
+    /// and nothing at four, and takes peak memory from 584 MB to 253 MB — from
+    /// 2006 MB to 991 MB at four workers. Off by default for that reason; turn
+    /// it on when the time matters more than the memory.
+    pub cache_allocations: bool,
     pub device: Device,
 }
 
@@ -73,6 +83,7 @@ impl Default for SessionOptions {
             intra_threads: 0,
             inter_threads: 0,
             replicas: 1,
+            cache_allocations: false,
             device: Device::default(),
         }
     }
@@ -216,6 +227,14 @@ fn builder_error(e: ort::Error<ort::session::builder::SessionBuilder>) -> Error 
 
 fn build_session(path: &Path, opts: &SessionOptions) -> Result<Session> {
     let mut builder = Session::builder()?;
+    if !opts.cache_allocations {
+        // See `SessionOptions::cache_allocations`: pages are all different sizes,
+        // so neither the arena nor the reuse plan pays for the memory it holds.
+        builder = builder.with_memory_pattern(false).map_err(builder_error)?;
+        builder = builder
+            .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+            .map_err(builder_error)?;
+    }
 
     match opts.device {
         Device::Cpu => {}

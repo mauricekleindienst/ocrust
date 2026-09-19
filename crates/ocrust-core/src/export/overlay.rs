@@ -164,12 +164,12 @@ where
         return Ok((pdf.to_vec(), report));
     }
 
-    // Rasterize only the pages that need it, in one pass.
-    let rendered = crate::ingest::pdf::load(
-        pdf,
+    // Rasterize only the pages that need it, and only one at a time: an
+    // overlay over a 300-page scan should not need 3 GB of pixels to write.
+    let renderer = crate::ingest::pdf::Renderer::new(
+        std::sync::Arc::new(pdf.to_vec()),
         &crate::ingest::IngestConfig {
             pdf_dpi: opts.dpi,
-            pages: Some(wanted.clone()),
             ..Default::default()
         },
     )?;
@@ -187,12 +187,12 @@ where
     // documents keep exactly the objects they had before.
     let mut unicode_font_id: Option<ObjectId> = None;
 
-    for raw in rendered {
-        let Some(plan) = plans.iter().find(|p| p.index == raw.index) else {
-            continue;
+    renderer.render_each(&wanted, &mut |index, image| {
+        let Some(plan) = plans.iter().find(|p| p.index == index) else {
+            return Ok(());
         };
-        let (image_w, image_h) = raw.image.dimensions();
-        let ocr_page = recognize(raw.index, raw.image)?;
+        let (image_w, image_h) = image.dimensions();
+        let ocr_page = recognize(index, image)?;
 
         let needs_unicode = ocr_page
             .lines()
@@ -209,7 +209,7 @@ where
             unicode_font_id.is_some(),
         );
         if lines == 0 {
-            continue;
+            return Ok(());
         }
         report.lines += lines;
         report.unmappable_chars += unmappable;
@@ -222,8 +222,8 @@ where
         let content_id = doc.add_object(content);
 
         let page_id = *page_ids
-            .get(raw.index)
-            .ok_or_else(|| Error::Pdf(format!("page {} disappeared", raw.index + 1)))?;
+            .get(index)
+            .ok_or_else(|| Error::Pdf(format!("page {} disappeared", index + 1)))?;
         let mut fonts: Vec<(&str, ObjectId)> = vec![(FONT_NAME, font_id)];
         if let Some(id) = unicode_font_id {
             fonts.push((cidfont::UNICODE_FONT_NAME, id));
@@ -232,7 +232,8 @@ where
         append_content(&mut doc, page_id, content_id)?;
         font_used = true;
         report.pages_with_layer += 1;
-    }
+        Ok(())
+    })?;
 
     if !font_used {
         // Nothing was written: hand back the original bytes untouched.

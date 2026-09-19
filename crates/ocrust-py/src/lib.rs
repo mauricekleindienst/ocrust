@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use ocrust_core::export::overlay::{OverlayOptions, OverlayReport};
-use ocrust_core::export::pdf::{build_with_images, PdfOptions};
-use ocrust_core::export::tiff::TiffColor;
+use ocrust_core::export::pdf::PdfOptions;
+use ocrust_core::export::tiff::{TiffColor, TiffCompression, TiffOptions};
 use ocrust_core::{lang, Device, Document, EngineConfig, Format, Source};
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -57,6 +57,7 @@ impl PyEngine {
         device = None,
         threads = None,
         page_workers = None,
+        memory = None,
         pdf_dpi = None,
         io_retries = None,
         preprocess = true,
@@ -84,6 +85,7 @@ impl PyEngine {
         device: Option<&str>,
         threads: Option<usize>,
         page_workers: Option<usize>,
+        memory: Option<&str>,
         pdf_dpi: Option<f32>,
         io_retries: Option<u32>,
         preprocess: bool,
@@ -120,6 +122,17 @@ impl PyEngine {
         }
         if let Some(w) = page_workers {
             config.page_workers = w;
+        }
+        if let Some(mode) = memory {
+            config.session.cache_allocations = match mode {
+                "frugal" => false,
+                "fast" => true,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown memory mode {other:?}; use frugal or fast"
+                    )))
+                }
+            };
         }
         if let Some(dpi) = pdf_dpi {
             config.ingest.pdf_dpi = dpi;
@@ -260,21 +273,16 @@ impl PyEngine {
     ) -> PyResult<Bound<'py, PyBytes>> {
         let dpi = dpi.unwrap_or(self.inner.config().ingest.pdf_dpi);
         let bytes = py.detach(|| -> ocrust_core::Result<Vec<u8>> {
-            let doc = self.inner.scan(&Source::path(path))?;
-            let images: Vec<image::RgbImage> = doc
-                .pages
-                .iter()
-                .filter_map(|p| p.image.as_ref().map(|i| i.as_ref().clone()))
-                .collect();
-            build_with_images(
-                &doc,
-                &images,
-                &PdfOptions {
-                    dpi,
-                    jpeg_quality,
-                    text_layer: true,
-                },
-            )
+            self.inner
+                .to_searchable_pdf(
+                    &Source::path(path),
+                    &PdfOptions {
+                        dpi,
+                        jpeg_quality,
+                        text_layer: true,
+                    },
+                )
+                .map(|(bytes, _)| bytes)
         });
         Ok(PyBytes::new(py, &bytes.map_err(to_py_err)?))
     }
@@ -380,19 +388,32 @@ impl PyEngine {
     }
 
     /// Scans `path` and returns `(multipage_tiff, document_json)`.
-    #[pyo3(signature = (path, gray = false))]
+    #[pyo3(signature = (path, gray = false, compression = "lzw"))]
     fn to_tiff<'py>(
         &self,
         py: Python<'py>,
         path: PathBuf,
         gray: bool,
+        compression: &str,
     ) -> PyResult<(Bound<'py, PyBytes>, String)> {
-        let color = if gray {
-            TiffColor::Gray
-        } else {
-            TiffColor::Rgb
+        let opts = TiffOptions {
+            color: if gray {
+                TiffColor::Gray
+            } else {
+                TiffColor::Rgb
+            },
+            compression: match compression {
+                "lzw" => TiffCompression::Lzw,
+                "deflate" => TiffCompression::Deflate,
+                "none" => TiffCompression::None,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown TIFF compression {other:?}; use lzw, deflate or none"
+                    )))
+                }
+            },
         };
-        let outcome = py.detach(|| self.inner.to_tiff(&Source::path(path), color));
+        let outcome = py.detach(|| self.inner.to_tiff(&Source::path(path), opts));
         let (bytes, doc) = outcome.map_err(to_py_err)?;
         let json =
             serde_json::to_string(&doc).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;

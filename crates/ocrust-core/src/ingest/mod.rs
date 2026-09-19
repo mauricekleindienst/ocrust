@@ -9,6 +9,7 @@ pub mod pdf;
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use image::{DynamicImage, ImageDecoder, RgbImage};
@@ -130,29 +131,52 @@ pub fn sniff(data: &[u8]) -> Container {
     Container::OtherImage
 }
 
-/// Loads every page of `source`.
-pub fn load(source: &Source, cfg: &IngestConfig) -> Result<Vec<RawPage>> {
-    let pages = match source {
-        Source::Image { image, .. } => {
-            if cfg.wants(0) {
-                vec![RawPage {
-                    index: 0,
-                    image: image.clone(),
-                    origin: PageOrigin::Image,
-                }]
-            } else {
-                Vec::new()
-            }
-        }
-        Source::Bytes { data, name } => load_bytes(data, name, cfg)?,
-        Source::Path(path) => {
-            let data = read_file(path, cfg).map_err(|e| Error::io(path, e))?;
-            load_bytes(&data, &path.display().to_string(), cfg)?
-        }
-    };
+/// A source opened for reading, handing out one page at a time.
+///
+/// Decoding every page up front is the obvious way to write this and the wrong
+/// way to run it. A 200-page scan at 200 dpi is over 2 GB of pixels and the
+/// pipeline looks at one page at a time: measured on a 120-page PDF, loading it
+/// all first cost 1.8 GB of peak memory where a single page costs 0.4 GB. So
+/// pages are produced on demand and the caller decides how many to keep alive.
+///
+/// Iteration is forward-only, which is all the pipeline needs and all a TIFF's
+/// chain of image directories cheaply allows.
+pub struct Reader {
+    inner: Inner,
+    /// Label for the errors that only surface once a page is decoded.
+    name: String,
+    /// Zero-based page indices this reader will produce, in order.
+    indices: Vec<usize>,
+}
+
+enum Inner {
+    /// A frame that was already decoded before it got here.
+    Frame(Option<RgbImage>),
+    /// One encoded raster image, decoded on the first pull.
+    Encoded(Arc<Vec<u8>>),
+    #[cfg(feature = "pdf")]
+    Pdf(pdf::Renderer),
+    /// Boxed: a parked TIFF decoder is by far the largest of these, and every
+    /// reader would otherwise carry its footprint.
+    Tiff(Box<TiffFrames>),
+}
+
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reader")
+            .field("name", &self.name)
+            .field("pages", &self.indices.len())
+            .finish()
+    }
+}
+
+/// Opens `source` and counts its pages, decoding none of them.
+pub fn open(source: &Source, cfg: &IngestConfig) -> Result<Reader> {
+    let name = source.name();
+    let reader = open_inner(source, name.clone(), cfg).map_err(|e| label(&name, e))?;
     // A page filter that matches nothing is a mistake worth reporting: an empty
     // document looks exactly like a page the recognizer found no text on.
-    if pages.is_empty() {
+    if reader.indices.is_empty() {
         if let Some(wanted) = &cfg.pages {
             let numbers: Vec<String> = wanted.iter().map(|p| (p + 1).to_string()).collect();
             return Err(Error::config(format!(
@@ -161,6 +185,155 @@ pub fn load(source: &Source, cfg: &IngestConfig) -> Result<Vec<RawPage>> {
             )));
         }
     }
+    Ok(reader)
+}
+
+fn open_inner(source: &Source, name: String, cfg: &IngestConfig) -> Result<Reader> {
+    match source {
+        Source::Image { image, .. } => Ok(Reader {
+            inner: Inner::Frame(Some(image.clone())),
+            name,
+            indices: if cfg.wants(0) { vec![0] } else { Vec::new() },
+        }),
+        Source::Bytes { data, .. } => open_bytes(Arc::new(data.clone()), name, cfg),
+        Source::Path(path) => {
+            let data = read_file(path, cfg).map_err(|e| Error::io(path, e))?;
+            open_bytes(Arc::new(data), name, cfg)
+        }
+    }
+}
+
+/// Opens encoded bytes. They are shared rather than copied, which for a
+/// 200 MB scanned PDF is 200 MB not spent.
+fn open_bytes(data: Arc<Vec<u8>>, name: String, cfg: &IngestConfig) -> Result<Reader> {
+    let (inner, total) = match sniff(&data) {
+        Container::Pdf => {
+            #[cfg(feature = "pdf")]
+            {
+                let renderer = pdf::Renderer::new(data, cfg)?;
+                let total = renderer.page_count();
+                (Inner::Pdf(renderer), total)
+            }
+            #[cfg(not(feature = "pdf"))]
+            {
+                return Err(Error::Unsupported(format!(
+                    "{name} is a PDF but ocrust was built without the `pdf` feature"
+                )));
+            }
+        }
+        Container::Tiff => {
+            let frames = Box::new(TiffFrames::new(data)?);
+            let total = frames.total;
+            (Inner::Tiff(frames), total)
+        }
+        Container::OtherImage => (Inner::Encoded(data), 1),
+    };
+    Ok(Reader {
+        inner,
+        name,
+        indices: (0..total).filter(|i| cfg.wants(*i)).collect(),
+    })
+}
+
+impl Reader {
+    /// Pages this reader will produce.
+    pub fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    /// Zero-based indices of the pages this reader will produce, in order.
+    pub fn indices(&self) -> &[usize] {
+        &self.indices
+    }
+
+    /// Decodes each page in turn and hands it to `sink`.
+    ///
+    /// A callback rather than an iterator because a PDF's render cache borrows
+    /// from the parsed document and so cannot be stored beside it: one call
+    /// keeps one cache alive for the whole document. Either way the caller only
+    /// ever holds the page it was just handed.
+    pub fn for_each_page(&mut self, sink: &mut dyn FnMut(RawPage) -> Result<()>) -> Result<()> {
+        // Destructured so the page source and the index list can be borrowed at
+        // the same time.
+        let Reader {
+            inner,
+            name,
+            indices,
+        } = self;
+        let labelled = |e| label(name, e);
+        match inner {
+            // Taken, not cloned: the caller handed us this frame to scan.
+            Inner::Frame(frame) => {
+                for &index in indices.iter() {
+                    let image = frame
+                        .take()
+                        .ok_or_else(|| Error::config("that frame was already read"))?;
+                    sink(RawPage {
+                        index,
+                        image,
+                        origin: PageOrigin::Image,
+                    })?;
+                }
+                Ok(())
+            }
+            Inner::Encoded(data) => {
+                for &index in indices.iter() {
+                    let image = decode_single(data, Some(name)).map_err(labelled)?;
+                    sink(RawPage {
+                        index,
+                        image,
+                        origin: PageOrigin::Image,
+                    })?;
+                }
+                Ok(())
+            }
+            #[cfg(feature = "pdf")]
+            Inner::Pdf(renderer) => renderer.render_each(indices, &mut |index, image| {
+                sink(RawPage {
+                    index,
+                    image,
+                    origin: PageOrigin::PdfPage,
+                })
+            }),
+            Inner::Tiff(frames) => {
+                for &index in indices.iter() {
+                    let image = frames.frame(index).map_err(labelled)?;
+                    sink(RawPage {
+                        index,
+                        image,
+                        origin: PageOrigin::TiffFrame,
+                    })?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A file we cannot decode is an input problem, not an internal one, so it says
+/// so with the file name attached.
+fn label(name: &str, error: Error) -> Error {
+    match error {
+        Error::Image(inner) => Error::Unsupported(format!("{name}: {inner}")),
+        Error::PlainIo(inner) => Error::Unsupported(format!("{name}: {inner}")),
+        other => other,
+    }
+}
+
+/// Loads every page of `source` at once.
+///
+/// What the exporters and the tests want; [`open`] is what the pipeline uses,
+/// because holding one page costs a hundredth of holding a hundred.
+pub fn load(source: &Source, cfg: &IngestConfig) -> Result<Vec<RawPage>> {
+    let mut pages = Vec::new();
+    open(source, cfg)?.for_each_page(&mut |page| {
+        pages.push(page);
+        Ok(())
+    })?;
     Ok(pages)
 }
 
@@ -228,46 +401,6 @@ fn is_transient(error: &std::io::Error) -> bool {
     false
 }
 
-fn load_bytes(data: &[u8], name: &str, cfg: &IngestConfig) -> Result<Vec<RawPage>> {
-    // The decode runs in a closure so that `?` inside it cannot skip the
-    // error mapping below.
-    let decoded = (|| -> Result<Vec<RawPage>> {
-        match sniff(data) {
-            Container::Pdf => {
-                #[cfg(feature = "pdf")]
-                {
-                    pdf::load(data, cfg)
-                }
-                #[cfg(not(feature = "pdf"))]
-                {
-                    Err(Error::Unsupported(format!(
-                        "{name} is a PDF but ocrust was built without the `pdf` feature"
-                    )))
-                }
-            }
-            Container::Tiff => load_tiff(data, cfg),
-            Container::OtherImage => {
-                if !cfg.wants(0) {
-                    return Ok(Vec::new());
-                }
-                Ok(vec![RawPage {
-                    index: 0,
-                    image: decode_single(data, Some(name))?,
-                    origin: PageOrigin::Image,
-                }])
-            }
-        }
-    })();
-
-    decoded.map_err(|e| match e {
-        // A file we cannot decode is an input problem, not an internal one, so
-        // say so with the file name attached.
-        Error::Image(inner) => Error::Unsupported(format!("{name}: {inner}")),
-        Error::PlainIo(inner) => Error::Unsupported(format!("{name}: {inner}")),
-        other => other,
-    })
-}
-
 /// Decodes one raster image, honouring its EXIF orientation.
 ///
 /// `hint` is the file name or extension, used when the bytes alone are not
@@ -302,52 +435,93 @@ fn format_from_hint(hint: &str) -> Option<image::ImageFormat> {
     image::ImageFormat::from_extension(extension)
 }
 
-/// Decodes every page of a (possibly multi-page) TIFF.
+/// A TIFF's chain of image directories, walked forward one frame at a time.
 ///
-/// `image` only exposes the first IFD, so the `tiff` crate (which `image` uses
-/// internally anyway) drives the page walk. Scanned faxes and archive masters
-/// are routinely multi-page, and silently dropping pages would be worse than
-/// not supporting the format at all.
-fn load_tiff(data: &[u8], cfg: &IngestConfig) -> Result<Vec<RawPage>> {
-    use tiff::decoder::Decoder;
+/// `image` only exposes the first directory, so the `tiff` crate (which `image`
+/// uses internally anyway) drives the page walk. Scanned faxes and archive
+/// masters are routinely multi-page, and silently dropping pages would be worse
+/// than not supporting the format at all.
+struct TiffFrames {
+    data: SharedBytes,
+    decoder: tiff::decoder::Decoder<Cursor<SharedBytes>>,
+    /// Directory the decoder currently sits on.
+    at: usize,
+    total: usize,
+}
 
-    let mut decoder = Decoder::new(Cursor::new(data))
-        .map_err(|e| Error::Unsupported(format!("not a readable TIFF: {e}")))?;
-    let mut pages = Vec::new();
-    let mut index = 0usize;
+/// Lets one buffer back several cursors without being copied for each.
+#[derive(Clone)]
+struct SharedBytes(Arc<Vec<u8>>);
 
-    loop {
-        if cfg.wants(index) {
-            let (w, h) = decoder
-                .dimensions()
-                .map_err(|e| Error::Unsupported(format!("TIFF page {}: {e}", index + 1)))?;
-            let color = decoder
-                .colortype()
-                .map_err(|e| Error::Unsupported(format!("TIFF page {}: {e}", index + 1)))?;
-            let decoded = decoder
-                .read_image()
-                .map_err(|e| Error::Unsupported(format!("TIFF page {}: {e}", index + 1)))?;
-            let image = tiff_to_rgb(w, h, color, decoded).ok_or_else(|| {
-                Error::Unsupported(format!(
-                    "TIFF page {} uses an unsupported pixel layout ({color:?})",
-                    index + 1
-                ))
-            })?;
-            pages.push(RawPage {
-                index,
-                image,
-                origin: PageOrigin::TiffFrame,
-            });
-        }
-        index += 1;
-        if !decoder.more_images() {
-            break;
-        }
-        decoder
-            .next_image()
-            .map_err(|e| Error::Unsupported(format!("TIFF page {}: {e}", index + 1)))?;
+impl AsRef<[u8]> for SharedBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
-    Ok(pages)
+}
+
+impl TiffFrames {
+    /// Counts the directories, which needs no pixels decoded, and leaves a
+    /// decoder parked on the first one.
+    fn new(data: Arc<Vec<u8>>) -> Result<Self> {
+        let data = SharedBytes(data);
+        let mut counter = decoder_for(&data)?;
+        let mut total = 1usize;
+        while counter.more_images() {
+            counter
+                .next_image()
+                .map_err(|e| tiff_error(total + 1, &e.to_string()))?;
+            total += 1;
+        }
+        Ok(Self {
+            decoder: decoder_for(&data)?,
+            data,
+            at: 0,
+            total,
+        })
+    }
+
+    /// Decodes one frame, walking the chain forward to reach it.
+    fn frame(&mut self, index: usize) -> Result<RgbImage> {
+        if index < self.at {
+            // Only a forward walk is cheap; going back means starting over.
+            self.decoder = decoder_for(&self.data)?;
+            self.at = 0;
+        }
+        while self.at < index {
+            if !self.decoder.more_images() {
+                return Err(tiff_error(index + 1, "the document ends before it"));
+            }
+            self.decoder
+                .next_image()
+                .map_err(|e| tiff_error(self.at + 2, &e.to_string()))?;
+            self.at += 1;
+        }
+
+        let page = index + 1;
+        let (w, h) = self
+            .decoder
+            .dimensions()
+            .map_err(|e| tiff_error(page, &e.to_string()))?;
+        let color = self
+            .decoder
+            .colortype()
+            .map_err(|e| tiff_error(page, &e.to_string()))?;
+        let decoded = self
+            .decoder
+            .read_image()
+            .map_err(|e| tiff_error(page, &e.to_string()))?;
+        tiff_to_rgb(w, h, color, decoded)
+            .ok_or_else(|| tiff_error(page, &format!("unsupported pixel layout ({color:?})")))
+    }
+}
+
+fn decoder_for(data: &SharedBytes) -> Result<tiff::decoder::Decoder<Cursor<SharedBytes>>> {
+    tiff::decoder::Decoder::new(Cursor::new(data.clone()))
+        .map_err(|e| Error::Unsupported(format!("not a readable TIFF: {e}")))
+}
+
+fn tiff_error(page: usize, detail: &str) -> Error {
+    Error::Unsupported(format!("TIFF page {page}: {detail}"))
 }
 
 /// Converts one decoded TIFF page into RGB8.
@@ -598,6 +772,107 @@ mod tests {
         assert!(is_supported_path(Path::new("a/b/c.PDF")));
         assert!(is_supported_path(Path::new("x.jpeg")));
         assert!(!is_supported_path(Path::new("x.docx")));
+    }
+
+    /// A TIFF with `pages` frames, each a different shade so they can be told
+    /// apart.
+    fn multipage_tiff(pages: u8) -> Vec<u8> {
+        let images: Vec<RgbImage> = (0..pages)
+            .map(|i| RgbImage::from_pixel(6, 6, image::Rgb([i * 20, i * 20, i * 20])))
+            .collect();
+        crate::export::tiff::write_pages(
+            &images,
+            crate::export::tiff::TiffOptions::new(crate::export::tiff::TiffColor::Rgb),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_reader_counts_its_pages_before_decoding_any() {
+        let reader = open(
+            &Source::bytes(multipage_tiff(4), "t.tiff"),
+            &IngestConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(reader.len(), 4);
+        assert_eq!(reader.indices(), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_reader_decodes_a_page_only_when_it_is_asked_for() {
+        // The point of the whole reader: a 500-page document must not become
+        // 500 pages of pixels before the first line is recognized. A sink that
+        // stops after two pages proves the third was never decoded.
+        let mut reader = open(
+            &Source::bytes(multipage_tiff(5), "t.tiff"),
+            &IngestConfig::default(),
+        )
+        .unwrap();
+        let mut seen = Vec::new();
+        let err = reader
+            .for_each_page(&mut |page| {
+                seen.push(page.index);
+                if seen.len() == 2 {
+                    return Err(Error::config("stop here"));
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(seen, [0, 1], "{err}");
+    }
+
+    #[test]
+    fn a_page_selection_decodes_only_the_pages_it_names() {
+        let cfg = IngestConfig {
+            pages: Some(vec![2]),
+            ..Default::default()
+        };
+        let mut reader = open(&Source::bytes(multipage_tiff(4), "t.tiff"), &cfg).unwrap();
+        assert_eq!(reader.len(), 1);
+        let mut seen = Vec::new();
+        reader
+            .for_each_page(&mut |page| {
+                seen.push((page.index, page.image.get_pixel(0, 0).0[0]));
+                Ok(())
+            })
+            .unwrap();
+        // The third frame, with the third frame's shade, and nothing else.
+        assert_eq!(seen, [(2, 40)]);
+    }
+
+    #[test]
+    fn frames_read_in_order_match_frames_read_all_at_once() {
+        let bytes = multipage_tiff(3);
+        let batch = load(
+            &Source::bytes(bytes.clone(), "t.tiff"),
+            &IngestConfig::default(),
+        )
+        .unwrap();
+        let mut streamed = Vec::new();
+        open(&Source::bytes(bytes, "t.tiff"), &IngestConfig::default())
+            .unwrap()
+            .for_each_page(&mut |page| {
+                streamed.push(page);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(batch.len(), streamed.len());
+        for (a, b) in batch.iter().zip(&streamed) {
+            assert_eq!(a.index, b.index);
+            assert_eq!(a.image.as_raw(), b.image.as_raw());
+        }
+    }
+
+    #[test]
+    fn a_frame_walk_can_go_backwards_by_starting_over() {
+        // Nothing in the pipeline reads a TIFF backwards, but the walker has to
+        // survive it rather than hand back the wrong frame.
+        let mut frames = TiffFrames::new(Arc::new(multipage_tiff(4))).unwrap();
+        assert_eq!(frames.total, 4);
+        assert_eq!(frames.frame(3).unwrap().get_pixel(0, 0).0[0], 60);
+        assert_eq!(frames.frame(1).unwrap().get_pixel(0, 0).0[0], 20);
+        assert_eq!(frames.frame(2).unwrap().get_pixel(0, 0).0[0], 40);
+        assert!(frames.frame(9).is_err());
     }
 
     #[test]

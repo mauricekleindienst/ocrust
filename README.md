@@ -318,6 +318,12 @@ Colour is used sparingly — Rust orange for what was written, green, amber or r
 for how much of the page is likely to be right — and switches itself off when
 stderr is not a terminal (`NO_COLOR` honoured, `FORCE_COLOR` obeyed).
 
+A long document costs no more memory than a short one — pages are rasterized one
+at a time, and ONNX Runtime is told not to hold an allocation arena, which
+together took a 120-page scan from 1811 MB to 289 MB. `--memory fast` trades that
+back for about 10% of the clock. See
+[Performance](https://github.com/mauricekleindienst/ocrust/wiki/Performance).
+
 
 ## Models
 

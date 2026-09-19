@@ -250,6 +250,13 @@ class Ocr:
             not die on one of them. ``0`` disables it.
         preprocess: Auto-invert, deskew and rescale pages before OCR.
         word_boxes: Compute per-word boxes (needed for hOCR/ALTO word output).
+        memory: ``"frugal"`` (the default) or ``"fast"``. Frugal stops ONNX
+            Runtime keeping an allocation arena and planning tensor reuse, both
+            of which assume the tensor shapes repeat — pages are all different
+            sizes, so they hold memory they never reuse. Measured over a 40-page
+            PDF: 253 MB peak instead of 584 MB, for 10% more time at one page
+            worker and no extra time at four (where it is 991 MB against
+            2006 MB). Choose ``"fast"`` when the time matters more.
         tables: Read blocks whose cells line up into columns as tables
             (:attr:`Document.tables`, and Markdown pipe tables in
             ``render("markdown")``). Set it to False to keep every block as
@@ -268,6 +275,7 @@ class Ocr:
         device: str | None = None,
         threads: int | None = None,
         page_workers: int | None = None,
+        memory: str | None = None,
         pdf_dpi: float | None = None,
         io_retries: int | None = None,
         preprocess: bool = True,
@@ -307,6 +315,7 @@ class Ocr:
             "device": device,
             "threads": threads,
             "page_workers": page_workers,
+            "memory": memory,
             "pdf_dpi": pdf_dpi,
             "io_retries": io_retries,
             "preprocess": preprocess,
@@ -479,14 +488,20 @@ class Ocr:
         source: str | os.PathLike[str],
         *,
         gray: bool = False,
+        compression: str = "lzw",
     ) -> tuple[bytes, Document]:
         """Scans `source` and returns it as one multi-page TIFF plus the result.
 
         The pages written are the preprocessed ones, so the archive copy is
         already deskewed and upright.
+
+        `compression` is ``"lzw"`` (the default, understood by every TIFF reader
+        since 1992), ``"deflate"`` (a little tighter, a little slower) or
+        ``"none"``. Uncompressed pages are roughly ten times the size: a 40-page
+        colour scan is half a gigabyte raw.
         """
         try:
-            data, raw = self._engine.to_tiff(str(source), gray)
+            data, raw = self._engine.to_tiff(str(source), gray, compression)
         except Exception as exc:
             raise OcrustError(str(exc)) from exc
         return data, Document._from_json(json.loads(raw))
