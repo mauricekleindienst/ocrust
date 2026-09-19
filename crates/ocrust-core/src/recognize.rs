@@ -68,6 +68,12 @@ pub struct Recognition {
     /// Mean probability over the emitted characters, in `0..=1`.
     pub confidence: f32,
     pub chars: Vec<CharSpan>,
+    /// Mean distance between the chosen class and the runner-up, per character.
+    ///
+    /// A softmax saturates: a CTC head says `0.99` for a character it read off
+    /// clean paper and `0.98` for one it guessed, so the probability alone is
+    /// nearly flat. How far ahead the winner was is not — a guess has a rival.
+    pub margin: f32,
 }
 
 /// Wraps a CTC recognition model together with its character set.
@@ -255,6 +261,7 @@ fn decode_ctc(
         let mut text = String::new();
         let mut chars: Vec<CharSpan> = Vec::new();
         let mut conf_sum = 0.0f32;
+        let mut margin_sum = 0.0f32;
         let mut conf_n = 0u32;
         let mut prev_class = usize::MAX;
         // Whether the previous timestep put a character into `chars`: a class
@@ -269,16 +276,20 @@ fn decode_ctc(
             let row = &flat[(b * t + step) * c..(b * t + step + 1) * c];
             // Fold rather than `max_by(...).expect(...)`: a row of NaNs is a
             // broken model, not a reason to abort the whole document.
-            let (best, prob) =
-                row.iter()
-                    .enumerate()
-                    .fold((0usize, f32::NEG_INFINITY), |acc, (index, &value)| {
-                        if value > acc.1 {
-                            (index, value)
-                        } else {
-                            acc
-                        }
-                    });
+            // The runner-up comes out of the same pass, and is what tells a
+            // clean read from a lucky one.
+            let (best, prob, runner_up) = row.iter().enumerate().fold(
+                (0usize, f32::NEG_INFINITY, f32::NEG_INFINITY),
+                |(top_i, top_v, second), (index, &value)| {
+                    if value > top_v {
+                        (index, value, top_v)
+                    } else if value > second {
+                        (top_i, top_v, value)
+                    } else {
+                        (top_i, top_v, second)
+                    }
+                },
+            );
             let repeated = best == prev_class;
             prev_class = best;
             if best == 0 {
@@ -313,14 +324,15 @@ fn decode_ctc(
                 confidence: prob,
             });
             conf_sum += prob;
+            margin_sum += (prob - runner_up).clamp(0.0, 1.0);
             conf_n += 1;
             prev_emitted = true;
         }
 
-        let confidence = if conf_n == 0 {
-            0.0
+        let (confidence, margin) = if conf_n == 0 {
+            (0.0, 0.0)
         } else {
-            conf_sum / conf_n as f32
+            (conf_sum / conf_n as f32, margin_sum / conf_n as f32)
         };
         if let Some(profile) = profiles.get(b) {
             if restore_spaces(&mut chars, profile, cfg) {
@@ -331,6 +343,7 @@ fn decode_ctc(
             text,
             confidence,
             chars,
+            margin,
         });
     }
     Ok(out)
@@ -564,6 +577,24 @@ mod tests {
             "the `a` grew: {:?}",
             out[0].chars[0]
         );
+    }
+
+    #[test]
+    fn the_runner_up_margin_separates_a_clean_read_from_a_guess() {
+        // `logits` puts 0.9 on the chosen class and 0.02 on the rest, so the
+        // margin is wide; a row where two classes are level has none.
+        let dict = CharDict::from_lines(["a", "b", "c"], Some(5)).unwrap();
+        let clean = decode_ctc(&logits(&[&[1, 2]], 5), &[1.0], &dict, &off(), &[]).unwrap();
+        assert!(clean[0].margin > 0.8, "{}", clean[0].margin);
+
+        let mut tensor = logits(&[&[1, 2]], 5);
+        tensor[[0, 0, 2]] = 0.9; // the runner-up catches up with the winner
+        let contested = decode_ctc(&tensor, &[1.0], &dict, &off(), &[]).unwrap();
+        assert!(contested[0].margin < clean[0].margin, "{:?}", contested[0]);
+
+        // Nothing emitted, nothing to be confident about.
+        let blank = decode_ctc(&logits(&[&[0]], 5), &[1.0], &dict, &off(), &[]).unwrap();
+        assert_eq!(blank[0].margin, 0.0);
     }
 
     #[test]
