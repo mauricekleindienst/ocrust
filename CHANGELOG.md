@@ -2,10 +2,12 @@
 
 ## Unreleased
 
-Accuracy is unchanged: the corpus run reproduces mean CER 0.040, median 0.006,
-WER 0.120 and word recall 0.892 file for file, and a drawing's recognized text is
-byte-identical to 0.1.0's. Everything below is a bug that produced a wrong box, a
-wrong page, a crash or a build that would not compile.
+Accuracy is unchanged throughout: the corpus run reproduces mean CER 0.040,
+median 0.006, WER 0.120 and word recall 0.892 file for file, and a drawing's
+recognized text is byte-identical to 0.1.0's. What is new reads the same
+characters and does more with them; what changed is memory and output size; and
+every fix below is a bug that produced a wrong box, a wrong page, a crash or a
+build that would not compile.
 
 ### Changed
 
