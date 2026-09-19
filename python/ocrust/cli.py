@@ -33,31 +33,60 @@ _EXTENSIONS = {
     "csv": "csv",
 }
 
-_ANSI = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
+#: The palette, in three depths: 24-bit, 256 colours, and the eight every
+#: terminal has. Rust orange (#F74C00) is the accent — it is this project's
+#: colour — with the darker #B7410E for anything secondary. Green, amber and red
+#: stay semantic: they say how much a number can be trusted, not whose tool this is.
+_STYLES = {
+    "bold": ("1", "1", "1"),
+    "dim": ("2", "2", "2"),
+    "rust": ("38;2;247;76;0", "38;5;208", "33"),
+    "ember": ("38;2;183;65;14", "38;5;130", "33"),
+    "green": ("38;2;63;185;80", "38;5;34", "32"),
+    "amber": ("38;2;210;153;34", "38;5;178", "33"),
+    "red": ("38;2;248;81;73", "38;5;203", "31"),
+}
+
+
+def _depth(stream: object) -> int:
+    """How many colours `stream` can take: 0, 8, 256 or 16.7 million.
+
+    `COLORTERM` is how terminals announce 24-bit support; `TERM` carries the
+    256-colour hint. `FORCE_COLOR=truecolor` asks for the full palette outright.
+    """
+    forced = os.environ.get("FORCE_COLOR")
+    if forced in (None, "", "0"):
+        if os.environ.get("NO_COLOR") is not None or os.environ.get("TERM") == "dumb":
+            return 0
+        try:
+            if not stream.isatty():  # type: ignore[attr-defined]
+                return 0
+        except Exception:
+            return 0
+    if forced in ("truecolor", "24bit") or os.environ.get("COLORTERM") in ("truecolor", "24bit"):
+        return 16_777_216
+    if "256" in os.environ.get("TERM", "") or forced == "256":
+        return 256
+    return 16_777_216 if forced else 8
 
 
 def _colourful(stream: object) -> bool:
-    """Whether to write escape codes to `stream`.
+    """Whether to write escape codes to `stream` at all.
 
     A pipe, a log file and `NO_COLOR` all mean no; `FORCE_COLOR` overrides the
     lot, which is what a CI job that renders ANSI needs.
     """
-    if os.environ.get("FORCE_COLOR") not in (None, "", "0"):
-        return True
-    if os.environ.get("NO_COLOR") is not None or os.environ.get("TERM") == "dumb":
-        return False
-    try:
-        return bool(stream.isatty())  # type: ignore[attr-defined]
-    except Exception:
-        return False
+    return _depth(stream) > 0
 
 
 def _paint(text: str, *styles: str, stream: object | None = None) -> str:
     """`text` in `styles`, or unchanged when nobody is there to see them."""
     target = stream if stream is not None else sys.stderr
-    if not styles or not _colourful(target):
+    depth = _depth(target)
+    if not styles or depth == 0:
         return text
-    codes = ";".join(_ANSI[name] for name in styles)
+    tier = 0 if depth > 256 else (1 if depth == 256 else 2)
+    codes = ";".join(_STYLES[name][tier] for name in styles)
     return f"\033[{codes}m{text}\033[0m"
 
 
@@ -76,6 +105,31 @@ def _wrap(text: str, indent: int) -> str:
         break_long_words=False,
         break_on_hyphens=False,
     )[indent:]
+
+
+def _fold(text: str, indent: int) -> str:
+    """Folds a value to the terminal, breaking a long path on its separators.
+
+    `textwrap` needs spaces to work with, and a model path inside a virtualenv
+    has none — so it would run off the screen instead of wrapping. A directory
+    boundary is the one place a path may be broken without becoming unreadable.
+    """
+    width = max(24, _width() - indent)
+    if len(text) <= width:
+        return text
+    if " " in text:
+        return _wrap(text, indent)
+    lines: list[str] = []
+    current = ""
+    for index, part in enumerate(text.split("/")):
+        piece = part if index == 0 else f"/{part}"
+        if current and len(current) + len(piece) > width:
+            lines.append(current)
+            current = piece
+        else:
+            current += piece
+    lines.append(current)
+    return ("\n" + " " * indent).join(lines)
 
 
 def _fail(message: str) -> None:
@@ -116,11 +170,12 @@ def _confidence(value: float) -> str:
     text = f"{value * 100:.1f}% confident"
     if value >= 0.95:
         return _paint(text, "green")
-    return _paint(text, "yellow" if value >= 0.8 else "red")
+    return _paint(text, "amber" if value >= 0.8 else "red")
 
 
 def _arrow(source: object, target: object) -> str:
-    return f"{source} {_paint('->', 'dim')} {_paint(str(target), 'bold')}"
+    """`in -> out`, with the file that was just written in the accent colour."""
+    return f"{source} {_paint('->', 'dim')} {_paint(str(target), 'rust', 'bold')}"
 
 
 _EXAMPLES = """examples:
@@ -540,7 +595,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         )
         if failures:
             total += f", {_paint(_count(failures, 'failure'), 'red')}"
-        print(_paint("done: ", "bold") + total, file=sys.stderr)
+        print(_paint("done:", "rust", "bold") + " " + total, file=sys.stderr)
     return 1 if failures else 0
 
 
@@ -671,19 +726,21 @@ def _cmd_languages(args: argparse.Namespace) -> int:
         return 0
 
     out = sys.stdout
-    print(f"{_paint(str(len(entries)), 'bold', stream=out)} language(s) {label}:\n")
+    count = _paint(str(len(entries)), "rust", "bold", stream=out)
+    print(f"{count} language(s) {label}:\n")
     by_script: dict[str, list[str]] = {}
     for entry in entries:
         by_script.setdefault(str(entry["script"]), []).append(f"{entry['code']} ({entry['name']})")
     for script in sorted(by_script):
         names = ", ".join(sorted(by_script[script]))
         label_text = f"{script:<11}"
-        print(f"  {_paint(label_text, 'cyan', stream=out)} {_wrap(names, 14)}")
+        print(f"  {_paint(label_text, 'rust', stream=out)} {_wrap(names, 14)}")
 
     if not args.all:
         near = Ocr(models_dir=args.models).partial_languages(0.8)
         if near:
-            print(f"\n{_paint('nearly covered', 'yellow', stream=out)} (a few characters missing):")
+            heading = _paint("nearly covered", "amber", stream=out)
+            print(f"\n{heading} (a few characters missing):")
             for entry in near:
                 print(
                     f"  {entry['code']} ({entry['name']}): {entry['ratio'] * 100:.0f}%"
@@ -716,11 +773,17 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     out = sys.stdout
 
     def row(label: str, value: object, indent: int = 0) -> None:
+        """One diagnostic line: a dim label, and a value that stays on screen.
+
+        Model paths inside a virtualenv are long enough to run off any terminal,
+        and a diagnostic that has to be scrolled sideways is no diagnostic — so
+        they fold under themselves instead of being cut.
+        """
         pad = "  " * indent
         name = _paint(f"{pad}{label}".ljust(18), "dim", stream=out)
-        print(f"{name}{value}", file=out)
+        print(f"{name}{_fold(str(value), 18)}", file=out)
 
-    row("ocrust", _paint(str(info["ocrust"]), "bold", stream=out))
+    row("ocrust", _paint(str(info["ocrust"]), "rust", "bold", stream=out))
     row("python", f"{info['python']} on {info['platform']}")
     missing = _paint("not installed", "red", stream=out)
     row("onnxruntime", info.get("onnxruntime_version") or missing)
@@ -754,7 +817,8 @@ def _cmd_models(args: argparse.Namespace) -> int:
         return 1
     out = sys.stdout
     for key, value in engine.models.items():
-        print(f"{_paint(f'{key:<12}', 'dim', stream=out)} {value or '-'}")
+        label = _paint(f"{key:<12}", "dim", stream=out)
+        print(f"{label} {_fold(str(value or '-'), 13)}")
     return 0
 
 

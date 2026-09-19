@@ -271,6 +271,17 @@ ocrust install-models                        # fetch them from GitHub
 ocrust doctor                                # what is installed, what is missing
 ```
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mauricekleindienst/ocrust/main/assets/cli.png" alt="ocrust on the command line"
+       width="900">
+</p>
+
+The result goes to stdout and everything about the run to stderr, so
+`ocrust scan x.pdf > text.txt` gives you the text and `-f json | jq` still works.
+Colour is used sparingly — Rust orange for what was written, green, amber or red
+for how much the confidence deserves trust — and switches itself off when stderr
+is not a terminal (`NO_COLOR` honoured, `FORCE_COLOR` obeyed).
+
 ## Models
 
 `pip install "ocrust[models]"` installs them as a wheel — nothing is downloaded
