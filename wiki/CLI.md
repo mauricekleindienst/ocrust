@@ -159,6 +159,28 @@ status: ready
 Exit code 0 means ready; anything else is a real problem, and the line above
 `status:` says which. `--json` for scripts. [Troubleshooting](Troubleshooting.md) decodes each case.
 
+## Output design
+
+The result goes to **stdout**, everything about the run to **stderr**, so
+`ocrust scan x.pdf > text.txt` gives you the text and nothing else, and
+`ocrust scan x.pdf -f json | jq` works.
+
+```console
+$ ocrust scan archive/ -o out/
+archive/one.pdf -> out/one.txt
+  1 page, 2 lines, 99.9% confident, 991 ms
+archive/sub/two.pdf -> out/two.txt
+  1 page, 2 lines, 99.9% confident, 810 ms
+done: 2 files, 2 pages, 4 lines, 1.8 s
+```
+
+Colour is used sparingly — a red `ocrust:` on an error, the confidence green,
+amber or red, paths in bold — and switches itself off when stderr is not a
+terminal. `NO_COLOR` disables it; `FORCE_COLOR=1` keeps it for a CI log that
+renders ANSI. Long messages fold to the terminal width instead of running off
+the edge, and `--progress` rewrites one line on a terminal but prints a line per
+page into a log, where a carriage return would run the whole run together.
+
 ## Exit codes
 
 | Code | Meaning |

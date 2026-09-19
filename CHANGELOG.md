@@ -7,6 +7,17 @@ WER 0.120 and word recall 0.892 file for file, and a drawing's recognized text i
 byte-identical to 0.1.0's. Everything below is a bug that produced a wrong box, a
 wrong page, a crash or a build that would not compile.
 
+### Added
+
+- **A command line that reads like one.** Colour used sparingly and switched off
+  for a pipe (`NO_COLOR` honoured, `FORCE_COLOR` respected): a red `ocrust:` on
+  errors, confidence in green, amber or red, output paths in bold, dim labels in
+  `doctor`, `languages` and `models`. Counts in English (`1 page, 2 lines`, not
+  `1 page(s)`), durations that turn into seconds and minutes when they should,
+  sizes in kB or MB, a `done:` total after a batch, a hint when `ocr` skipped
+  every page because it already had text, long messages folded to the terminal
+  width, and `--help` that ends with the seven commands people actually type.
+
 ### Fixed
 
 - **GPU builds did not compile.** `--features cuda`, `coreml` or `directml`
@@ -48,6 +59,14 @@ wrong page, a crash or a build that would not compile.
   the page's median height: short hyphenated paragraphs came out of the Markdown
   exporter as `## `. The classifier now measures the detection polygon, which
   de-hyphenation does not touch.
+- **An engine that cannot be built printed a Python traceback.** `ocrust scan x
+  --lang klingon`, a missing model directory, an unknown device: the error was
+  raised while building the engine, which no command guarded, so the user got a
+  stack trace instead of a sentence. One handler in `main` reports it as one line.
+- **`--progress` garbled a log.** It rewrote its line with a carriage return
+  whatever stderr was, so a redirected run came out as one long line. On a
+  terminal it still rewrites in place; into a pipe or a file it prints a line per
+  page.
 - **`-q` works on `ocr`, `pdf` and `tiff`**, not only `scan`; the wiki's own
   `find | xargs -P4 ocrust ocr` recipe had no way to silence the per-file
   summary. A `--sidecar` file is written through the same retrying path as every

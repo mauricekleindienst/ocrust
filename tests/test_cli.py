@@ -269,3 +269,64 @@ def test_worker_default_scales_with_the_batch():
     assert _workers_for(Namespace(workers=None), 5) == 4
     # An explicit choice always wins.
     assert _workers_for(Namespace(workers=2), 9) == 2
+
+
+def test_colour_is_off_for_a_pipe_and_can_be_forced(monkeypatch):
+    from ocrust import cli
+
+    class Tty:
+        def isatty(self):
+            return True
+
+    class Pipe:
+        def isatty(self):
+            return False
+
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm")
+    assert cli._colourful(Tty())
+    assert not cli._colourful(Pipe())
+    assert cli._paint("x", "red", stream=Pipe()) == "x"
+    assert "\033[" in cli._paint("x", "red", stream=Tty())
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert not cli._colourful(Tty())
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    assert cli._colourful(Pipe()), "FORCE_COLOR wins, for a CI log that renders ANSI"
+
+
+def test_counts_and_durations_read_like_english():
+    from ocrust import cli
+
+    assert cli._count(1, "page") == "1 page"
+    assert cli._count(0, "page") == "0 pages"
+    assert cli._count(2, "line") == "2 lines"
+    assert cli._duration(464) == "464 ms"
+    assert cli._duration(1900) == "1.9 s"
+    assert cli._duration(125_000).startswith("2 min")
+
+
+def test_long_messages_are_folded_to_the_terminal(monkeypatch):
+    from ocrust import cli
+
+    monkeypatch.setenv("COLUMNS", "60")
+    words = " ".join(f"code{i}" for i in range(40))
+    folded = cli._wrap(words, 8).splitlines()
+    assert len(folded) > 1
+    assert all(len(line) <= cli._width() for line in folded)
+    assert folded[1].startswith(" " * 8), folded[1]
+    # A short message is left alone.
+    assert cli._wrap("short", 8) == "short"
+
+
+def test_an_engine_that_cannot_be_built_prints_one_line(tmp_path, capsys):
+    """An unbuildable engine used to come back as a Python traceback."""
+    document = tmp_path / "x.pdf"
+    document.write_bytes(b"%PDF-1.4\n")
+    code = main(["scan", str(document), "--models", str(tmp_path / "nowhere")])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err, err
+    assert err.startswith("ocrust:"), err
+    assert len(err.splitlines()) <= 4, err
