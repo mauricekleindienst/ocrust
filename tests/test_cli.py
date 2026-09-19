@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from ocrust.cli import _expand_inputs, _io_retries, _parse_pages, _write, main
+from ocrust.cli import _build_parser, _expand_inputs, _io_retries, _parse_pages, _write, main
 
 
 def test_page_spec_parsing():
@@ -23,10 +23,22 @@ def test_page_spec_parsing():
         _parse_pages("0")
     with pytest.raises(SystemExit):
         _parse_pages("5-2")
-    # A typo must not come back as a traceback.
-    for bad in ("1-x", "3-", "abc", "-4"):
-        with pytest.raises(SystemExit):
+    # A typo must not come back as a traceback, and it is a bad argument: the
+    # documented exit code for that is 2, not 1.
+    for bad in ("1-x", "3-", "abc", "-4", "0", "5-2"):
+        with pytest.raises(SystemExit) as raised:
             _parse_pages(bad)
+        assert raised.value.code == 2, bad
+
+
+def test_quiet_is_available_wherever_a_summary_is_printed():
+    """`find | xargs -P4 ocrust ocr` needs to be able to shut it up."""
+    parser = _build_parser()
+    assert parser.parse_args(["scan", "a.pdf", "-q"]).quiet
+    assert parser.parse_args(["ocr", "a.pdf", "-q"]).quiet
+    assert parser.parse_args(["pdf", "a.png", "--quiet"]).quiet
+    assert parser.parse_args(["tiff", "a.pdf", "-q"]).quiet
+    assert not parser.parse_args(["ocr", "a.pdf"]).quiet
 
 
 def test_expand_inputs_explains_what_is_missing(tmp_path):
