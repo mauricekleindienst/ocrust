@@ -36,6 +36,13 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The unit tests need neither models nor ONNX Runtime.
       - run: cargo test -p ocrust-core --lib
+      # The accelerator features are compiled by whoever needs them, so nothing
+      # else here would notice if one stopped building.
+      - name: check the accelerator features
+        # One platform is enough to catch an API that moved under us; the
+        # providers themselves are only linked at run time.
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo check -p ocrust-core --all-features
 
   python-lint:
     name: ruff

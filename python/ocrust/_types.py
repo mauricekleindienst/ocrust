@@ -98,7 +98,8 @@ class Match:
     """Where a search hit sits in a document."""
 
     text: str
-    #: Zero-based page index.
+    #: The page's own :attr:`Page.index`, so a hit can be reported against the
+    #: source document even when only some of its pages were scanned.
     page: int
     #: Box around the matching words, or the whole line when word boxes are off.
     box: Box
@@ -154,6 +155,9 @@ class Document:
     source: str
     pages: Sequence[Page]
     elapsed_ms: float
+    #: The engine's own JSON, kept so that :meth:`to_dict` can hand back every
+    #: field the dataclasses leave out. Empty for a document built by hand.
+    _raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def __str__(self) -> str:
         return self.text
@@ -217,13 +221,13 @@ class Document:
         compiled = re.compile(pattern, flags)
 
         found: list[Match] = []
-        for index, page in enumerate(self.pages):
+        for page in self.pages:
             for line in page.lines:
                 for hit in compiled.finditer(line.text):
                     found.append(
                         Match(
                             text=hit.group(0),
-                            page=index,
+                            page=page.index,
                             box=_box_for_span(line, hit.start(), hit.end()),
                             line=line,
                         )
@@ -236,13 +240,12 @@ class Document:
 
     @classmethod
     def _from_json(cls, data: dict[str, Any]) -> Document:
-        doc = cls(
+        return cls(
             source=data.get("source", ""),
             pages=tuple(Page._from_json(p) for p in data["pages"]),
             elapsed_ms=data.get("elapsed_ms", 0.0),
+            _raw=data,
         )
-        object.__setattr__(doc, "_raw", data)
-        return doc
 
 
 def _box_for_span(line: Line, start: int, end: int) -> Box:

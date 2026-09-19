@@ -226,7 +226,7 @@ fn build_session(path: &Path, opts: &SessionOptions) -> Result<Session> {
             #[cfg(feature = "cuda")]
             {
                 builder = builder
-                    .with_execution_providers([ort::ep::CUDAExecutionProvider::default()
+                    .with_execution_providers([ort::ep::CUDA::default()
                         .with_device_id(_device_id)
                         .build()])
                     .map_err(builder_error)?;
@@ -240,7 +240,7 @@ fn build_session(path: &Path, opts: &SessionOptions) -> Result<Session> {
             #[cfg(feature = "coreml")]
             {
                 builder = builder
-                    .with_execution_providers([ort::ep::CoreMLExecutionProvider::default().build()])
+                    .with_execution_providers([ort::ep::CoreML::default().build()])
                     .map_err(builder_error)?;
             }
             #[cfg(not(feature = "coreml"))]
@@ -250,7 +250,7 @@ fn build_session(path: &Path, opts: &SessionOptions) -> Result<Session> {
             #[cfg(feature = "directml")]
             {
                 builder = builder
-                    .with_execution_providers([ort::ep::DirectMLExecutionProvider::default()
+                    .with_execution_providers([ort::ep::DirectML::default()
                         .with_device_id(_device_id)
                         .build()])
                     .map_err(builder_error)?;
@@ -286,24 +286,39 @@ fn register_available_accelerators(
 ) -> ort::session::builder::SessionBuilder {
     // Each provider is tried in turn; a failed registration hands the builder
     // back in the error, so nothing is lost and the CPU remains the fallback.
+    // TensorRT goes first because it falls back to CUDA on its own.
+    #[cfg(feature = "tensorrt")]
+    let builder = match builder.with_execution_providers([ort::ep::TensorRT::default().build()]) {
+        Ok(b) => return b,
+        Err(e) => e.recover(),
+    };
     #[cfg(feature = "cuda")]
-    let builder = match builder
-        .with_execution_providers([ort::ep::CUDAExecutionProvider::default().build()])
-    {
+    let builder = match builder.with_execution_providers([ort::ep::CUDA::default().build()]) {
+        Ok(b) => return b,
+        Err(e) => e.recover(),
+    };
+    #[cfg(feature = "rocm")]
+    let builder = match builder.with_execution_providers([ort::ep::ROCm::default().build()]) {
         Ok(b) => return b,
         Err(e) => e.recover(),
     };
     #[cfg(feature = "coreml")]
-    let builder = match builder
-        .with_execution_providers([ort::ep::CoreMLExecutionProvider::default().build()])
-    {
+    let builder = match builder.with_execution_providers([ort::ep::CoreML::default().build()]) {
         Ok(b) => return b,
         Err(e) => e.recover(),
     };
     #[cfg(feature = "directml")]
-    let builder = match builder
-        .with_execution_providers([ort::ep::DirectMLExecutionProvider::default().build()])
-    {
+    let builder = match builder.with_execution_providers([ort::ep::DirectML::default().build()]) {
+        Ok(b) => return b,
+        Err(e) => e.recover(),
+    };
+    #[cfg(feature = "openvino")]
+    let builder = match builder.with_execution_providers([ort::ep::OpenVINO::default().build()]) {
+        Ok(b) => return b,
+        Err(e) => e.recover(),
+    };
+    #[cfg(feature = "webgpu")]
+    let builder = match builder.with_execution_providers([ort::ep::WebGPU::default().build()]) {
         Ok(b) => return b,
         Err(e) => e.recover(),
     };

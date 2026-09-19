@@ -89,6 +89,14 @@ pub fn parse(input: &str) -> Option<&'static Language> {
     if exact.is_some() {
         return exact;
     }
+    // A tag written with an underscore is the same tag: `zh_hant` must not fall
+    // through to `zh`, which is a different script.
+    let dashed = raw.replace('_', "-");
+    if dashed != raw {
+        if let Some(found) = LANGUAGES.iter().find(|l| l.code == dashed) {
+            return Some(found);
+        }
+    }
     let primary = raw.split(['-', '_']).next().unwrap_or(&raw);
     LANGUAGES
         .iter()
@@ -405,6 +413,10 @@ mod tests {
         assert_eq!(parse("fra").unwrap().code, "fr");
         assert_eq!(parse("no").unwrap().code, "nb");
         assert_eq!(parse("chinese_cht").unwrap().code, "zh-hant");
+        // An underscore is the same tag, not a reason to fall back to `zh`.
+        assert_eq!(parse("zh_hant").unwrap().code, "zh-hant");
+        assert_eq!(parse("zh-Hant").unwrap().code, "zh-hant");
+        assert_eq!(parse("zh").unwrap().code, "zh");
         assert!(parse("klingon").is_none());
     }
 

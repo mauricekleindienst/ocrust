@@ -145,6 +145,15 @@ impl TextRecognizer {
         for chunk in order.chunks(self.config.batch_size.max(1)) {
             let batch: Vec<&RgbImage> = chunk.iter().map(|&i| &crops[i]).collect();
             let decoded = self.run_batch(&batch)?;
+            if decoded.len() != batch.len() {
+                // Without this the `zip` below would silently leave crops
+                // unrecognized, which reads as an empty line rather than an error.
+                return Err(Error::model(format!(
+                    "recognition returned {} rows for a batch of {}",
+                    decoded.len(),
+                    batch.len()
+                )));
+            }
             for (&idx, rec) in chunk.iter().zip(decoded) {
                 results[idx] = rec;
             }
@@ -222,10 +231,24 @@ fn decode_ctc(
         )));
     }
     let (n, t, c) = (shape[0], shape[1], shape[2]);
+    // A CTC head has at least the blank and one character, and one timestep.
+    // Trusting a broken export here would mean an argmax over nothing.
+    if t == 0 || c < 2 {
+        return Err(Error::model(format!(
+            "unusable recognition output shape {shape:?}, expected [batch, time >= 1, classes >= 2]"
+        )));
+    }
     let flat = logits
         .as_slice()
         .map(std::borrow::Cow::Borrowed)
         .unwrap_or_else(|| std::borrow::Cow::Owned(logits.iter().copied().collect()));
+
+    if flat.len() < n * t * c {
+        return Err(Error::model(format!(
+            "recognition output holds {} values, too few for shape {shape:?}",
+            flat.len()
+        )));
+    }
 
     let mut out = Vec::with_capacity(n);
     for b in 0..n {
@@ -234,20 +257,32 @@ fn decode_ctc(
         let mut conf_sum = 0.0f32;
         let mut conf_n = 0u32;
         let mut prev_class = usize::MAX;
+        // Whether the previous timestep put a character into `chars`: a class
+        // the dictionary does not cover emits nothing, so a repeat of it must
+        // not widen whatever glyph came before.
+        let mut prev_emitted = false;
         // Only the non-padded part of the sequence carries signal.
         let valid_frac = valid.get(b).copied().unwrap_or(1.0).clamp(0.05, 1.0);
         let t_valid = ((t as f32 * valid_frac).ceil() as usize).clamp(1, t);
 
         for step in 0..t_valid {
             let row = &flat[(b * t + step) * c..(b * t + step + 1) * c];
-            let (best, &prob) = row
-                .iter()
-                .enumerate()
-                .max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal))
-                .expect("non-empty class axis");
+            // Fold rather than `max_by(...).expect(...)`: a row of NaNs is a
+            // broken model, not a reason to abort the whole document.
+            let (best, prob) =
+                row.iter()
+                    .enumerate()
+                    .fold((0usize, f32::NEG_INFINITY), |acc, (index, &value)| {
+                        if value > acc.1 {
+                            (index, value)
+                        } else {
+                            acc
+                        }
+                    });
             let repeated = best == prev_class;
             prev_class = best;
             if best == 0 {
+                prev_emitted = false;
                 continue; // CTC blank
             }
             // Map the timestep onto the line: each step covers an equal
@@ -258,13 +293,16 @@ fn decode_ctc(
                 // characters: grow the span instead of emitting again, so `m`
                 // ends up wider than `i` and the gaps between glyphs mean
                 // something.
-                if let Some(last) = chars.last_mut() {
-                    last.x_width += step_w;
-                    last.x_center += step_w / 2.0;
+                if prev_emitted {
+                    if let Some(last) = chars.last_mut() {
+                        last.x_width += step_w;
+                        last.x_center += step_w / 2.0;
+                    }
                 }
                 continue;
             }
             let Some(ch) = dict.get(best) else {
+                prev_emitted = false;
                 continue;
             };
             text.push_str(ch);
@@ -276,6 +314,7 @@ fn decode_ctc(
             });
             conf_sum += prob;
             conf_n += 1;
+            prev_emitted = true;
         }
 
         let confidence = if conf_n == 0 {
@@ -501,6 +540,30 @@ mod tests {
             space_gap_factor: 0.0,
             ..RecognizerConfig::default()
         }
+    }
+
+    #[test]
+    fn a_class_axis_without_characters_is_an_error() {
+        // A CTC head has a blank and at least one character. An export that has
+        // neither used to reach an argmax over an empty row.
+        let dict = CharDict::from_lines(["a"], Some(2)).unwrap();
+        let err = decode_ctc(&logits(&[&[0]], 1), &[1.0], &dict, &off(), &[]).unwrap_err();
+        assert!(err.to_string().contains("classes >= 2"), "{err}");
+    }
+
+    #[test]
+    fn a_class_outside_the_dictionary_does_not_widen_its_neighbour() {
+        // Class 5 exists in the tensor but reaches past the dictionary, which is
+        // what a mismatched `*_dict.txt` looks like. Repeating it must not be
+        // mistaken for a wide `a`.
+        let dict = CharDict::from_lines(["a", "b", "c"], Some(4)).unwrap();
+        let out = decode_ctc(&logits(&[&[1, 5, 5, 2]], 6), &[1.0], &dict, &off(), &[]).unwrap();
+        assert_eq!(out[0].text, "ab");
+        assert!(
+            (out[0].chars[0].x_width - 0.25).abs() < 1e-6,
+            "the `a` grew: {:?}",
+            out[0].chars[0]
+        );
     }
 
     #[test]

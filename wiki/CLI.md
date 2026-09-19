@@ -69,7 +69,8 @@ Output rules worth knowing:
   documents share the cores with the inference threads, so more is not better —
   see [Performance](Performance.md).
 - `--pages` is 1-based and accepts ranges: `1,3-5,9`. The Python API is
-  0-based, as Python should be.
+  0-based, as Python should be. Asking for a page the document does not have is
+  an error, not an empty file.
 
 ## `ocrust ocr` — text layer over an existing PDF
 

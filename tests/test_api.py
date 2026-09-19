@@ -53,6 +53,29 @@ def test_library_is_found_under_every_platform_spelling(tmp_path, monkeypatch):
     assert _runtime.library_in(tmp_path / "nope") is None
 
 
+def test_the_newest_runtime_wins_when_several_are_installed(tmp_path, monkeypatch):
+    """1.30 is newer than 1.9, which sorting the file names does not know."""
+    from ocrust import _runtime
+
+    monkeypatch.setattr(_runtime.sys, "platform", "linux")
+    for name in ("libonnxruntime.so.1.9.0", "libonnxruntime.so.1.30.0"):
+        (tmp_path / name).write_bytes(b"not really a library")
+    found = _runtime.library_in(tmp_path)
+    assert found is not None and found.name == "libonnxruntime.so.1.30.0", found
+
+    # On macOS the glob also catches the provider stubs that sit beside it.
+    mac = tmp_path / "darwin"
+    mac.mkdir()
+    monkeypatch.setattr(_runtime.sys, "platform", "darwin")
+    for name in (
+        "libonnxruntime.1.30.0.dylib",
+        "libonnxruntime_providers_shared.1.30.0.dylib",
+    ):
+        (mac / name).write_bytes(b"not really a library")
+    found = _runtime.library_in(mac)
+    assert found is not None and found.name == "libonnxruntime.1.30.0.dylib", found
+
+
 def test_models_cache_dir_is_absolute():
     assert Path(ocrust.models_cache_dir()).is_absolute()
 
@@ -235,3 +258,72 @@ def test_scan_reports_missing_file(engine):
 def test_scan_reports_unreadable_bytes(engine):
     with pytest.raises(ValueError):
         engine.scan(b"not an image at all", name="junk.bin")
+
+
+def test_match_reports_the_pages_own_index():
+    # Scanning a subset of a PDF keeps the source page numbers, so a hit has to
+    # be reported against `Page.index` rather than its position in the result.
+    payload = {
+        "source": "report.pdf",
+        "elapsed_ms": 1.0,
+        "pages": [
+            {
+                "index": 4,
+                "width": 200,
+                "height": 100,
+                "rotation": 0.0,
+                "origin": "pdf_page",
+                "elapsed_ms": 1.0,
+                "blocks": [
+                    {
+                        "kind": "paragraph",
+                        "bbox": {"x0": 0.0, "y0": 0.0, "x1": 200.0, "y1": 20.0},
+                        "lines": [
+                            {
+                                "text": "Summe 42",
+                                "confidence": 0.9,
+                                "angle": 0.0,
+                                "bbox": {"x0": 0.0, "y0": 0.0, "x1": 200.0, "y1": 20.0},
+                                "quad": {
+                                    "points": [
+                                        {"x": 0.0, "y": 0.0},
+                                        {"x": 200.0, "y": 0.0},
+                                        {"x": 200.0, "y": 20.0},
+                                        {"x": 0.0, "y": 20.0},
+                                    ]
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    doc = ocrust.Document._from_json(payload)
+    assert doc.pages[0].index == 4
+    assert doc.search("Summe")[0].page == 4
+
+
+def test_documents_built_by_hand_still_expose_to_dict():
+    # `to_dict` hands back the engine's own JSON; a document assembled in Python
+    # has none, and must say so instead of raising.
+    doc = ocrust.Document(source="made-up", pages=(), elapsed_ms=0.0)
+    assert doc.to_dict() == {}
+    assert doc.text == ""
+
+
+def test_recursive_glob_patterns_are_expanded(tmp_path):
+    from ocrust import _expand_sources
+
+    nested = tmp_path / "2026" / "q1"
+    nested.mkdir(parents=True)
+    (nested / "invoice.pdf").write_bytes(b"%PDF-1.4\n")
+    (tmp_path / "top.pdf").write_bytes(b"%PDF-1.4\n")
+
+    found = _expand_sources([str(tmp_path / "**" / "*.pdf")])
+    # `**` descends and also matches zero directories, like a shell would.
+    assert [Path(p).name for p in found] == ["invoice.pdf", "top.pdf"]
+
+    # A plain pattern in one directory keeps working.
+    found = _expand_sources([str(tmp_path / "*.pdf")])
+    assert [Path(p).name for p in found] == ["top.pdf"]

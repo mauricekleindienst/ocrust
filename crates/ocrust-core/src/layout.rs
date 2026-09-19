@@ -5,7 +5,7 @@
 //! words — happens here, without any extra model.
 
 use crate::doc::{Block, BlockKind, Line, Word};
-use crate::geom::{Quad, Rect};
+use crate::geom::{crop_stands_up, Point, Quad, Rect};
 use crate::recognize::CharSpan;
 
 /// Tunables for layout grouping.
@@ -384,6 +384,9 @@ fn find_gap(
     extent: impl Fn(&Line) -> (f32, f32),
 ) -> Option<(f32, f32)> {
     let mut spans: Vec<(f32, f32)> = lines.iter().map(&extent).collect();
+    if spans.is_empty() {
+        return None;
+    }
     spans.sort_by(|a, b| cmp_f32(a.0, b.0));
 
     let mut best: Option<(f32, f32)> = None; // (gap size, split position)
@@ -446,13 +449,33 @@ fn finish_block(mut lines: Vec<Line>, scale: f32, cfg: &LayoutConfig) -> Block {
     Block { kind, bbox, lines }
 }
 
+/// Characters a list item may start with.
+///
+/// Shared with the Markdown exporter so that the classifier and the renderer can
+/// never disagree about what a bullet is.
+pub(crate) const BULLETS: [char; 6] = ['•', '‣', '·', '–', '—', '*'];
+
+/// Strips one leading bullet and the space behind it.
+///
+/// A hyphen only counts as a bullet when a space follows: `-19,90` is a number,
+/// and stripping its sign would turn a credit into a charge.
+pub(crate) fn strip_bullet(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    let rest = match trimmed.chars().next() {
+        Some(c) if BULLETS.contains(&c) => &trimmed[c.len_utf8()..],
+        Some('-') if trimmed[1..].starts_with(' ') => &trimmed[1..],
+        _ => return trimmed,
+    };
+    rest.trim_start()
+}
+
 fn classify_block(lines: &[Line], scale: f32, cfg: &LayoutConfig) -> BlockKind {
     let first = match lines.first() {
         Some(l) => l,
         None => return BlockKind::Paragraph,
     };
     let trimmed = first.text.trim_start();
-    if trimmed.starts_with(['•', '‣', '·', '–', '—', '*'])
+    if trimmed.starts_with(BULLETS)
         || trimmed.split_once(['.', ')']).is_some_and(|(head, _)| {
             !head.is_empty() && head.len() <= 3 && head.chars().all(|c| c.is_ascii_digit())
         })
@@ -497,84 +520,92 @@ fn dehyphenate(lines: &mut Vec<Line>) {
 
 /// Turns CTC character positions into word boxes along a line quad.
 ///
-/// Character positions are fractions of the line width, so the boxes follow the
-/// line's own rotation instead of assuming horizontal text.
+/// Character positions are fractions of the crop the recognizer read, so they
+/// are interpolated along the quad's own edges: a rotated line gets boxes that
+/// follow it instead of one tall box per word, and a vertical line — whose crop
+/// [`crop_stands_up`] turned upright — gets them stacked bottom to top.
 pub fn words_from_chars(quad: &Quad, chars: &[CharSpan]) -> Vec<Word> {
     if chars.is_empty() {
         return Vec::new();
     }
     let q = quad.ordered();
-    let bbox = q.bounds();
-    let (x0, width) = (bbox.x0, bbox.width());
+    let stood_up = crop_stands_up(&q);
 
-    let mut words = Vec::new();
-    let mut buf = String::new();
-    let mut conf_sum = 0.0f32;
-    let mut count = 0u32;
-    let mut start = f32::MAX;
-    let mut end = f32::MIN;
+    /// One word under construction: its text, its confidence, and the stretch
+    /// of the crop it covers.
+    struct Pending {
+        text: String,
+        conf_sum: f32,
+        count: u32,
+        start: f32,
+        end: f32,
+    }
 
-    let flush = |words: &mut Vec<Word>,
-                 buf: &mut String,
-                 conf_sum: &mut f32,
-                 count: &mut u32,
-                 start: &mut f32,
-                 end: &mut f32| {
-        if buf.trim().is_empty() {
-            buf.clear();
-            *conf_sum = 0.0;
-            *count = 0;
-            *start = f32::MAX;
-            *end = f32::MIN;
-            return;
-        }
-        words.push(Word {
-            text: std::mem::take(buf),
-            bbox: Rect::new(
-                x0 + start.max(0.0) * width,
-                bbox.y0,
-                x0 + end.min(1.0) * width,
-                bbox.y1,
-            ),
-            confidence: if *count == 0 {
-                0.0
-            } else {
-                *conf_sum / *count as f32
-            },
-        });
-        *conf_sum = 0.0;
-        *count = 0;
-        *start = f32::MAX;
-        *end = f32::MIN;
-    };
-
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut open = false;
     for span in chars {
         if span.text.trim().is_empty() {
-            flush(
-                &mut words,
-                &mut buf,
-                &mut conf_sum,
-                &mut count,
-                &mut start,
-                &mut end,
-            );
+            open = false;
             continue;
         }
-        buf.push_str(&span.text);
-        conf_sum += span.confidence;
-        count += 1;
-        start = start.min(span.x_center - span.x_width * 0.5);
-        end = end.max(span.x_center + span.x_width * 0.5);
+        if !open {
+            pending.push(Pending {
+                text: String::new(),
+                conf_sum: 0.0,
+                count: 0,
+                start: f32::MAX,
+                end: f32::MIN,
+            });
+            open = true;
+        }
+        if let Some(word) = pending.last_mut() {
+            word.text.push_str(&span.text);
+            word.conf_sum += span.confidence;
+            word.count += 1;
+            word.start = word.start.min(span.x_center - span.x_width * 0.5);
+            word.end = word.end.max(span.x_center + span.x_width * 0.5);
+        }
     }
-    flush(
-        &mut words,
-        &mut buf,
-        &mut conf_sum,
-        &mut count,
-        &mut start,
-        &mut end,
-    );
-    words
+
+    pending
+        .into_iter()
+        .filter(|word| !word.text.trim().is_empty())
+        .map(|word| Word {
+            bbox: span_box(&q, stood_up, word.start, word.end),
+            confidence: if word.count == 0 {
+                0.0
+            } else {
+                word.conf_sum / word.count as f32
+            },
+            text: word.text,
+        })
+        .collect()
+}
+
+/// Box around the slice of a line between two fractions of its reading
+/// direction.
+///
+/// The slice is bounded by two cuts across the line, each interpolated between
+/// the quad's two long edges, so the box tilts with the line.
+fn span_box(quad: &Quad, stood_up: bool, start: f32, end: f32) -> Rect {
+    let p = quad.points;
+    // `[tl, tr, br, bl]`: reading runs along the top and bottom edges, or up the
+    // left and right ones when the crop was stood upright.
+    let (a0, a1, b0, b1) = if stood_up {
+        (p[3], p[0], p[2], p[1])
+    } else {
+        (p[0], p[1], p[3], p[2])
+    };
+    let lerp =
+        |a: Point, b: Point, t: f32| Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+    let (s, e) = (start.clamp(0.0, 1.0), end.clamp(0.0, 1.0));
+    Quad::new([
+        lerp(a0, a1, s),
+        lerp(a0, a1, e),
+        lerp(b0, b1, e),
+        lerp(b0, b1, s),
+    ])
+    .bounds()
 }
 
 #[cfg(test)]
@@ -887,22 +918,87 @@ mod tests {
         assert_eq!(blocks[0].kind, BlockKind::ListItem);
     }
 
+    /// Evenly spaced character spans, as a recognizer reports them.
+    fn char_spans(text: &str) -> Vec<CharSpan> {
+        let n = text.chars().count() as f32;
+        text.chars()
+            .enumerate()
+            .map(|(i, c)| CharSpan {
+                text: c.to_string(),
+                x_center: (i as f32 + 0.5) / n,
+                x_width: 1.0 / n,
+                confidence: 0.8,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn word_boxes_follow_a_rotated_line() {
+        // A line tilted 45 degrees: its words have to walk down the diagonal
+        // instead of each covering the full bounding box.
+        let quad = Quad::new([
+            Point::new(0.0, 0.0),
+            Point::new(70.0, 70.0),
+            Point::new(63.0, 77.0),
+            Point::new(-7.0, 7.0),
+        ]);
+        let words = words_from_chars(&quad, &char_spans("ab cd"));
+        assert_eq!(words.len(), 2);
+        let (left, right) = (&words[0].bbox, &words[1].bbox);
+        assert!(
+            right.y0 > left.y0 + 10.0,
+            "the second word should sit lower: {left:?} {right:?}"
+        );
+        let bounds = quad.bounds();
+        assert!(
+            left.height() < bounds.height() * 0.7,
+            "a word of a tilted line must not span its whole bbox: {left:?}"
+        );
+        for word in &words {
+            assert!(
+                word.bbox.x0 >= bounds.x0 - 0.1 && word.bbox.x1 <= bounds.x1 + 0.1,
+                "{:?} left the line",
+                word.bbox
+            );
+        }
+    }
+
+    #[test]
+    fn word_boxes_of_a_vertical_line_run_bottom_to_top() {
+        // `crop_quad` stands tall crops up, so the recognizer read this line
+        // from the bottom: the first word belongs at the bottom of the box.
+        let quad = Quad::from_rect(Rect::new(0.0, 0.0, 20.0, 200.0));
+        let words = words_from_chars(&quad, &char_spans("ab cd"));
+        assert_eq!(words.len(), 2);
+        assert!(
+            words[0].bbox.y0 > words[1].bbox.y1 - 1.0,
+            "first word should be lowest: {:?} {:?}",
+            words[0].bbox,
+            words[1].bbox
+        );
+        for word in &words {
+            assert!(
+                word.bbox.y1 <= 200.5 && word.bbox.y0 >= -0.5,
+                "{:?}",
+                word.bbox
+            );
+        }
+    }
+
+    #[test]
+    fn a_bullet_is_stripped_but_a_minus_sign_is_not() {
+        assert_eq!(strip_bullet("\u{2022} Milch"), "Milch");
+        assert_eq!(strip_bullet("  \u{2013} Brot"), "Brot");
+        assert_eq!(strip_bullet("- Eier"), "Eier");
+        assert_eq!(strip_bullet("-19,90 Gutschrift"), "-19,90 Gutschrift");
+        assert_eq!(strip_bullet("1. Punkt"), "1. Punkt");
+        assert_eq!(strip_bullet("-"), "-");
+    }
+
     #[test]
     fn words_split_on_space_spans() {
         let quad = Quad::from_rect(Rect::new(0.0, 0.0, 100.0, 10.0));
-        let spans = |s: &str| -> Vec<CharSpan> {
-            let n = s.chars().count() as f32;
-            s.chars()
-                .enumerate()
-                .map(|(i, c)| CharSpan {
-                    text: c.to_string(),
-                    x_center: (i as f32 + 0.5) / n,
-                    x_width: 1.0 / n,
-                    confidence: 0.8,
-                })
-                .collect()
-        };
-        let words = words_from_chars(&quad, &spans("ab cd"));
+        let words = words_from_chars(&quad, &char_spans("ab cd"));
         assert_eq!(words.len(), 2);
         assert_eq!(words[0].text, "ab");
         assert_eq!(words[1].text, "cd");

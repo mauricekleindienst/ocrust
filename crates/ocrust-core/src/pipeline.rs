@@ -521,10 +521,17 @@ impl Engine {
             }
             let det = &detections[det_idx];
             let quad = det.quad.ordered();
-            let words = if self.config.word_boxes {
-                layout::words_from_chars(&quad, &rec.chars)
-            } else {
+            // A crop the orientation classifier turned around was read against
+            // the direction its quad describes; when the page geometry was
+            // flipped too the two cancel out. Without this the word boxes of an
+            // upside-down label land at the other end of the line.
+            let read_backwards = (flip.abs() >= 90.0) != upside_down;
+            let words = if !self.config.word_boxes {
                 Vec::new()
+            } else if read_backwards {
+                layout::words_from_chars(&quad, &mirrored_chars(&rec.chars))
+            } else {
+                layout::words_from_chars(&quad, &rec.chars)
             };
             lines.push(Line {
                 text: text.to_string(),
@@ -585,6 +592,17 @@ fn flipped_share(angles: &[f32]) -> f32 {
     flipped as f32 / angles.len() as f32
 }
 
+/// Mirrors character positions of a crop that was read back to front.
+fn mirrored_chars(chars: &[crate::recognize::CharSpan]) -> Vec<crate::recognize::CharSpan> {
+    chars
+        .iter()
+        .map(|span| crate::recognize::CharSpan {
+            x_center: 1.0 - span.x_center,
+            ..span.clone()
+        })
+        .collect()
+}
+
 /// Maps a quad through a 180-degree page rotation.
 fn rotate180_quad(quad: &crate::geom::Quad, width: f32, height: f32) -> crate::geom::Quad {
     let mut points = quad.points;
@@ -642,6 +660,32 @@ mod tests {
                 score: 0.9,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_crop_read_back_to_front_has_its_characters_mirrored() {
+        use crate::recognize::CharSpan;
+        let chars = vec![
+            CharSpan {
+                text: "A".into(),
+                x_center: 0.1,
+                x_width: 0.2,
+                confidence: 0.9,
+            },
+            CharSpan {
+                text: "B".into(),
+                x_center: 0.9,
+                x_width: 0.2,
+                confidence: 0.8,
+            },
+        ];
+        let mirrored = mirrored_chars(&chars);
+        // Same characters in the same order, at the other end of the line.
+        assert_eq!(mirrored[0].text, "A");
+        assert!((mirrored[0].x_center - 0.9).abs() < 1e-6);
+        assert!((mirrored[1].x_center - 0.1).abs() < 1e-6);
+        assert!((mirrored[0].x_width - 0.2).abs() < 1e-6);
+        assert_eq!(mirrored[1].confidence, 0.8);
     }
 
     #[test]

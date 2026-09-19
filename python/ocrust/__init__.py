@@ -167,6 +167,26 @@ READABLE_SUFFIXES = frozenset(
 )  # fmt: skip
 
 
+def _glob(pattern: Path) -> list[Path]:
+    """Files matching a glob pattern, sorted.
+
+    Anchored at the last directory that is spelled out, so the magic part may
+    span directories: ``reports/**/*.pdf`` has to walk, and ``Path.glob`` only
+    does that when the pattern it is given carries the ``**`` itself.
+    """
+    parts = pattern.parts
+    magic = next(
+        (i for i, part in enumerate(parts) if any(ch in part for ch in "*?[")),
+        len(parts),
+    )
+    base = Path(*parts[:magic]) if magic else Path()
+    try:
+        return sorted(item for item in base.glob(str(Path(*parts[magic:]))) if item.is_file())
+    except (OSError, ValueError):
+        # An unreachable share, or a pattern the platform rejects.
+        return []
+
+
 def _expand_sources(sources: Iterable[Any]) -> list[Any]:
     """Expands directories and glob patterns, keeping everything else as is.
 
@@ -198,8 +218,7 @@ def _expand_sources(sources: Iterable[Any]) -> list[Any]:
                 )
             )
         elif not path.exists() and any(ch in str(path) for ch in "*?["):
-            base = path.parent if str(path.parent) else Path()
-            add_expanded(sorted(item for item in base.glob(path.name) if item.is_file()))
+            add_expanded(_glob(path))
         else:
             out.append(path)
     return out

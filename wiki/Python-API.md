@@ -97,6 +97,9 @@ ocr.read(open("page.png", "rb").read())
 ocr.read("scan.pdf", pages=[0, 2, 4])          # zero-based
 ```
 
+A selection that matches no page at all raises `ValueError` — an empty document
+would be indistinguishable from a blank scan.
+
 ## Scanning
 
 ### Progress
@@ -137,11 +140,12 @@ doc.search("EUR", whole_words=True)
 doc.search("Grüße", case=True)
 ```
 
-`search` returns a tuple of `Match(text, page, box, line)`. The box is the union
-of the *words* the hit covers, which is what makes highlighting possible; without
-word boxes (`word_boxes=False`) it is the line's box. Matching is
-case-insensitive by default, because OCR case is not reliable enough to search
-on.
+`search` returns a tuple of `Match(text, page, box, line)`. `page` is the page's
+own `index`, so a hit still names the right page of the source document when only
+some pages were scanned. The box is the union of the *words* the hit covers, which
+is what makes highlighting possible; without word boxes (`word_boxes=False`) it is
+the line's box. Matching is case-insensitive by default, because OCR case is not
+reliable enough to search on.
 
 ## Results
 

@@ -62,15 +62,18 @@ venv; `VENV=/path` puts it somewhere else.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p ocrust-core --lib                                   # no models needed
+cargo check -p ocrust-core --all-features                         # accelerator features
 OCRUST_MODELS_DIR=$PWD/models/ppocrv6 cargo test -p ocrust-core --test end_to_end
 pytest -q
 ruff check python tests scripts examples
 ruff format --check python tests scripts examples
 ```
 
-Do not run `cargo clippy --all-features`: the accelerator features (`cuda`,
-`coreml`, `directml`, …) need a matching ONNX Runtime build and do not compile
-without one. CI runs default features, and so should you.
+The accelerator features (`cuda`, `coreml`, `directml`, `tensorrt`, `rocm`,
+`openvino`, `webgpu`) compile anywhere — the providers are loaded from ONNX
+Runtime at run time, not linked here — so `cargo check -p ocrust-core
+--all-features` belongs in the list too, and CI runs it on Linux. Actually
+*using* a provider still needs a matching ONNX Runtime build.
 
 ## Test layout
 
@@ -80,7 +83,7 @@ without one. CI runs default features, and so should you.
 | `crates/ocrust-core/tests/end_to_end.rs` | the real pipeline against the bundled models | yes |
 | `tests/test_*.py` | Python API, CLI, formats, languages, PDF layer, TIFF export, the example app | yes |
 
-Current state: 158 Rust unit tests, 8 Rust end-to-end tests, 77 Python tests.
+Current state: 173 Rust unit tests, 8 Rust end-to-end tests, 91 Python tests.
 
 The unit tests deliberately need neither models nor ONNX Runtime, which is what
 keeps them fast enough to run on every save — and why CI can check three

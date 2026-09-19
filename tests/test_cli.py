@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +23,10 @@ def test_page_spec_parsing():
         _parse_pages("0")
     with pytest.raises(SystemExit):
         _parse_pages("5-2")
+    # A typo must not come back as a traceback.
+    for bad in ("1-x", "3-", "abc", "-4"):
+        with pytest.raises(SystemExit):
+            _parse_pages(bad)
 
 
 def test_expand_inputs_explains_what_is_missing(tmp_path):
@@ -121,6 +129,36 @@ def test_expand_inputs_handles_patterns_and_duplicates(tmp_path):
     files, missing = _expand_inputs([tmp_path / "*.tiff"])
     assert files == []
     assert [p for p, _ in missing] == [tmp_path / "*.tiff"]
+
+
+def test_a_reader_that_leaves_is_not_an_error():
+    """`ocrust doctor | head -0` must not end in a traceback."""
+    # Next to the interpreter running the tests first: a venv's script directory
+    # is not always on PATH.
+    beside = Path(sys.executable).with_name("ocrust")
+    exe = str(beside) if beside.exists() else shutil.which("ocrust")
+    if os.name != "posix" or exe is None:
+        pytest.skip("needs the installed console script and a POSIX shell")
+    result = subprocess.run(  # noqa: S602 - the command is built here, not by a user
+        f"{exe} doctor | head -0", shell=True, capture_output=True
+    )
+    assert b"Traceback" not in result.stderr, result.stderr.decode()
+    assert b"BrokenPipe" not in result.stderr, result.stderr.decode()
+
+
+def test_expand_inputs_walks_a_recursive_pattern(tmp_path):
+    """`ocrust scan "archive/**/*.pdf"` has to descend, not come back empty."""
+    nested = tmp_path / "2026" / "q1"
+    nested.mkdir(parents=True)
+    deep = nested / "invoice.pdf"
+    deep.write_bytes(b"%PDF-1.4\n")
+    (tmp_path / "top.pdf").write_bytes(b"%PDF-1.4\n")
+
+    files, missing = _expand_inputs([tmp_path / "**" / "*.pdf"])
+    # `**` matches zero directories too, so the top-level file comes along —
+    # exactly what a shell with globstar would have passed in.
+    assert files == sorted([deep, tmp_path / "top.pdf"])
+    assert missing == []
 
 
 def test_expand_inputs_reports_an_empty_directory(tmp_path):
