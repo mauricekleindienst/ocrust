@@ -320,8 +320,11 @@ def test_long_messages_are_folded_to_the_terminal(monkeypatch):
     assert cli._wrap("short", 8) == "short"
 
 
-def test_an_engine_that_cannot_be_built_prints_one_line(tmp_path, capsys):
+def test_an_engine_that_cannot_be_built_prints_one_line(tmp_path, capsys, monkeypatch):
     """An unbuildable engine used to come back as a Python traceback."""
+    # The model search falls back to the environment, so a developer with
+    # OCRUST_MODELS_DIR set would otherwise build an engine after all.
+    monkeypatch.delenv("OCRUST_MODELS_DIR", raising=False)
     document = tmp_path / "x.pdf"
     document.write_bytes(b"%PDF-1.4\n")
     code = main(["scan", str(document), "--models", str(tmp_path / "nowhere")])

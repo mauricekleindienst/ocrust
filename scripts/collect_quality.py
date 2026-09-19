@@ -24,11 +24,23 @@ from pathlib import Path
 import ocrust
 
 
+#: Longest run of ground-truth lines that one recognized line may account for.
+#:
+#: The layout joins the boxes that share a baseline into one line, so a table row
+#: comes back as one line while the ground truth lists it cell by cell. Three was
+#: enough until the corpus held a five-column form and a four-column price list,
+#: whose rows then scored as though most of each row had been invented.
+MAX_RUN = 5
+
+
 def candidates(truth_lines: list[str]) -> list[str]:
-    """Every ground-truth line, and every run of two or three neighbours."""
-    runs = list(truth_lines)
-    runs += [f"{a} {b}" for a, b in zip(truth_lines, truth_lines[1:])]
-    runs += [f"{a} {b} {c}" for a, b, c in zip(truth_lines, truth_lines[1:], truth_lines[2:])]
+    """Every ground-truth line, and every run of up to `MAX_RUN` neighbours."""
+    runs: list[str] = []
+    for length in range(1, MAX_RUN + 1):
+        runs += [
+            " ".join(truth_lines[start : start + length])
+            for start in range(len(truth_lines) - length + 1)
+        ]
     return runs
 
 

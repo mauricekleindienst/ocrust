@@ -161,6 +161,27 @@ DRAWING_LABELS = [
     "BLATT 1 VON 3",
 ]
 
+COLUMN_TEXT = [
+    "Der Stadtrat tagte",
+    "bis in die Nacht.",
+    "Die neuen Radwege",
+    "sollen 14 Kilometer",
+    "lang werden.",
+    "Die Kosten liegen",
+    "bei 3,4 Millionen.",
+    "Kritik kam von der",
+    "Handelskammer.",
+    "Der Ausbau beginnt",
+    "im Mai 2026.",
+    "Anwohner fordern",
+    "mehr Parkplaetze.",
+    "Ein Gutachten wird",
+    "im April vorgelegt.",
+    "Die Verwaltung",
+    "prueft die Plaene.",
+    "Der Beschluss gilt",
+]
+
 NEWSPAPER = [
     "Stadtrat beschliesst neue Radwege",
     "Die Sitzung dauerte bis in die Nacht.",
@@ -212,6 +233,21 @@ def text_page(
     column_width = (width - 2 * margin - (columns - 1) * margin // 2) // columns
     step = int(px * line_spacing)
     per_column = max(1, (height - 2 * margin) // step)
+    if columns > 1:
+        # Spread the lines over the columns. Filling each one to the bottom of
+        # the page first leaves a page with fewer lines than that single-column,
+        # which is not the layout that was asked for — and a layout nothing in
+        # the corpus would then cover.
+        per_column = min(per_column, -(-len(lines) // columns))
+
+    # A line wider than its column would be drawn over the next one, and a
+    # fixture like that measures nothing.
+    too_wide = [line for line in lines if font.getlength(line) > column_width - px]
+    if too_wide:
+        raise ValueError(
+            f"{len(too_wide)} line(s) do not fit a column of {column_width}px at "
+            f"{point_size}pt: {too_wide[0]!r}"
+        )
 
     drawn: list[str] = []
     for index, line in enumerate(lines):
@@ -340,6 +376,43 @@ def form_page(dpi: int = 200) -> PageSpec:
     for x in columns[1:]:
         draw.line([x, top - 6, x, top + (len(rows) + 1) * row_h - 6], fill=ink, width=1)
     return spec
+
+
+def price_list_page(dpi: int = 200) -> PageSpec:
+    """A page that is nothing but a price list, with no rules to go by.
+
+    The hardest shape for a layout that works from white space alone: there is no
+    prose to measure a word space against, so the gaps between the columns are
+    almost all the gaps there are.
+    """
+    width, height = int(8.27 * dpi), int(11.69 * dpi)
+    image = blank(width, height)
+    draw = ImageDraw.Draw(image)
+    font = load_font("sans", max(9, int(11 * dpi / 72)))
+    ink = (18, 18, 18)
+
+    rows = [
+        ["Artikel", "Menge", "Preis", "Summe"],
+        ["Schraube M4", "100", "0,12", "12,00"],
+        ["Mutter M4", "100", "0,08", "8,00"],
+        ["Scheibe A4", "200", "0,03", "6,00"],
+        ["Feder D12", "50", "0,45", "22,50"],
+        ["Bolzen M8", "25", "1,20", "30,00"],
+        ["Splint 3x20", "75", "0,15", "11,25"],
+        ["Lager 6002", "10", "3,40", "34,00"],
+        ["Dichtung 40", "60", "0,95", "57,00"],
+    ]
+    columns = [int(0.9 * dpi), int(2.2 * dpi), int(2.9 * dpi), int(3.6 * dpi)]
+    top = int(1.2 * dpi)
+    row_h = int(0.42 * dpi)
+
+    lines: list[str] = []
+    for r, row in enumerate(rows):
+        y = top + r * row_h
+        for x, cell in zip(columns, row):
+            draw.text((x, y), cell, font=font, fill=ink)
+            lines.append(cell)
+    return PageSpec(image, lines)
 
 
 def receipt_page(dpi: int = 200) -> PageSpec:
@@ -739,7 +812,7 @@ def build(root: Path, small: bool = False) -> Corpus:
             lines=spec.lines,
             notes="narrow thermal receipt, faint print",
         )
-        spec = text_page(NEWSPAPER * 3, dpi=200, font_kind="serif", point_size=10, columns=3)
+        spec = text_page(COLUMN_TEXT, dpi=200, font_kind="serif", point_size=10, columns=3)
         name = f"newspaper/news_{index:02d}.png"
         corpus.add(
             name,
@@ -747,6 +820,41 @@ def build(root: Path, small: bool = False) -> Corpus:
             category="newspaper",
             lines=spec.lines,
             notes="three-column layout",
+        )
+        # Two columns set on one baseline grid, widely leaded: every pair of
+        # lines has white space between it, so reading the page by rows is the
+        # mistake to catch here.
+        spec = text_page(
+            COLUMN_TEXT,
+            dpi=200,
+            font_kind="serif",
+            point_size=11,
+            line_spacing=2.1,
+            columns=2,
+        )
+        name = f"newspaper/twocol_{index:02d}.png"
+        corpus.add(
+            name,
+            corpus.save_image(name, spec.image),
+            category="newspaper",
+            lines=spec.lines,
+            notes="two columns on one baseline grid",
+        )
+        spec = price_list_page(dpi=200)
+        name = f"pricelists/pricelist_{index:02d}.png"
+        corpus.add(
+            name,
+            corpus.save_image(name, spec.image),
+            category="pricelist",
+            lines=spec.lines,
+            notes="a page that is nothing but an unruled price list",
+        )
+        corpus.add(
+            f"pricelists/pricelist_{index:02d}.pdf",
+            image_only_pdf([spec.image], dpi=200),
+            category="pricelist-pdf",
+            lines=spec.lines,
+            notes="the same price list as an image-only PDF",
         )
 
     print("rotated and skewed ...")
@@ -805,7 +913,10 @@ def build(root: Path, small: bool = False) -> Corpus:
         dpi=200,
         font_kind="mono",
         point_size=9,
-        width_in=3.0,
+        # Wide enough for the longest line: at three inches the invoice lines ran
+        # off the edge of the strip, and the ground truth claimed text that was
+        # not in the image.
+        width_in=4.2,
         height_in=24.0,
         margin_in=0.2,
     )
@@ -814,7 +925,7 @@ def build(root: Path, small: bool = False) -> Corpus:
         corpus.save_image("extremes/long_receipt.png", spec.image),
         category="long",
         lines=spec.lines,
-        notes="3 x 24 inch strip",
+        notes="4.2 x 24 inch strip",
     )
 
     print("multi-page documents ...")
