@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ocrust"
-version = "0.2.0"
+version = "0.2.1"
 description = "Fast document OCR for Python with a Rust core: images, TIFF and PDF, no system dependencies"
 readme = "README.md"
 requires-python = ">=3.9"
