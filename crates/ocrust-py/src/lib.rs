@@ -197,7 +197,8 @@ impl PyEngine {
     }
 
     /// Scans raw RGB pixels (`height * width * 3` bytes).
-    #[pyo3(signature = (data, width, height, name = "<array>"))]
+    #[pyo3(signature = (data, width, height, name = "<array>", pages = None, progress = None))]
+    #[allow(clippy::too_many_arguments)]
     fn scan_rgb(
         &self,
         py: Python<'_>,
@@ -205,6 +206,8 @@ impl PyEngine {
         width: u32,
         height: u32,
         name: &str,
+        pages: Option<Vec<usize>>,
+        progress: Option<Py<PyAny>>,
     ) -> PyResult<String> {
         let expected = width as usize * height as usize * 3;
         if data.len() != expected {
@@ -219,7 +222,9 @@ impl PyEngine {
             image,
             name: name.to_string(),
         };
-        self.scan_source(py, source, None, None)
+        // An array is one page, but a caller who asks for page 7 of it deserves
+        // to hear so rather than be handed page 1.
+        self.scan_source(py, source, pages, progress)
     }
 
     /// Scans several files, in parallel, and returns one JSON string per input.

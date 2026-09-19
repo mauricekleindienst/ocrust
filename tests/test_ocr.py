@@ -161,3 +161,18 @@ def test_cli_prints_on_a_console_that_is_not_utf8(engine):
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
     assert b"UnicodeEncodeError" not in result.stderr
     assert b"Vietnamese" in result.stdout
+
+
+def test_page_selection_applies_to_in_memory_images(engine, invoice_pdf):
+    """An array is one page, and asking for another one says so.
+
+    `pages` used to be dropped on the floor for numpy and PIL input, which made
+    `scan(array, pages=[7])` look like a successful scan of page 1.
+    """
+    numpy = __import__("numpy")
+    page = engine.scan(invoice_pdf, pages=[0]).pages[0]
+    array = numpy.zeros((page.height, page.width, 3), dtype=numpy.uint8)
+
+    assert len(engine.scan(array, pages=[0]).pages) == 1
+    with pytest.raises(ValueError, match="no page 8"):
+        engine.scan(array, pages=[7])

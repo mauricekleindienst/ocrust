@@ -356,7 +356,7 @@ class Ocr:
         image = _coerce_image(source)
         if image is not None:
             data, width, height = image
-            raw = self._engine.scan_rgb(data, width, height, name or "<image>")
+            raw = self._engine.scan_rgb(data, width, height, name or "<image>", page_list, progress)
         elif isinstance(source, (bytes, bytearray, memoryview)):
             raw = self._engine.scan_bytes(bytes(source), name or "<bytes>", page_list, progress)
         elif isinstance(source, (str, os.PathLike)):

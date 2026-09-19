@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+Accuracy is unchanged: the corpus run reproduces mean CER 0.040, median 0.006,
+WER 0.120 and word recall 0.892 file for file, and a drawing's recognized text is
+byte-identical to 0.1.0's. Everything below is a bug that produced a wrong box, a
+wrong page, a crash or a build that would not compile.
+
 ### Fixed
 
 - **GPU builds did not compile.** `--features cuda`, `coreml` or `directml`
@@ -47,6 +52,9 @@
 - **`lang="zh_hant"` silently meant Simplified Chinese.** A tag written with an
   underscore is now the same tag as one written with a hyphen, so it no longer
   falls through to its primary subtag.
+- **`pages` was ignored for numpy and PIL input.** `scan(array, pages=[7])` read
+  the array as page 1 and reported success; the selection is now honoured there
+  too, as is `progress`.
 - **`Match.page` is the page's own index**, so a hit found while scanning a subset
   of a PDF reports the page number of the source document. `Document.to_dict()` no
   longer raises on a document built in Python rather than by the engine.
