@@ -295,17 +295,28 @@ impl Engine {
             },
             None => self.config.ingest.clone(),
         };
-        let raw_pages = ingest::load(source, &ingest_config)?;
-        let total = raw_pages.len();
+        let mut reader = ingest::open(source, &ingest_config)?;
+        let total = reader.len();
 
+        // Pages are decoded in batches of `page_workers` and dropped as soon as
+        // they are read, so peak memory follows the number of workers rather
+        // than the length of the document: a 120-page PDF used to hold 1.8 GB of
+        // pixels before the first line was recognized.
+        let batch_size = self.config.page_workers.max(1);
         let mut doc = Document::new(source.name());
-        if self.config.page_workers > 1 && total > 1 {
-            // Pages are independent; run them across the rayon pool.
-            let results: Vec<Result<Page>> = raw_pages
-                .into_par_iter()
-                .map(|raw| self.scan_page(raw))
-                .collect();
-            for page in results {
+        let mut batch: Vec<RawPage> = Vec::with_capacity(batch_size);
+        let mut scan_batch = |batch: &mut Vec<RawPage>, doc: &mut Document| -> Result<()> {
+            let taken = std::mem::take(batch);
+            let scanned: Vec<Result<Page>> = if taken.len() > 1 {
+                // Pages are independent; run them across the rayon pool.
+                taken
+                    .into_par_iter()
+                    .map(|raw| self.scan_page(raw))
+                    .collect()
+            } else {
+                taken.into_iter().map(|raw| self.scan_page(raw)).collect()
+            };
+            for page in scanned {
                 let page = page?;
                 progress(Progress {
                     page: page.index,
@@ -314,18 +325,18 @@ impl Engine {
                 });
                 doc.pages.push(page);
             }
-            doc.pages.sort_by_key(|p| p.index);
-        } else {
-            for raw in raw_pages {
-                let page = self.scan_page(raw)?;
-                progress(Progress {
-                    page: page.index,
-                    total_pages: total,
-                    lines: page.lines().count(),
-                });
-                doc.pages.push(page);
+            Ok(())
+        };
+
+        reader.for_each_page(&mut |raw| {
+            batch.push(raw);
+            if batch.len() >= batch_size {
+                scan_batch(&mut batch, &mut doc)?;
             }
-        }
+            Ok(())
+        })?;
+        scan_batch(&mut batch, &mut doc)?;
+        doc.pages.sort_by_key(|p| p.index);
         doc.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(doc)
     }
@@ -401,6 +412,42 @@ impl Engine {
         crate::export::overlay::plan(pdf, options)
     }
 
+    /// Scans `source` and returns a searchable PDF: the page pictures with an
+    /// invisible text layer over them.
+    ///
+    /// Each page is compressed as soon as it is read and the pixels are let go,
+    /// so the job holds one page of pixels and the finished JPEGs rather than
+    /// every page at full size — on a 40-page scan that is tens of megabytes
+    /// instead of half a gigabyte.
+    #[cfg(feature = "pdf")]
+    pub fn to_searchable_pdf(
+        &self,
+        source: &Source,
+        opts: &crate::export::pdf::PdfOptions,
+    ) -> Result<(Vec<u8>, Document)> {
+        let started = Instant::now();
+        let mut doc = Document::new(source.name());
+        let mut encoded = Vec::new();
+        ingest::open(source, &self.config.ingest)?.for_each_page(&mut |raw| {
+            let options = PageOptions {
+                // Needed here regardless of how the engine is configured.
+                keep_image: true,
+                ..PageOptions::from_config(&self.config)
+            };
+            let mut page = self.scan_page_inner(raw, options)?;
+            let image = page
+                .image
+                .take()
+                .ok_or_else(|| Error::config("the page was scanned without keeping its picture"))?;
+            encoded.push(crate::export::pdf::encode_page(&image, opts.jpeg_quality)?);
+            doc.pages.push(page);
+            Ok(())
+        })?;
+        doc.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let bytes = crate::export::pdf::build_with_encoded(&doc, &encoded, opts)?;
+        Ok((bytes, doc))
+    }
+
     /// Scans `source` and returns its pages as one multi-page TIFF, together
     /// with the OCR result.
     ///
@@ -409,27 +456,28 @@ impl Engine {
     pub fn to_tiff(
         &self,
         source: &Source,
-        color: crate::export::tiff::TiffColor,
+        opts: crate::export::tiff::TiffOptions,
     ) -> Result<(Vec<u8>, Document)> {
         let started = Instant::now();
         let mut doc = Document::new(source.name());
-        // Page images are needed here regardless of how the engine is configured.
-        for raw in ingest::load(source, &self.config.ingest)? {
+        let mut writer = crate::export::tiff::Writer::new(opts)?;
+        // Each page is encoded and let go before the next is read, so a 100-page
+        // conversion costs one page of pixels rather than a hundred.
+        ingest::open(source, &self.config.ingest)?.for_each_page(&mut |raw| {
             let options = PageOptions {
+                // Needed here regardless of how the engine is configured.
                 keep_image: true,
                 ..PageOptions::from_config(&self.config)
             };
-            doc.pages.push(self.scan_page_inner(raw, options)?);
-        }
+            let mut page = self.scan_page_inner(raw, options)?;
+            if let Some(image) = page.image.take() {
+                writer.add(&image)?;
+            }
+            doc.pages.push(page);
+            Ok(())
+        })?;
         doc.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-        let pages: Vec<image::RgbImage> = doc
-            .pages
-            .iter()
-            .filter_map(|p| p.image.as_ref().map(|i| i.as_ref().clone()))
-            .collect();
-        let bytes = crate::export::tiff::write_pages(&pages, color)?;
-        Ok((bytes, doc))
+        Ok((writer.finish()?, doc))
     }
 
     /// Rotates a sideways page upright, when the box geometry says so.

@@ -53,7 +53,7 @@ Source (path | bytes | RGB frame)
 
 | Module | Responsibility |
 |---|---|
-| `ingest` | sniff the container, decode images, walk TIFF pages, rasterize PDFs |
+| `ingest` | sniff the container, then hand out pages one at a time: decode images, walk a TIFF's directories, rasterize a PDF page by page |
 | `preprocess` | skew estimation, inversion, rescaling |
 | `detect` | DB inference and post-processing into text-line quads, tiling |
 | `classify` | 180° line-orientation classification |

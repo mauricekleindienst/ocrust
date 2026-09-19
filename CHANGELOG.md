@@ -7,6 +7,31 @@ WER 0.120 and word recall 0.892 file for file, and a drawing's recognized text i
 byte-identical to 0.1.0's. Everything below is a bug that produced a wrong box, a
 wrong page, a crash or a build that would not compile.
 
+### Changed
+
+- **Peak memory no longer grows with the length of a document.** `ingest` used to
+  rasterize every page into one list before the first line was recognized, so a
+  scan cost about 10 MB per page: measured on a synthetic A4 invoice at 200 dpi,
+  413 MB for one page, 999 MB for 40 and 1811 MB for 120, which is more than a
+  laptop has by page 400. Pages are now decoded on demand and dropped as they are
+  read — a PDF is parsed once and rendered page by page, sharing one render cache;
+  a TIFF's directories are walked forward; the searchable-PDF path compresses each
+  page as it is scanned and keeps the JPEG; the TIFF path encodes each page into
+  the archive and lets it go. The same three scans now cost 233 MB, 249 MB and
+  289 MB, and the PDF and TIFF conversions 260 MB each.
+
+  ONNX Runtime is also told not to keep an allocation arena or plan tensor reuse.
+  Both assume the tensor shapes repeat; pages are all different sizes, so the
+  arena accumulates blocks it never reuses. That is the difference between 584 MB
+  and 249 MB over a 40-page scan, for about 10% more time at one page worker and
+  none at four (where it is 935 MB against 2010 MB). `Ocr(memory="fast")` or
+  `--memory fast` buys the time back. Recognized text is identical either way.
+
+- **`ocrust tiff` compresses by default** (LZW, understood by every TIFF reader
+  since 1992). A 40-page colour archive was 442 MB and is now 3.7 MB, pixel for
+  pixel identical. `--compression deflate` packs a little tighter,
+  `--compression none` restores the old behaviour.
+
 ### Added
 
 - **Tables.** A block whose cells line up into columns comes back as a table:
