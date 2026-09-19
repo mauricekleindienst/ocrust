@@ -15,7 +15,9 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import sys
+import textwrap
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -31,11 +33,113 @@ _EXTENSIONS = {
     "csv": "csv",
 }
 
+_ANSI = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
+
+
+def _colourful(stream: object) -> bool:
+    """Whether to write escape codes to `stream`.
+
+    A pipe, a log file and `NO_COLOR` all mean no; `FORCE_COLOR` overrides the
+    lot, which is what a CI job that renders ANSI needs.
+    """
+    if os.environ.get("FORCE_COLOR") not in (None, "", "0"):
+        return True
+    if os.environ.get("NO_COLOR") is not None or os.environ.get("TERM") == "dumb":
+        return False
+    try:
+        return bool(stream.isatty())  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+
+def _paint(text: str, *styles: str, stream: object | None = None) -> str:
+    """`text` in `styles`, or unchanged when nobody is there to see them."""
+    target = stream if stream is not None else sys.stderr
+    if not styles or not _colourful(target):
+        return text
+    codes = ";".join(_ANSI[name] for name in styles)
+    return f"\033[{codes}m{text}\033[0m"
+
+
+def _width() -> int:
+    """Usable line width: the terminal's, kept between sane bounds."""
+    return max(48, min(shutil.get_terminal_size((100, 24)).columns, 100))
+
+
+def _wrap(text: str, indent: int) -> str:
+    """`text` folded to the terminal, with every line after the first indented."""
+    return textwrap.fill(
+        text,
+        width=_width(),
+        subsequent_indent=" " * indent,
+        initial_indent=" " * indent,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )[indent:]
+
+
+def _fail(message: str) -> None:
+    """One message, on stderr, the way every other command-line tool does it.
+
+    Wrapped: the engine's own errors list things — the 35 language codes it
+    knows, the places it looked for a model — and a 350-column line is not a
+    message, it is a wall.
+    """
+    print(f"{_paint('ocrust:', 'red', 'bold')} {_wrap(message, 8)}", file=sys.stderr)
+
+
+def _note(message: str) -> None:
+    """A quiet aside: part of the report, not the result."""
+    print(_paint(message, "dim"), file=sys.stderr)
+
+
+def _duration(ms: float) -> str:
+    """Milliseconds for a page, seconds once it is a document."""
+    if ms < 1000:
+        return f"{ms:.0f} ms"
+    if ms < 60_000:
+        return f"{ms / 1000:.1f} s"
+    return f"{int(ms // 60_000)} min {ms % 60_000 / 1000:.0f} s"
+
+
+def _size(bytes_: int) -> str:
+    return f"{bytes_ / 1e6:.1f} MB" if bytes_ >= 1e6 else f"{bytes_ / 1e3:.0f} kB"
+
+
+def _count(n: int, noun: str) -> str:
+    """`1 page`, `2 pages` — nobody writes `1 page(s)` on purpose."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
+def _confidence(value: float) -> str:
+    """Mean confidence, coloured by how much it deserves trust."""
+    text = f"{value * 100:.1f}% confident"
+    if value >= 0.95:
+        return _paint(text, "green")
+    return _paint(text, "yellow" if value >= 0.8 else "red")
+
+
+def _arrow(source: object, target: object) -> str:
+    return f"{source} {_paint('->', 'dim')} {_paint(str(target), 'bold')}"
+
+
+_EXAMPLES = """examples:
+  ocrust scan invoice.pdf                  the text, on stdout
+  ocrust scan archive/ -f markdown -o out/ a folder, one Markdown file each
+  ocrust scan book.pdf --pages 1,3-5       just those pages, 1-based
+  ocrust ocr scan.pdf                      the same PDF, now searchable
+  ocrust pdf photo.jpg                     a photo, as a searchable PDF
+  ocrust tiff scan.pdf --gray              an archive-ready TIFF
+  ocrust doctor                            what is installed, what is missing
+"""
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ocrust",
         description="Fast document OCR: images, multi-page TIFF and PDF.",
+        epilog=_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"ocrust {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -163,7 +267,7 @@ def _bad_argument(message: str) -> SystemExit:
     `SystemExit("text")` prints the text but exits 1, the code reserved for a
     file that failed to scan.
     """
-    print(f"ocrust: {message}", file=sys.stderr)
+    _fail(message)
     return SystemExit(2)
 
 
@@ -355,10 +459,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     args.inputs, missing = _expand_inputs(args.inputs)
     if missing:
         for path, reason in missing:
-            print(f"ocrust: {path}: {reason}", file=sys.stderr)
+            _fail(f"{path}: {reason}")
         return 2
     if not args.inputs:
-        print("ocrust: nothing to read", file=sys.stderr)
+        _fail("nothing to read")
         return 2
 
     args._resolved_workers = _workers_for(args, len(args.inputs))
@@ -366,7 +470,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     many = len(args.inputs) > 1
     if many and args.output and args.output.suffix:
-        print("ocrust: --output must be a directory when reading several files", file=sys.stderr)
+        _fail("--output must be a directory when reading several files")
         return 2
     # A path without a suffix is a directory: `-o out` writes out/<name>.<ext>,
     # so switching --format does not overwrite the previous run's output.
@@ -374,22 +478,33 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if write_to_dir:
         args.output.mkdir(parents=True, exist_ok=True)
 
+    live = _colourful(sys.stderr)
+
     def report(page: int, total: int, lines: int) -> None:
-        print(f"\r  page {page + 1}/{total}, {lines} line(s)", end="", file=sys.stderr, flush=True)
+        text = f"page {page + 1}/{total}, {lines} line(s)"
+        if live:
+            # Rewrite one line in place, and clear whatever was longer before it.
+            print(f"\r  {_paint(text, 'dim')}\033[K", end="", file=sys.stderr, flush=True)
+        else:
+            # A log or a pipe: `\r` would run the whole run together on one line.
+            print(f"  {text}", file=sys.stderr, flush=True)
 
     progress = report if getattr(args, "progress", False) else None
 
     failures = 0
+    total_pages = total_lines = 0
+    total_ms = 0.0
     for path in args.inputs:
         try:
             doc = engine.scan(path, pages=pages, progress=progress)
         except (OcrustError, OSError, ValueError) as exc:
-            print(f"ocrust: {path}: {exc}", file=sys.stderr)
+            _fail(f"{path}: {exc}")
             failures += 1
             continue
 
         if progress is not None:
-            print("", file=sys.stderr)  # close the progress line
+            # Leave the line to the summary that follows.
+            print("\r\033[K" if live else "", end="" if live else "\n", file=sys.stderr)
 
         rendered = doc.render(args.format)
         if args.output is None:
@@ -402,40 +517,54 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 target = target / f"{path.stem}.{_EXTENSIONS[args.format]}"
             _write(target, rendered, retries=_io_retries(args))
             if not args.quiet:
-                print(f"{path} -> {target}", file=sys.stderr)
+                print(_arrow(path, target), file=sys.stderr)
 
+        total_pages += len(doc.pages)
+        total_lines += len(doc.lines)
+        total_ms += doc.elapsed_ms
         if not args.quiet:
             confidence = doc.confidence
-            print(
-                f"  {len(doc.pages)} page(s), {len(doc.lines)} line(s), "
-                f"confidence {confidence * 100:.1f}%, {doc.elapsed_ms:.0f} ms"
+            body = (
+                f"{_count(len(doc.pages), 'page')}, {_count(len(doc.lines), 'line')}, "
+                f"{_confidence(confidence)}, {_duration(doc.elapsed_ms)}"
                 if confidence is not None
-                else f"  {len(doc.pages)} page(s), no text found, {doc.elapsed_ms:.0f} ms",
-                file=sys.stderr,
+                else f"{_count(len(doc.pages), 'page')}, no text found, {_duration(doc.elapsed_ms)}"
             )
+            print(f"  {body}", file=sys.stderr)
+
+    if not args.quiet and len(args.inputs) > 1:
+        done = len(args.inputs) - failures
+        total = (
+            f"{_count(done, 'file')}, {_count(total_pages, 'page')}, "
+            f"{_count(total_lines, 'line')}, {_duration(total_ms)}"
+        )
+        if failures:
+            total += f", {_paint(_count(failures, 'failure'), 'red')}"
+        print(_paint("done: ", "bold") + total, file=sys.stderr)
     return 1 if failures else 0
 
 
 def _cmd_pdf(args: argparse.Namespace) -> int:
     if not args.input.exists():
-        print(f"ocrust: no such file: {args.input}", file=sys.stderr)
+        _fail(f"no such file: {args.input}")
         return 2
     engine = Ocr(models_dir=args.models, device=args.device, keep_page_images=True)
     try:
         data = engine.searchable_pdf(args.input, dpi=args.dpi, jpeg_quality=args.quality)
     except (OcrustError, OSError, ValueError) as exc:
-        print(f"ocrust: {exc}", file=sys.stderr)
+        _fail(str(exc))
         return 1
     target = args.output or args.input.with_suffix(".ocr.pdf")
-    _write(target, data)
+    _write(target, data, retries=_io_retries(args))
     if not args.quiet:
-        print(f"{args.input} -> {target} ({len(data) / 1e6:.1f} MB)", file=sys.stderr)
+        print(_arrow(args.input, target), file=sys.stderr)
+        print(f"  {_size(len(data))}", file=sys.stderr)
     return 0
 
 
 def _cmd_ocr(args: argparse.Namespace) -> int:
     if not args.input.exists():
-        print(f"ocrust: no such file: {args.input}", file=sys.stderr)
+        _fail(f"no such file: {args.input}")
         return 2
     data = args.input.read_bytes()
     if not data.startswith(b"%PDF"):
@@ -476,17 +605,20 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
             compress=not args.no_compress,
         )
     except (OcrustError, OSError, ValueError) as exc:
-        print(f"ocrust: {exc}", file=sys.stderr)
+        _fail(str(exc))
         return 1
 
     target = args.output or args.input.with_suffix(".ocr.pdf")
-    _write(target, pdf)
+    _write(target, pdf, retries=_io_retries(args))
     if not args.quiet:
+        print(_arrow(args.input, target), file=sys.stderr)
         print(
-            f"{args.input} -> {target}: {report['pages_with_layer']} of {report['pages']} page(s) "
-            f"got a text layer, {report['pages_skipped']} skipped, {report['lines']} line(s)",
+            f"  {report['pages_with_layer']} of {_count(report['pages'], 'page')} layered, "
+            f"{report['pages_skipped']} skipped, {_count(report['lines'], 'line')}",
             file=sys.stderr,
         )
+        if report["pages_skipped"] == report["pages"] and report["pages"]:
+            _note("  every page already had text: --force writes a layer anyway")
     if report["unmappable_chars"]:
         print(
             f"note: {report['unmappable_chars']} character(s) are outside WinAnsi and were "
@@ -498,26 +630,24 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
 
 def _cmd_tiff(args: argparse.Namespace) -> int:
     if not args.input.exists():
-        print(f"ocrust: no such file: {args.input}", file=sys.stderr)
+        _fail(f"no such file: {args.input}")
         return 2
     engine = Ocr(models_dir=args.models, pdf_dpi=args.dpi, lang=args.lang)
     try:
         data, doc = engine.to_tiff(args.input, gray=args.gray)
     except (OcrustError, OSError, ValueError) as exc:
-        print(f"ocrust: {exc}", file=sys.stderr)
+        _fail(str(exc))
         return 1
     target = args.output or args.input.with_suffix(".ocr.tiff")
-    _write(target, data)
+    _write(target, data, retries=_io_retries(args))
     if not args.quiet:
-        print(
-            f"{args.input} -> {target}: {len(doc.pages)} page(s), {len(data) / 1e6:.1f} MB",
-            file=sys.stderr,
-        )
+        print(_arrow(args.input, target), file=sys.stderr)
+        print(f"  {_count(len(doc.pages), 'page')}, {_size(len(data))}", file=sys.stderr)
     if args.sidecar:
         sidecar = target.with_suffix("." + _EXTENSIONS[args.sidecar])
         _write(sidecar, doc.render(args.sidecar), retries=_io_retries(args))
         if not args.quiet:
-            print(f"{args.input} -> {sidecar}", file=sys.stderr)
+            print(_arrow(args.input, sidecar), file=sys.stderr)
     return 0
 
 
@@ -531,7 +661,7 @@ def _cmd_languages(args: argparse.Namespace) -> int:
         try:
             engine = Ocr(models_dir=args.models)
         except OcrustError as exc:
-            print(f"ocrust: {exc}", file=sys.stderr)
+            _fail(str(exc))
             return 1
         entries = list(engine.languages)
         label = f"covered by the installed model ({engine.charset_size} characters)"
@@ -540,17 +670,20 @@ def _cmd_languages(args: argparse.Namespace) -> int:
         print(json.dumps(entries, indent=2))
         return 0
 
-    print(f"{len(entries)} language(s) {label}:\n")
+    out = sys.stdout
+    print(f"{_paint(str(len(entries)), 'bold', stream=out)} language(s) {label}:\n")
     by_script: dict[str, list[str]] = {}
     for entry in entries:
         by_script.setdefault(str(entry["script"]), []).append(f"{entry['code']} ({entry['name']})")
     for script in sorted(by_script):
-        print(f"  {script:<11} {', '.join(sorted(by_script[script]))}")
+        names = ", ".join(sorted(by_script[script]))
+        label_text = f"{script:<11}"
+        print(f"  {_paint(label_text, 'cyan', stream=out)} {_wrap(names, 14)}")
 
     if not args.all:
         near = Ocr(models_dir=args.models).partial_languages(0.8)
         if near:
-            print("\nnearly covered (a few characters missing):")
+            print(f"\n{_paint('nearly covered', 'yellow', stream=out)} (a few characters missing):")
             for entry in near:
                 print(
                     f"  {entry['code']} ({entry['name']}): {entry['ratio'] * 100:.0f}%"
@@ -565,7 +698,7 @@ def _cmd_install_models(args: argparse.Namespace) -> int:
     try:
         paths = install_models()
     except Exception as exc:
-        print(f"ocrust: {exc}", file=sys.stderr)
+        _fail(str(exc))
         return 1
     if args.json:
         print(json.dumps(paths, indent=2))
@@ -580,21 +713,36 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(info, indent=2, default=str))
         return 0
-    print(f"ocrust            {info['ocrust']}")
-    print(f"python            {info['python']} on {info['platform']}")
-    print(f"onnxruntime       {info.get('onnxruntime_version') or 'not installed'}")
-    print(f"  library         {info.get('onnxruntime_dylib') or 'NOT FOUND'}")
-    print(f"  loaded          {info.get('onnxruntime_loaded')}")
-    print(f"models dir        {info.get('models_dir') or 'not set'}")
-    print(f"models cache      {info.get('models_cache_dir')}")
+    out = sys.stdout
+
+    def row(label: str, value: object, indent: int = 0) -> None:
+        pad = "  " * indent
+        name = _paint(f"{pad}{label}".ljust(18), "dim", stream=out)
+        print(f"{name}{value}", file=out)
+
+    row("ocrust", _paint(str(info["ocrust"]), "bold", stream=out))
+    row("python", f"{info['python']} on {info['platform']}")
+    missing = _paint("not installed", "red", stream=out)
+    row("onnxruntime", info.get("onnxruntime_version") or missing)
+    row("library", info.get("onnxruntime_dylib") or _paint("NOT FOUND", "red", stream=out), 1)
+    row("loaded", info.get("onnxruntime_loaded"), 1)
+    row("models dir", info.get("models_dir") or "not set")
+    row("models cache", info.get("models_cache_dir"))
     models = info.get("models")
     if isinstance(models, dict):
         for key, value in models.items():
-            print(f"  {key:<14} {value or '-'}")
+            row(key, value or "-", 1)
     else:
-        print(f"  models          {models}")
+        row("models", models, 1)
     ready = info.get("onnxruntime_dylib") and isinstance(models, dict)
-    print("\nstatus: ready" if ready else "\nstatus: not ready — see the hints above")
+    print(file=out)
+    if ready:
+        print(f"status: {_paint('ready', 'green', 'bold', stream=out)}", file=out)
+    else:
+        print(
+            f"status: {_paint('not ready', 'red', 'bold', stream=out)} — see the hints above",
+            file=out,
+        )
     return 0 if ready else 1
 
 
@@ -602,10 +750,11 @@ def _cmd_models(args: argparse.Namespace) -> int:
     try:
         engine = Ocr(models_dir=args.models_dir)
     except OcrustError as exc:
-        print(f"ocrust: {exc}", file=sys.stderr)
+        _fail(str(exc))
         return 1
+    out = sys.stdout
     for key, value in engine.models.items():
-        print(f"{key:<12} {value or '-'}")
+        print(f"{_paint(f'{key:<12}', 'dim', stream=out)} {value or '-'}")
     return 0
 
 
@@ -633,15 +782,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         # the interpreter, too late to catch.
         sys.stdout.flush()
         return code
+    except OcrustError as exc:
+        # Building the engine fails before the command itself runs: a model that
+        # is not there, a language the model cannot spell, an unknown device. One
+        # line is what a command-line tool owes the reader, not a traceback.
+        _fail(str(exc))
+        return 1
     except KeyboardInterrupt:
-        print("\nocrust: interrupted", file=sys.stderr)
+        print(file=sys.stderr)
+        _fail("interrupted")
         return 130
     except BrokenPipeError:
         # `ocrust scan book.pdf | head -1`: the reader left, which is its right.
         # Python still holds a dead stdout and would print "Exception ignored"
-        # while flushing it at exit, so it is pointed at the void first.
-        # A stdout without a file descriptor (a test harness, say) has nothing
-        # to redirect, and nothing to flush either.
+        # while flushing it at exit, so it is pointed at the void first. A stdout
+        # without a file descriptor (a test harness, say) has nothing to redirect.
         with contextlib.suppress(OSError, ValueError):
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
