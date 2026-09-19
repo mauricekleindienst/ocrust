@@ -377,6 +377,7 @@ mod tests {
             bbox: r,
             angle: 0.0,
             det_score: 0.8,
+            margin: 0.0,
             words,
         }
     }
@@ -423,6 +424,7 @@ mod tests {
                 },
             ],
             elapsed_ms: 12.0,
+            quality: None,
             image: None,
         });
         d.elapsed_ms = 20.0;
@@ -469,6 +471,7 @@ mod tests {
                 ],
             }],
             elapsed_ms: 1.0,
+            quality: None,
             image: None,
         });
         let md = to_markdown(&d);

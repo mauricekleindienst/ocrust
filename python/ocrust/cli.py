@@ -165,12 +165,17 @@ def _count(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
-def _confidence(value: float) -> str:
-    """Mean confidence, coloured by how much it deserves trust."""
-    text = f"{value * 100:.1f}% confident"
-    if value >= 0.95:
+def _quality(value: float) -> str:
+    """The page-quality estimate, coloured by what it says.
+
+    The thresholds come from the evaluation corpus, where a clean page lands
+    around 0.97 and the worst around 0.89 — a flat "95% and up is green" would
+    be green for everything, which is the trap the old confidence line fell into.
+    """
+    text = f"quality {value * 100:.0f}%"
+    if value >= 0.96:
         return _paint(text, "green")
-    return _paint(text, "amber" if value >= 0.8 else "red")
+    return _paint(text, "amber" if value >= 0.92 else "red")
 
 
 def _arrow(source: object, target: object) -> str:
@@ -578,11 +583,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         total_lines += len(doc.lines)
         total_ms += doc.elapsed_ms
         if not args.quiet:
-            confidence = doc.confidence
+            quality = doc.quality
             body = (
                 f"{_count(len(doc.pages), 'page')}, {_count(len(doc.lines), 'line')}, "
-                f"{_confidence(confidence)}, {_duration(doc.elapsed_ms)}"
-                if confidence is not None
+                f"{_quality(quality)}, {_duration(doc.elapsed_ms)}"
+                if quality is not None
                 else f"{_count(len(doc.pages), 'page')}, no text found, {_duration(doc.elapsed_ms)}"
             )
             print(f"  {body}", file=sys.stderr)
