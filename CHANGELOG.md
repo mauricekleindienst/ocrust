@@ -75,6 +75,13 @@ wrong page, a crash or a build that would not compile.
   reported as a model error instead of panicking inside the decoder. A batch that
   comes back the wrong size is an error instead of silently empty lines, and a
   class the dictionary does not cover no longer widens the character before it.
+- **`ocrust install-models` failed wherever a `GITHUB_TOKEN` exists.** The token
+  is sent to GitHub hosts so that a private model repository works — but a token
+  that does not cover *this* repository makes `raw.githubusercontent.com` answer
+  404 for a public file, which is every GitHub Actions job and many shells. An
+  authenticated download that fails is now retried without the token; the
+  authenticated error is still the one reported when both fail. Verified end to
+  end: 31.7 MB fetched and checksum-verified.
 - Model manifests are validated before anything is written: a bundle or file name
   has to be a plain name (a `../` in one would have written outside the model
   cache), the checksum has to be 64 hex digits, and a download stops at the size

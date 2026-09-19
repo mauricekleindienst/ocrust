@@ -393,9 +393,37 @@ fn download_any(urls: &[String], size: Option<u64>) -> Result<Vec<u8>> {
 
 #[cfg(feature = "download")]
 fn download_one(url: &str, size: Option<u64>) -> Result<Vec<u8>> {
+    with_token_fallback(github_token(url), |token| fetch(url, token, size))
+}
+
+/// Runs `attempt` with the token, and again without it if that failed.
+///
+/// A token that does not cover *this* repository turns a public
+/// `raw.githubusercontent.com` URL into a 404, and an ambient `GITHUB_TOKEN` is
+/// the normal state of affairs inside CI — so an authenticated failure must not
+/// be the end of it. The authenticated error is the one worth reporting when
+/// both attempts fail, because that is the one a private repository would give.
+fn with_token_fallback<T>(
+    token: Option<String>,
+    mut attempt: impl FnMut(Option<&str>) -> Result<T>,
+) -> Result<T> {
+    match token {
+        None => attempt(None),
+        Some(token) => match attempt(Some(&token)) {
+            Ok(value) => Ok(value),
+            Err(authenticated) => {
+                log::debug!("retrying the download without the GitHub token");
+                attempt(None).map_err(|_| authenticated)
+            }
+        },
+    }
+}
+
+#[cfg(feature = "download")]
+fn fetch(url: &str, token: Option<&str>, size: Option<u64>) -> Result<Vec<u8>> {
     use std::io::Read;
     let mut request = ureq::get(url);
-    if let Some(token) = github_token(url) {
+    if let Some(token) = token {
         request = request.header("Authorization", &format!("Bearer {token}"));
     }
     let mut response = request
@@ -493,6 +521,39 @@ mod tests {
     }
 
     #[cfg(feature = "download")]
+    #[test]
+    fn a_download_that_fails_with_a_token_is_retried_without_one() {
+        // The case that broke `install-models`: a `GITHUB_TOKEN` for another
+        // repository, and a public raw URL that answers 404 to it.
+        let mut tries: Vec<Option<String>> = Vec::new();
+        let got = with_token_fallback(Some("ghp_other_repo".into()), |token| {
+            tries.push(token.map(str::to_string));
+            match token {
+                Some(_) => Err(Error::Download("404".into())),
+                None => Ok("the file"),
+            }
+        });
+        assert_eq!(got.unwrap(), "the file");
+        assert_eq!(tries, vec![Some("ghp_other_repo".to_string()), None]);
+
+        // When both fail, the authenticated error is the one reported: that is
+        // the one a genuinely private repository would explain itself with.
+        let err = with_token_fallback(Some("t".into()), |token| match token {
+            Some(_) => Err::<(), _>(Error::Download("401 unauthorized".into())),
+            None => Err(Error::Download("404".into())),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("401"), "{err}");
+
+        // Without a token there is nothing to fall back from.
+        let mut calls = 0;
+        let _ = with_token_fallback(None, |_| {
+            calls += 1;
+            Err::<(), _>(Error::Download("nope".into()))
+        });
+        assert_eq!(calls, 1);
+    }
+
     #[test]
     fn tokens_go_to_github_hosts_only() {
         assert!(is_github_host(
