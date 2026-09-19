@@ -592,10 +592,30 @@ def _cmd_models(args: argparse.Namespace) -> int:
     return 0
 
 
+def _prepare_streams() -> None:
+    """Makes the output streams able to carry what this CLI prints.
+
+    A redirected stdout on Windows is cp1252, and `ocrust languages` prints
+    Vietnamese, Greek and CJK: it ended in a `UnicodeEncodeError` there. Files
+    written with `--output` are UTF-8 either way, so this only settles what a
+    console or a pipe gets.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``ocrust`` console script."""
+    _prepare_streams()
     try:
-        return _dispatch(_build_parser().parse_args(argv))
+        code = _dispatch(_build_parser().parse_args(argv))
+        # Flushing inside the `try` is what routes a closed pipe to the handler
+        # below: a pipe is block-buffered, so `ocrust scan x | head -1` fails
+        # when the buffer is written, which otherwise happens on the way out of
+        # the interpreter, too late to catch.
+        sys.stdout.flush()
+        return code
     except KeyboardInterrupt:
         print("\nocrust: interrupted", file=sys.stderr)
         return 130

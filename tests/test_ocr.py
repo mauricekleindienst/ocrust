@@ -137,3 +137,27 @@ def test_scan_many_reads_a_directory(engine, invoice_pdf, tmp_path):
     docs = list(engine.scan_many([folder]))
     assert len(docs) == 2
     assert all("INVOICE" in d.text.upper() for d in docs)
+
+
+def test_cli_prints_on_a_console_that_is_not_utf8(engine):
+    """A redirected stdout on Windows is cp1252, and `languages` lists Vietnamese.
+
+    `ocrust languages` ended in a `UnicodeEncodeError` there, which
+    `PYTHONIOENCODING` reproduces on any platform.
+    """
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    beside = Path(sys.executable).with_name("ocrust")
+    exe = str(beside) if beside.exists() else shutil.which("ocrust")
+    if exe is None:
+        pytest.skip("the console script is not installed")
+
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    result = subprocess.run([exe, "languages"], capture_output=True, env=env)  # noqa: S603
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    assert b"UnicodeEncodeError" not in result.stderr
+    assert b"Vietnamese" in result.stdout

@@ -35,9 +35,15 @@
 - **`--pages 1-x` is a message, not a traceback**: a malformed page spec exits
   with *'1-x' is not a page or a page range*.
 - **`ocrust scan book.pdf | head -1` no longer ends in a traceback.** A reader
-  that closes the pipe early is its own business; the CLI now exits quietly
-  instead of raising `BrokenPipeError` and returning 1. `Ctrl-C` during a long
-  scan prints *interrupted* and exits 130 rather than a stack trace.
+  that closes the pipe early is its own business; the CLI flushes stdout while it
+  can still see the error and exits quietly instead of raising `BrokenPipeError`,
+  returning 1 and printing *Exception ignored* on the way out. `Ctrl-C` during a
+  long scan prints *interrupted* and exits 130 rather than a stack trace.
+- **`ocrust languages` crashed on a Windows console.** A redirected stdout there
+  is cp1252, and the command prints the Vietnamese characters the model is
+  missing: `UnicodeEncodeError: 'charmap' codec can't encode character '\u1ea1'`.
+  Both output streams are now UTF-8 with unrepresentable characters replaced, so
+  a diagnostic can no longer take the command down.
 - **`lang="zh_hant"` silently meant Simplified Chinese.** A tag written with an
   underscore is now the same tag as one written with a hyphen, so it no longer
   falls through to its primary subtag.

@@ -132,15 +132,17 @@ def test_expand_inputs_handles_patterns_and_duplicates(tmp_path):
 
 
 def test_a_reader_that_leaves_is_not_an_error():
-    """`ocrust doctor | head -0` must not end in a traceback."""
+    """A reader that goes away before reading must not end in a traceback."""
     # Next to the interpreter running the tests first: a venv's script directory
     # is not always on PATH.
     beside = Path(sys.executable).with_name("ocrust")
     exe = str(beside) if beside.exists() else shutil.which("ocrust")
     if os.name != "posix" or exe is None:
         pytest.skip("needs the installed console script and a POSIX shell")
+    # `| true` closes the pipe before the child writes a byte; `head -n` would
+    # race with it, and BSD `head -0` is an error in itself.
     result = subprocess.run(  # noqa: S602 - the command is built here, not by a user
-        f"{exe} doctor | head -0", shell=True, capture_output=True
+        f"{exe} doctor | true", shell=True, capture_output=True
     )
     assert b"Traceback" not in result.stderr, result.stderr.decode()
     assert b"BrokenPipe" not in result.stderr, result.stderr.decode()
