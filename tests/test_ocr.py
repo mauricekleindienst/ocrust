@@ -176,3 +176,24 @@ def test_page_selection_applies_to_in_memory_images(engine, invoice_pdf):
     assert len(engine.scan(array, pages=[0]).pages) == 1
     with pytest.raises(ValueError, match="no page 8"):
         engine.scan(array, pages=[7])
+
+
+def test_a_batch_keeps_its_page_selection_for_every_file(engine, invoice_pdf, tmp_path, capsys):
+    """The second file in a batch used to receive the first file's summary line.
+
+    `_cmd_scan` held the page selection in `pages` and the summary rebound the
+    same name to `"1 page"`, which the engine then refused — but only from the
+    second file onwards, and only without `-q`, so nothing noticed.
+    """
+    from ocrust.cli import main
+
+    folder = tmp_path / "batch"
+    folder.mkdir()
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        (folder / name).write_bytes(invoice_pdf.read_bytes())
+
+    out = tmp_path / "out"
+    assert main(["scan", str(folder), "-o", str(out), "--pages", "1"]) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["a.txt", "b.txt", "c.txt"]
+    for written in out.iterdir():
+        assert written.read_text().strip(), written

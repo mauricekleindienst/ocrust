@@ -154,17 +154,18 @@ Document(source, pages, elapsed_ms)
   .text                      # every page, reading order applied
   .lines  .words             # flattened across pages
   .confidence                # mean line confidence, or None
+  .quality                   # estimated share of the text that is right, or None
   .render(format) / .markdown() / .json() / .hocr() / .alto() / .csv()
   .search(needle, *, regex=False, case=False, whole_words=False)
   .to_dict()
 
 Page(index, width, height, rotation, origin, blocks, elapsed_ms)
-  .text  .lines  .confidence
+  .text  .lines  .confidence  .quality
 
 Block(kind, box, lines)       # kind: "paragraph", "heading", "list"
   .text
 
-Line(text, box, confidence, angle, words, polygon)
+Line(text, box, confidence, angle, margin, words, polygon)
 Word(text, box, confidence)
 Box(x0, y0, x1, y1)  .width  .height  .as_tuple()
 Match(text, page, box, line)

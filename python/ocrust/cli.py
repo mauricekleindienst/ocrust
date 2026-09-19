@@ -583,13 +583,18 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         total_lines += len(doc.lines)
         total_ms += doc.elapsed_ms
         if not args.quiet:
-            quality = doc.quality
-            body = (
-                f"{_count(len(doc.pages), 'page')}, {_count(len(doc.lines), 'line')}, "
-                f"{_quality(quality)}, {_duration(doc.elapsed_ms)}"
-                if quality is not None
-                else f"{_count(len(doc.pages), 'page')}, no text found, {_duration(doc.elapsed_ms)}"
-            )
+            # Not `pages`: that name holds the page selection for every file
+            # still to come, and shadowing it hands the next scan a string.
+            page_count = _count(len(doc.pages), "page")
+            line_count = _count(len(doc.lines), "line")
+            elapsed = _duration(doc.elapsed_ms)
+            if doc.quality is not None:
+                body = f"{page_count}, {line_count}, {_quality(doc.quality)}, {elapsed}"
+            elif doc.lines:
+                # Too little text to judge, which is not the same as none.
+                body = f"{page_count}, {line_count}, {elapsed}"
+            else:
+                body = f"{page_count}, no text found, {elapsed}"
             print(f"  {body}", file=sys.stderr)
 
     if not args.quiet and len(args.inputs) > 1:
