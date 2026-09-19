@@ -145,10 +145,15 @@ right-aligned price are two boxes; so are the cells of a table row.
    same x positions row after row; a drawing's scattered labels merely share a
    height. The decision is taken per region, so a drawing's title block can be
    tabular while the sheet around it is not.
-2. **XY-cut** for reading order: find the widest horizontal gutter, split,
-   recurse. A column split additionally requires at least two lines on each side
-   and a side wide relative to the gutter — that is what separates a newspaper's
-   columns from a table's cell gaps.
+2. **XY-cut** for reading order, columns before rows. A page set on one baseline
+   grid has white space between every pair of lines, so cutting by rows first
+   would read its columns straight across the gutter; a corridor is taken for a
+   column break when it is wide, divides most of the page's width, and leaves
+   slices that are columns of text — several baselines each, one box per
+   baseline, all of them near enough the same width. Everything else falls back
+   to the widest gutter, split, recurse, where a column split needs two lines on
+   each side, a side wide relative to the gutter, and no side that puts several
+   boxes on one baseline — a row of cells, not a column.
 3. **Paragraph grouping** by line spacing, then heading and list-item
    classification by relative height and leading punctuation.
 4. **De-hyphenation** across line breaks.

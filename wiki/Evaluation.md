@@ -25,7 +25,7 @@ thumbnails, and seven files that are outright broken.
 
 ## What the corpus contains
 
-106 files, 191 pages, 416 MB.
+118 files, 203 pages, 416 MB.
 
 | category | what it simulates |
 |---|---|
@@ -35,10 +35,11 @@ thumbnails, and seven files that are outright broken.
 | `drawings` | A3 technical drawings: frame, title block, hatching, dimensions, vertical section labels |
 | `forms` | ruled five-column tables |
 | `receipts` | narrow thermal strips in a monospaced face, faint print |
-| `newspaper` | three-column layout |
+| `newspaper` | three columns, and two columns set on one baseline grid |
+| `pricelists` | a page that is nothing but an unruled four-column price list |
 | `rotated` | skew from −7° to +6°, and PDFs with `/Rotate 90/180/270` |
 | `screenshots` | dark mode, light text on a dark background |
-| `extremes` | A0 at 300 dpi (~9900×7000 px), a 60 dpi thumbnail, a 3×24 inch receipt |
+| `extremes` | A0 at 300 dpi (~9900×7000 px), a 60 dpi thumbnail, a 4×24 inch receipt |
 | `multipage` | 5, 12 and 30-page image-only PDFs and TIFFs, some pages aged |
 | `borndigital` | PDFs with a real text layer, which the overlay tool must skip |
 | `formats` | the same page as PNG, JPEG, WebP, BMP, GIF, PPM, TGA, TIFF |
@@ -104,6 +105,15 @@ receipts 0.332 → 0.183 and forms 0.156 → 0.063, and cost the A0 sheet
 0.042 → 0.147 — the trade-off is spelled out on [Accuracy](Accuracy.md). Restoring swallowed
 word spaces took the corpus median from 0.013 to 0.006 and word recall from 0.836
 to 0.892, with image-only PDFs going 0.014 → 0.004.
+
+A third came out of what the corpus did **not** contain. Its `columns` option
+filled each column to the bottom of the page before starting the next, so a page
+asked for in three columns came out in one, and nothing in 106 files exercised
+column layout. Fixing the generator exposed three reading-order bugs at once —
+columns read across the gutter, a table's rows split into columns, a page that is
+nothing but a table measuring its own gutters as word spaces. All three are fixed;
+the two- and three-column pages read at CER 0.000 and the corpus mean went
+0.040 → 0.036.
 
 The current numbers are on [Accuracy](Accuracy.md) and [Performance](Performance.md).
 

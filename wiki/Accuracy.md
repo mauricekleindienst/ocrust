@@ -1,6 +1,6 @@
 # Accuracy
 
-Every number here comes from the generated corpus — 106 files, 191 pages, all
+Every number here comes from the generated corpus — 118 files, 203 pages, all
 with exact ground truth — and can be reproduced in about three minutes
 ([Evaluation](Evaluation.md)). Nothing is cherry-picked, including the bad rows.
 
@@ -8,10 +8,10 @@ with exact ground truth — and can be reproduced in about three minutes
 
 | metric | value |
 |---|---|
-| mean character error rate (CER) | **0.040** |
+| mean character error rate (CER) | **0.036** |
 | median CER | **0.006** |
-| mean word error rate (WER) | 0.120 |
-| mean word recall | 0.892 |
+| mean word error rate (WER) | 0.107 |
+| mean word recall | 0.904 |
 | unexpected failures | **0** |
 
 The gap between mean and median is the whole story: most documents are read
@@ -24,23 +24,24 @@ roughly one typo every four lines.
 
 | category | mean CER | word recall | ms/page |
 |---|---:|---:|---:|
-| skewed (−7°…+6°) | 0.000 | 1.000 | 744 |
-| every raster format (8) | 0.001 | 0.977 | 638 |
-| born-digital PDF | 0.002 | 0.990 | 620 |
-| newspaper, 3 columns | 0.003 | 0.977 | 1131 |
-| multi-page TIFF (47 pages) | 0.003 | 0.983 | 623 |
-| dark mode / inverted | 0.003 | 0.980 | 604 |
-| multi-page PDF (47 pages) | 0.004 | 0.957 | 673 |
-| aged, stained, bled-through | 0.006 | 0.937 | 713 |
-| 60 dpi thumbnail | 0.006 | 0.889 | 412 |
-| 1-bit fax with dropout | 0.014 | 0.867 | 547 |
-| image-only PDF, clean render | 0.042 | 0.792 | 677 |
-| rotated PDFs (/Rotate 90/180/270) | 0.054 | 0.884 | 885 |
-| 3×24 inch receipt strip | 0.054 | 0.891 | 2594 |
-| ruled forms / tables | 0.063 | 0.744 | 628 |
-| A0 drawing at 300 dpi | 0.147 | 0.895 | 30290 |
-| technical drawings | 0.170 | 0.855 | 583 |
-| thermal receipts | 0.183 | 0.941 | 406 |
+| newspaper, 2 and 3 columns | 0.000 | 1.000 | 585 |
+| skewed (−7°…+6°) | 0.000 | 1.000 | 773 |
+| 4×24 inch receipt strip | 0.000 | 1.000 | 3216 |
+| every raster format (8) | 0.001 | 0.977 | 699 |
+| born-digital PDF | 0.002 | 0.990 | 615 |
+| multi-page TIFF (47 pages) | 0.003 | 0.983 | 636 |
+| dark mode / inverted | 0.003 | 0.980 | 670 |
+| multi-page PDF (47 pages) | 0.004 | 0.957 | 681 |
+| aged, stained, bled-through | 0.006 | 0.937 | 714 |
+| 60 dpi thumbnail | 0.006 | 0.889 | 433 |
+| unruled full-page price list | 0.013 | 0.977 | 506 |
+| 1-bit fax with dropout | 0.014 | 0.867 | 576 |
+| image-only PDF, clean render | 0.042 | 0.792 | 693 |
+| rotated PDFs (/Rotate 90/180/270) | 0.054 | 0.884 | 919 |
+| ruled forms / tables | 0.063 | 0.744 | 648 |
+| A0 drawing at 300 dpi | 0.147 | 0.895 | 28309 |
+| technical drawings | 0.170 | 0.855 | 602 |
+| thermal receipts | 0.183 | 0.941 | 339 |
 
 Skew, inversion, aging, fax dithering, low resolution and multi-page containers
 are, for practical purposes, solved. What is left is **layout**, not character
@@ -92,10 +93,12 @@ drawings much worse (0.197 → 0.391), because there the row-wise join is what
 matches. Both readings of a title block are defensible — which is the argument
 for building real table structure rather than tuning a threshold.
 
-This is a real limitation with a real fix: **table-structure recognition**, which
-is not implemented. Reading order today is geometric — an XY-cut with baseline
-merging and column detection. It handles a three-column newspaper (CER 0.003)
-and fails to infer that a form's cells are a grid.
+Reading order is geometric: an XY-cut that looks for columns before rows, joins
+the boxes that share a baseline into one line, and reads a table's row across its
+cells. It reads the corpus's two- and three-column pages exactly (CER 0.000).
+Where a document's own structure is ambiguous the answer is too, and a title
+block is exactly that. The structure itself does not depend on the order the text
+came out in — it is recovered separately, below.
 
 If order does not matter for your use case — indexing, search, keyword extraction
 — use `word recall` as your metric, and these categories look very different.
@@ -131,6 +134,14 @@ image-only PDFs 0.014 → 0.004 (recall 0.848 → 0.957), rotated PDFs 0.082 →
 (recall 0.514 → 0.884), aged scans 0.012 → 0.006, raster formats 0.007 → 0.001 —
 and no category got worse.
 
+Then a fourth: **columns are looked for before rows**, and a row of wide cells is
+not a column break. Three-column pages went 0.003 → 0.000, two-column pages from
+being read straight across the gutter to 0.000, and a page that is nothing but a
+price list from two columns to four. Every document that was already in the
+corpus reads exactly as it did — the mean moved 0.040 → 0.036 because the corpus
+grew by the layouts it had been missing, which is also why these three bugs
+lasted as long as they did.
+
 ## Robustness
 
 Seven deliberately broken files, and every one behaves as designed:
@@ -146,6 +157,31 @@ Seven deliberately broken files, and every one behaves as designed:
 Nothing panics, nothing hangs, nothing returns plausible nonsense. A blank page
 is especially worth calling out: the deskew estimator has an ink-fraction guard,
 because an earlier version confidently rotated an empty page by 12°.
+
+## Columns
+
+A page's columns are read one after another, and they are looked for **before**
+the page is cut into rows. That order matters: a page set on one baseline grid
+has white space between every pair of lines, so cutting by rows first divides the
+columns into fragments and reads each row straight across the gutter — which
+turns two columns of prose into a line that says
+`Der Stadtrat hat beschlossen, Anwohner fordern mehr Raum`.
+
+A corridor is only taken for a column break when it looks like one:
+
+- it runs the full height of the region and is wide — at least two line heights,
+  and 3.5% of the width;
+- it divides a region that covers most of the page's width. Columns split the
+  page; a drawing's title block is labels down one side and values down the
+  other, and reading it that way is not reading it;
+- every slice it leaves is a column of text: three baselines at least, and one
+  box on each. A table's row puts a box in every cell, which is what tells a
+  price list's name column from a page column even when both are wide;
+- the slices are near enough the same width. A page's columns are; a label and
+  the value beside it are not.
+
+Two corridors are tried together before three, so a three-column page is found as
+three columns rather than rejected as a bad two-way split.
 
 ## Tables
 
@@ -175,6 +211,14 @@ gaps within a factor of two of that point — the corpus's degraded scans run fr
 18 to 36 pixels and nothing else — so nothing is split and no table is found,
 which is the right answer.
 
+**A page that is nothing but a table** has no prose to measure: its cells hold a
+word each, so almost every gap on it is a column gap and the quarter point lands
+among them. A nine-row price list came back as two columns instead of four. There
+the gaps fall into two groups — word spaces well below, gutters well above — and
+the threshold is taken from the widest jump between them. Prose has no such jump,
+its gaps crowd together, and there the quarter point stands. A jump can only
+lower the threshold, never raise it, so it finds cells and never loses them.
+
 **What keeps prose out** is not the threshold but three guardrails, each of which
 a real document passes and a page of sentences does not:
 
@@ -186,12 +230,12 @@ a real document passes and a page of sentences does not:
   right-hand column; what gives them away is the lines between them carrying no
   cells at all.
 
-Over the 102-file corpus that finds 16 tables: the four ruled forms as 5×4, the
-four receipts as 8×2 (items and totals are one column structure), and the eight
-engineering drawings' title blocks as 5×2 — `TITEL`, `WERKSTOFF`, `MASSSTAB`,
-`ZEICHNUNGS-NR` and the rest, which is a table and reads like one. Nothing at all
-in the newspapers, the letters, the screenshots, the faxes, the clean pages or the
-degraded scans.
+Over the 114 documents of the corpus that finds 24 tables: the four ruled forms
+as 5×4, the four receipts as 8×2 (items and totals are one column structure), the
+eight engineering drawings' title blocks as 5×2 — `TITEL`, `WERKSTOFF`,
+`MASSSTAB`, `ZEICHNUNGS-NR` and the rest, which is a table and reads like one —
+and the eight unruled price lists as 9×4. Nothing at all in the newspapers, the
+letters, the screenshots, the faxes, the clean pages or the degraded scans.
 
 **What it does not do.** It does not read row spans: a cell belongs to the row its
 baseline is on. It does not see a header cell that spans two columns and has
@@ -202,17 +246,17 @@ the geometry distinguishes it from a paragraph.
 ## Which number to trust
 
 `confidence` and `quality` answer different questions, and the difference is
-measurable. Over the 100 ground-truth files of the corpus:
+measurable. Over the 112 ground-truth files of the corpus:
 
 | | ranks pages by error rate | range across the corpus |
 |---|---:|---|
-| `doc.confidence` | Spearman −0.46 | 0.916 … 0.997 |
-| `doc.quality` | **Spearman −0.75** | 0.893 … 0.987 |
+| `doc.confidence` | Spearman −0.47 | 0.916 … 0.997 |
+| `doc.quality` | **Spearman −0.71** | 0.893 … 0.988 |
 
 **`confidence` is the recognizer's certainty about the characters it emitted.**
 It is good at that and badly suited to anything else. Per line it is nearly
-exact: a line's mean character probability lands within 1.4% of the share of
-that line's text that is actually right, and only 58 of 1907 lines in the corpus
+exact: a line's mean character probability lands within 1.2% of the share of
+that line's text that is actually right, and only 49 of 2027 lines in the corpus
 fall below 95% precision. But a page's error rate is made of something the
 recognizer never sees — text the detector missed, a column read out of order, a
 label broken into fragments — so the worst page in the corpus (CER 0.206) is
@@ -222,7 +266,7 @@ reported at 98.8% confident, above the median.
 of the output: characters per line, the tenth-percentile line confidence, mean
 line height relative to the page, mean confidence and the weakest line's margin.
 Held out a third of the files twenty times, it ranked better than confidence on
-20 splits out of 20.
+16 splits out of 20.
 
 ```python
 doc = ocrust.scan("scan.tiff")
@@ -230,9 +274,12 @@ if doc.quality is not None and doc.quality < 0.96:
     queue_for_human_review(doc)          # catches every bad page in the corpus
 ```
 
-On the corpus, that threshold flags 25 of 100 pages and among them all 18 with a
-character error rate of 10% or worse. Tighten it to 0.97 for a wider net, loosen
-it to 0.94 for the obvious failures only.
+On the corpus, that threshold flags 41 of 112 pages, and among them all 18 with a
+character error rate of 10% or worse. It is a wide net, and the width is a known
+bias: the estimate reads short lines as fragmentation, so a page of two columns
+of six short lines is marked down even where every character on it is right.
+Tighten it to 0.97 for 57 flagged, or loosen it to 0.94 for the obvious failures
+only — 24 flagged, and one of the 18 bad pages slips through.
 
 `confidence` stays the right number for dropping junk *lines* — it is what
 `drop_score` and `--min-confidence` filter on:
@@ -253,7 +300,7 @@ figure.
 
 The estimate is narrow: 0.893 to 0.987 over the corpus. It ranks pages well and
 it does not claim to say "this page is 20% wrong". Widening it needs more ground
-truth than 100 files. Re-fit it for your own documents with
+truth than 112 files. Re-fit it for your own documents with
 `scripts/collect_quality.py` and `scripts/fit_quality.py`, which print their own
 held-out numbers.
 

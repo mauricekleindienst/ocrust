@@ -98,9 +98,17 @@ Table lines=5
     r0 c0+1 [190..227] "Position"
 ```
 
-Both bugs behind the current thresholds were found this way: a block that is
-nothing but table rows measures its own word space as a gutter, and a word sitting
-in the white space between two columns is not evidence of a boundary between them.
+`ocrust_core::layout` prints the reading-order decisions in the same way — what
+a corridor left on either side of it and whether that reads as columns, and for
+every column split the share of baselines that straddle it, how wide each side
+is and how many boxes it puts on a baseline.
+
+Five bugs behind the current thresholds were found this way: a block that is
+nothing but table rows measures its own word space as a gutter, a word sitting in
+the white space between two columns is not evidence of a boundary between them, a
+page whose columns sit on one baseline grid is cut into rows before columns, a
+row of wide cells reads as a column break, and a page that is nothing but a table
+measures its own gutters as word spaces.
 
 ## Test layout
 
@@ -110,7 +118,7 @@ in the white space between two columns is not evidence of a boundary between the
 | `crates/ocrust-core/tests/end_to_end.rs` | the real pipeline against the bundled models | yes |
 | `tests/test_*.py` | Python API, CLI, formats, languages, PDF layer, TIFF export, the example app | yes |
 
-Current state: 203 Rust unit tests, 8 Rust end-to-end tests, 116 Python tests.
+Current state: 209 Rust unit tests, 8 Rust end-to-end tests, 116 Python tests.
 
 The unit tests deliberately need neither models nor ONNX Runtime, which is what
 keeps them fast enough to run on every save — and why CI can check three
