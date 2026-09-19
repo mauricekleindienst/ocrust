@@ -56,6 +56,17 @@ const GUTTER_OVER_SPACE: f32 = 2.0;
 /// The quarter point rather than the median: a table of short cells has more
 /// gutters than word spaces, and the median would then measure a gutter.
 const SPACE_QUANTILE: f32 = 0.25;
+/// How much wider than the gap below it a gap has to be to end the word spaces.
+///
+/// Measured on a page that is nothing but a price list: its word spaces run to
+/// 0.58 of the text height and its narrowest gutter is 0.91 of it, so the two
+/// groups are only a factor of 1.6 apart even where nothing lies between them.
+const GUTTER_JUMP: f32 = 1.5;
+/// How many of the gaps have to sit below that jump for it to count.
+///
+/// A line whose recognizer split one word in two leaves a gap of a pixel or
+/// three, and a handful of those must not pass for the page's word spacing.
+const GUTTER_JUMP_SHARE: f32 = 0.1;
 /// A cell covering this much of the table spans it — a title or a total — and is
 /// not evidence about where the columns are.
 const SPANNING_SHARE: f32 = 0.6;
@@ -185,7 +196,47 @@ pub(crate) fn gutter_width(lines: &[Line], text_height: f32) -> f32 {
     }
     gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let at = ((gaps.len() - 1) as f32 * SPACE_QUANTILE).round() as usize;
-    floor.max(gaps[at] * GUTTER_OVER_SPACE)
+    // The quarter point stands in for the page's word space; where the gaps fall
+    // into two groups, the stretch between them says it outright and is never
+    // allowed to widen the estimate.
+    let from_spaces = gaps[at] * GUTTER_OVER_SPACE;
+    let between = gutter_between_groups(&gaps);
+    log::debug!(
+        "{} gaps: quarter point {:.1}, from spaces {from_spaces:.1}, between groups {between:?}",
+        gaps.len(),
+        gaps[at],
+    );
+    floor.max(between.map_or(from_spaces, |gutter| gutter.min(from_spaces)))
+}
+
+/// The empty stretch between a page's word spaces and its column gutters.
+///
+/// A page that is nothing but a table has more gutters than word spaces — its
+/// cells hold a word each — and then even the quarter point measures a gutter.
+/// The two groups are still far apart, and the stretch between them is where the
+/// threshold belongs. A page of prose has no such stretch: its gaps crowd
+/// together, and there the quarter point is the better measure.
+///
+/// The highest stretch wins, not the widest. A heading whose two words sit
+/// further apart than the text beneath it opens a stretch of its own, well below
+/// the gutters, and a threshold taken from that one cuts the heading into cells.
+/// A stretch out among the gutters themselves costs nothing instead, because the
+/// caller never lets this widen the quarter point's estimate.
+///
+/// Jumps with almost nothing below them do not count: a line whose recognizer
+/// split one word in two leaves a gap of a pixel or three, and a handful of
+/// those is not the page's word spacing.
+fn gutter_between_groups(gaps: &[f32]) -> Option<f32> {
+    let least = (gaps.len() as f32 * GUTTER_JUMP_SHARE).ceil().max(1.0) as usize;
+    let mut highest = None;
+    for at in least..gaps.len() {
+        let (below, above) = (gaps[at - 1], gaps[at]);
+        if below > 0.0 && above >= below * GUTTER_JUMP {
+            // In the middle of the stretch, on the scale the gaps are spread over.
+            highest = Some((below * above).sqrt());
+        }
+    }
+    highest
 }
 
 /// Extends a run from `start` for as long as the rows keep the same columns.
@@ -771,6 +822,121 @@ mod tests {
 
         let table = detect(&lines, TEXT_HEIGHT).expect("a table");
         assert_eq!(table.row_text(3), ["Mehrwertsteuer 19 %", "", "246,98"]);
+    }
+
+    /// One row whose words sit at the given x ranges, as a recognizer leaves them.
+    fn worded_row(y: f32, words: &[(f32, f32)]) -> Line {
+        let mut line = row(
+            y,
+            &words
+                .iter()
+                .map(|(x0, x1)| ("x", *x0, *x1))
+                .collect::<Vec<_>>(),
+        );
+        line.words = words
+            .iter()
+            .map(|(x0, x1)| Word {
+                text: "x".into(),
+                bbox: Rect::new(*x0, y, *x1, y + TEXT_HEIGHT),
+                confidence: 0.95,
+            })
+            .collect();
+        line
+    }
+
+    #[test]
+    fn the_gutter_lands_between_the_word_spaces_and_the_gutters() {
+        // A page that is nothing but a price list: its cells hold one word each,
+        // so most of the gaps are gutters and even the quarter point measures
+        // one. Word spaces of 5 and gutters from 16: the threshold has to fall
+        // between them, whatever the quarter point says.
+        let lines: Vec<Line> = (0..8)
+            .map(|row| {
+                worded_row(
+                    row as f32 * 20.0,
+                    &[
+                        (0.0, 40.0),
+                        (45.0, 70.0), // a word space inside the first cell
+                        (86.0, 106.0),
+                        (124.0, 144.0),
+                        (163.0, 183.0),
+                    ],
+                )
+            })
+            .collect();
+        let gutter = gutter_width(&lines, TEXT_HEIGHT);
+        assert!(
+            (5.0..16.0).contains(&gutter),
+            "gutter {gutter} has to part the word spaces from the gutters"
+        );
+        let table = detect(&lines, TEXT_HEIGHT).expect("a table");
+        assert_eq!((table.rows, table.columns), (8, 4));
+    }
+
+    #[test]
+    fn a_heading_spaced_wider_than_the_rows_does_not_set_the_gutter() {
+        // `RECHNUNG 2026-0042` over a price list: its two words sit further apart
+        // than anything in the rows below, which opens a stretch of its own well
+        // below the gutters. A threshold taken from that stretch cuts the heading
+        // into two cells and the table adopts it as a header row.
+        // One detector box holding two words, which is how a heading arrives.
+        let mut heading = row(0.0, &[("x x", 0.0, 95.0)]);
+        heading.words = [(0.0, 40.0), (55.0, 95.0)]
+            .iter()
+            .map(|(x0, x1)| Word {
+                text: "x".into(),
+                bbox: Rect::new(*x0, 0.0, *x1, TEXT_HEIGHT),
+                confidence: 0.95,
+            })
+            .collect();
+        let mut lines = vec![heading];
+        lines.extend((1..7).map(|row| {
+            worded_row(
+                row as f32 * 20.0,
+                &[
+                    (0.0, 40.0),
+                    (45.0, 70.0), // a word space inside the first cell
+                    (110.0, 130.0),
+                    (170.0, 190.0),
+                    (230.0, 250.0),
+                ],
+            )
+        }));
+        let gutter = gutter_width(&lines, TEXT_HEIGHT);
+        assert!(
+            (15.0..40.0).contains(&gutter),
+            "gutter {gutter} has to leave the heading whole and still part the columns"
+        );
+        let table = detect(&lines, TEXT_HEIGHT).expect("a table");
+        assert_eq!(
+            (table.rows, table.columns),
+            (6, 4),
+            "the heading is not a row"
+        );
+    }
+
+    #[test]
+    fn a_page_of_prose_measures_its_gutter_from_its_word_spaces() {
+        // Gaps that crowd together are all word spaces, and there the quarter
+        // point is the measure: no jump in the distribution may lower it.
+        let lines: Vec<Line> = (0..8)
+            .map(|row| {
+                worded_row(
+                    row as f32 * 20.0,
+                    &[
+                        (0.0, 40.0),
+                        (48.0, 90.0),
+                        (99.0, 130.0),
+                        (137.0, 180.0),
+                        (191.0, 230.0),
+                    ],
+                )
+            })
+            .collect();
+        // Quarter point of the 8, 9, 11, 7 pattern is 8, and twice that is the
+        // gutter — wide enough that none of these lines holds a second cell.
+        assert_eq!(gutter_width(&lines, TEXT_HEIGHT), 16.0);
+        assert!(find_here(&lines).is_empty());
     }
 
     #[test]
