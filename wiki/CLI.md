@@ -36,6 +36,10 @@ ocrust scan book.pdf --progress               # page-by-page on stderr
 ocrust scan '\\\\fileserver\\scans' --io-retries 5   # a share that drops connections
 ocrust scan scan.pdf --dpi 300 --lang de,fr
 ocrust scan photo.jpg -q                      # no summary line
+curl -s https://host/invoice.pdf | ocrust scan -    # from stdin
+ocrust scan in/ -o out/ --skip-existing        # resume where a run stopped
+ocrust scan inbox/ -o out/ --watch             # scan files as they arrive
+ocrust scan book.pdf --memory fast             # more RAM, ~10% less time
 ```
 
 Inputs may be files, directories or glob patterns — including UNC paths like
@@ -74,6 +78,70 @@ Output rules worth knowing:
   bad argument and exits 2.
 - `-q` works on `scan`, `ocr`, `pdf` and `tiff`: it silences the summary on
   stderr, which is what a `find | xargs -P4` pipeline wants.
+
+### Resuming a batch
+
+```console
+$ ocrust scan archive/ -o out/ --skip-existing
+  archive/0001.pdf: already written
+  archive/0002.pdf: already written
+archive/0003.pdf -> out/0003.txt
+  4 pages, 88 lines, quality 97%, 6.2 s
+done: 1 file, 4 pages, 88 lines, 6.2 s, 2 already written
+```
+
+`--skip-existing` compares against the file the run *would* write, format
+included, so a text pass does not make a later `-f markdown` pass think it is
+finished. It needs `-o`: without an output path there is nothing to compare.
+
+### Reading from stdin
+
+`-` reads one document from standard input — `curl … | ocrust scan -`, a scanner
+writing to a pipe, `pdftk … output - | ocrust scan -`. The bytes are read whole,
+because a PDF cannot be decoded in pieces. With `-o` pointing at a directory the
+result is written as `stdin.<ext>`. A file genuinely called `-` is reachable as
+`./-`.
+
+### Watching a directory
+
+```console
+$ ocrust scan inbox/ -o out/ --watch
+watching inbox — press Ctrl-C to stop
+inbox/scan_0001.pdf -> out/scan_0001.txt
+  2 pages, 47 lines, quality 98%, 3.1 s
+^C
+stopped after 1 file
+```
+
+For a folder a scanner or a colleague drops files into. Every file is scanned
+once — even if it is still there next round — and a file is left alone until its
+size stops changing between checks, because half a PDF is not a PDF.
+`--watch-interval` sets how often it looks (default 2 s). Ctrl-C is the normal
+way out and exits 0 unless a scan failed. It needs a directory: watching a single
+file has nothing to wait for.
+
+### Shell completions
+
+```bash
+ocrust completions bash       > /etc/bash_completion.d/ocrust
+ocrust completions zsh        > "${fpath[1]}/_ocrust"
+ocrust completions fish       > ~/.config/fish/completions/ocrust.fish
+ocrust completions powershell >> $PROFILE
+```
+
+The scripts are generated from the argument parser itself, so they list the flags
+this version actually has rather than the ones it had when someone last
+remembered to update them. zsh and fish also get each flag's help text and the
+value sets for `--format`, `--compression` and the rest.
+
+### Memory
+
+`--memory frugal` is the default and keeps peak memory down by telling ONNX
+Runtime not to hold an allocation arena or plan tensor reuse — both assume the
+tensor shapes repeat, and pages are all different sizes. Over a 40-page PDF that
+is 253 MB against 584 MB, for about 10% more time at one worker and no extra time
+at four. `--memory fast` buys the time back. Page count does not affect either:
+pages are rasterized one at a time. See [Performance](Performance.md).
 
 ## `ocrust ocr` — text layer over an existing PDF
 

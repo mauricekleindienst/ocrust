@@ -63,6 +63,18 @@ wrong page, a crash or a build that would not compile.
   whose columns are closer than twice its own word spacing is read as text.
   `Ocr(tables=False)` / `--no-tables` turns it off.
 
+- **Batch ergonomics.** `--skip-existing` leaves inputs whose output file is
+  already there, comparing against the file the run *would* write so a text pass
+  does not make a later `-f markdown` pass think it is finished — a batch
+  interrupted at file 300 of 400 picks up where it stopped. `-` reads one document
+  from stdin, for `curl … | ocrust scan -`. `--watch` keeps running and scans
+  whatever appears in the input directories, waiting until a file stops growing
+  because half a PDF is not a PDF. And `ocrust completions bash|zsh|fish|powershell`
+  prints a completion script generated from the argument parser itself, so it
+  lists the flags this version has rather than the ones it had when someone last
+  remembered; zsh and fish also get each flag's help text and the value sets for
+  `--format`, `--compression` and the rest.
+
 - **`Page.quality` and `Document.quality`: an estimate of how much of a document
   is right.** `confidence` answers a narrower question than people read into it.
   Over the evaluation corpus it spans 0.916 to 0.997 while the character error
