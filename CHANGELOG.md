@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **GPU builds did not compile.** `--features cuda`, `coreml` or `directml`
+  failed with *could not find `CUDAExecutionProvider` in `ep`*: the provider
+  types are `ort::ep::CUDA`, `CoreML` and `DirectML` in the ONNX Runtime binding
+  this release pins. Nothing in CI built them, so nothing noticed — the workflow
+  now runs `cargo check --all-features`.
+- **`tensorrt`, `rocm`, `openvino` and `webgpu` did nothing.** The features
+  existed and pulled in the provider, but no code ever registered it. `device="auto"`
+  now offers every provider the build was compiled with, TensorRT first because it
+  falls back to CUDA by itself.
+- **A page filter that matches nothing is an error.** `scan(pdf, pages=[99])` on a
+  three-page document returned an empty document, which reads exactly like a blank
+  scan; it now says *the document has no page 100*. An in-memory image honours
+  `pages` as well, instead of ignoring the filter.
+- **Word boxes follow the line.** Character positions were mapped onto the
+  *bounding box* of the detection polygon, so on a tilted line every word got a
+  box as tall as the whole line and offset along it. They are now interpolated
+  along the quad's own edges. Vertical lines — whose crop the recognizer reads
+  standing up — had their words spread left to right across the page instead of
+  bottom to top, and a crop the orientation classifier turned around had them
+  mirrored to the wrong end of the line.
+- **Markdown no longer eats a minus sign.** A list item's leading `-` was trimmed
+  unconditionally, so `- Gutschrift` and `-19,90 EUR` in one block turned a credit
+  into a charge. A `-` counts as a bullet only when a space follows it, and the
+  exporter and the block classifier now share one definition of what a bullet is.
+- **Recursive glob patterns are expanded.** `ocrust scan 'archive/**/*.pdf'` and
+  `scan_many(["archive/**/*.pdf"])` matched nothing, because the pattern was
+  anchored at its parent directory (`archive/**`) and only its last component was
+  globbed. Both now glob from the last directory that is spelled out.
+- **`--pages 1-x` is a message, not a traceback**: a malformed page spec exits
+  with *'1-x' is not a page or a page range*.
+- **`ocrust scan book.pdf | head -1` no longer ends in a traceback.** A reader
+  that closes the pipe early is its own business; the CLI now exits quietly
+  instead of raising `BrokenPipeError` and returning 1. `Ctrl-C` during a long
+  scan prints *interrupted* and exits 130 rather than a stack trace.
+- **`lang="zh_hant"` silently meant Simplified Chinese.** A tag written with an
+  underscore is now the same tag as one written with a hyphen, so it no longer
+  falls through to its primary subtag.
+- **`Match.page` is the page's own index**, so a hit found while scanning a subset
+  of a PDF reports the page number of the source document. `Document.to_dict()` no
+  longer raises on a document built in Python rather than by the engine.
+- A recognition model whose output has no character classes, or a row of NaNs, is
+  reported as a model error instead of panicking inside the decoder. A batch that
+  comes back the wrong size is an error instead of silently empty lines, and a
+  class the dictionary does not cover no longer widens the character before it.
+- Model manifests are validated before anything is written: a bundle or file name
+  has to be a plain name (a `../` in one would have written outside the model
+  cache), the checksum has to be 64 hex digits, and a download stops at the size
+  the manifest declares instead of reading a mirror until memory runs out.
+  Concurrent installs no longer share one `.part` scratch file.
+
 ## 0.1.0
 
 First release.

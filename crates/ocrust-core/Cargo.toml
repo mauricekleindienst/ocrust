@@ -35,6 +35,8 @@ pdf = ["dep:hayro", "dep:lopdf"]
 # Fetch model files over HTTPS into the local model cache.
 download = ["dep:ureq", "dep:sha2"]
 # ONNX Runtime execution providers. Each needs the matching runtime build.
+# `cuda`, `coreml` and `directml` can also be asked for by name (`device="cuda"`);
+# the rest are registered by `device="auto"` when the runtime offers them.
 cuda = ["ort/cuda"]
 tensorrt = ["ort/tensorrt"]
 coreml = ["ort/coreml"]

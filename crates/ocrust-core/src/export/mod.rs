@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 
 use crate::doc::{BlockKind, Document, Page};
 use crate::error::Result;
+use crate::layout::strip_bullet;
 
 /// Output formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +83,7 @@ pub fn to_markdown(doc: &Document) -> String {
                 }
                 BlockKind::ListItem => {
                     for line in body.lines() {
-                        let cleaned = line.trim_start_matches(['•', '‣', '·', '-', '*', ' ']);
+                        let cleaned = strip_bullet(line);
                         let _ = writeln!(out, "- {cleaned}");
                     }
                     out.push('\n');
@@ -442,6 +443,37 @@ mod tests {
         assert!(md.contains("## Rechnung 2026"), "{md}");
         assert!(md.contains("- Position eins"), "{md}");
         assert!(md.contains("Betrag: 19,90 <EUR>"), "{md}");
+    }
+
+    #[test]
+    fn a_list_line_keeps_a_negative_amount() {
+        // The bullet goes, the minus sign stays: a Markdown exporter that trims
+        // every leading dash turns a refund into a charge.
+        let mut d = Document::new("kontoauszug.png");
+        d.pages.push(Page {
+            index: 0,
+            width: 200,
+            height: 100,
+            rotation: 0.0,
+            origin: PageOrigin::Image,
+            blocks: vec![Block {
+                kind: BlockKind::ListItem,
+                bbox: Rect::new(0.0, 0.0, 200.0, 60.0),
+                lines: vec![
+                    line(
+                        "\u{2022} Gutschrift",
+                        Rect::new(0.0, 0.0, 200.0, 20.0),
+                        vec![],
+                    ),
+                    line("-19,90 EUR", Rect::new(0.0, 30.0, 200.0, 50.0), vec![]),
+                ],
+            }],
+            elapsed_ms: 1.0,
+            image: None,
+        });
+        let md = to_markdown(&d);
+        assert!(md.contains("- Gutschrift"), "{md}");
+        assert!(md.contains("- -19,90 EUR"), "{md}");
     }
 
     #[test]

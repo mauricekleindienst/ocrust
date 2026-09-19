@@ -47,8 +47,13 @@ def test_markdown_and_hocr_contain_text(engine, invoice_pdf):
 def test_page_selection(engine, invoice_pdf):
     doc = engine.scan(invoice_pdf, pages=[0])
     assert len(doc.pages) == 1
-    empty = engine.scan(invoice_pdf, pages=[5])
-    assert len(empty.pages) == 0
+
+
+def test_page_selection_beyond_the_document_says_so(engine, invoice_pdf):
+    # An empty document reads like a blank scan, so asking for a page that is
+    # not there has to fail out loud.
+    with pytest.raises(ValueError, match="no page 6"):
+        engine.scan(invoice_pdf, pages=[5])
 
 
 def test_scan_many_is_ordered(engine, invoice_pdf):

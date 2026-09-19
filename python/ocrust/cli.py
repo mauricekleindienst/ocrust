@@ -12,13 +12,15 @@ ocrust doctor                           # what is installed, what is missing
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import FORMATS, Ocr, OcrustError, __version__, runtime_info
+from . import FORMATS, Ocr, OcrustError, __version__, _glob, runtime_info
 
 _EXTENSIONS = {
     "text": "txt",
@@ -161,17 +163,21 @@ def _parse_pages(spec: str | None) -> list[int] | None:
         part = part.strip()
         if not part:
             continue
-        if "-" in part:
-            start, _, end = part.partition("-")
-            first, last = int(start), int(end)
-            if first < 1 or last < first:
-                raise SystemExit(f"ocrust: bad page range {part!r}")
-            pages.extend(range(first - 1, last))
-        else:
-            number = int(part)
-            if number < 1:
-                raise SystemExit("ocrust: page numbers start at 1")
-            pages.append(number - 1)
+        try:
+            if "-" in part:
+                start, _, end = part.partition("-")
+                first, last = int(start), int(end)
+                if first < 1 or last < first:
+                    raise SystemExit(f"ocrust: bad page range {part!r}")
+                pages.extend(range(first - 1, last))
+            else:
+                number = int(part)
+                if number < 1:
+                    raise SystemExit("ocrust: page numbers start at 1")
+                pages.append(number - 1)
+        except ValueError:
+            # `--pages 1-x` is a typo, not a crash.
+            raise SystemExit(f"ocrust: {part!r} is not a page or a page range") from None
     return sorted(set(pages))
 
 
@@ -274,9 +280,8 @@ def _expand_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[tuple[Path, 
             files.append(path)
         elif any(ch in str(path) for ch in "*?["):
             # A pattern the shell left alone, e.g. every `ocrust scan *.pdf` on
-            # Windows. Anchor it at the pattern's own directory.
-            base = path.parent if str(path.parent) else Path()
-            found = sorted(item for item in base.glob(path.name) if item.is_file())
+            # Windows, or a recursive one it cannot expand at all.
+            found = _glob(path)
             if found:
                 files.extend(found)
             else:
@@ -589,7 +594,23 @@ def _cmd_models(args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``ocrust`` console script."""
-    args = _build_parser().parse_args(argv)
+    try:
+        return _dispatch(_build_parser().parse_args(argv))
+    except KeyboardInterrupt:
+        print("\nocrust: interrupted", file=sys.stderr)
+        return 130
+    except BrokenPipeError:
+        # `ocrust scan book.pdf | head -1`: the reader left, which is its right.
+        # Python still holds a dead stdout and would print "Exception ignored"
+        # while flushing it at exit, so it is pointed at the void first.
+        # A stdout without a file descriptor (a test harness, say) has nothing
+        # to redirect, and nothing to flush either.
+        with contextlib.suppress(OSError, ValueError):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "scan":
         return _cmd_scan(args)
     if args.command == "pdf":

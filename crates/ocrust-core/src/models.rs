@@ -268,10 +268,30 @@ pub struct Manifest {
 
 impl Manifest {
     /// Parses a bundle manifest.
+    ///
+    /// A manifest decides where files are written, so it is checked here rather
+    /// than trusted: a bundle may only name plain files inside its own directory.
     pub fn parse(json: &str) -> Result<Self> {
         let manifest: Manifest = serde_json::from_str(json)?;
         if manifest.files.is_empty() {
             return Err(Error::model("manifest lists no files"));
+        }
+        check_file_name(&manifest.name, "bundle name")?;
+        for file in &manifest.files {
+            check_file_name(&file.name, "file name")?;
+            let hex = file.sha256.trim();
+            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(Error::model(format!(
+                    "{}: sha256 must be 64 hex digits, got {:?}",
+                    file.name, file.sha256
+                )));
+            }
+            if file.urls.is_empty() {
+                return Err(Error::model(format!(
+                    "{} lists no download URLs",
+                    file.name
+                )));
+            }
         }
         Ok(manifest)
     }
@@ -281,6 +301,29 @@ impl Manifest {
         models_dir().join(&self.name)
     }
 }
+
+/// Rejects a manifest name that is anything but a plain file name.
+///
+/// The name goes straight into a path under the model cache, so a `..` or a
+/// separator in it would let a manifest write wherever it likes.
+fn check_file_name(value: &str, what: &str) -> Result<()> {
+    let plain = !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains(['/', '\\', '\0'])
+        && Path::new(value).components().count() == 1;
+    if plain {
+        Ok(())
+    } else {
+        Err(Error::model(format!(
+            "{what} {value:?} is not a plain file name"
+        )))
+    }
+}
+
+/// Largest download accepted for a file whose manifest gives no size.
+#[cfg(feature = "download")]
+const MAX_UNSIZED_DOWNLOAD: u64 = 512 * 1024 * 1024;
 
 /// Verifies a file against a hex SHA-256 digest.
 #[cfg(feature = "download")]
@@ -316,11 +359,12 @@ pub fn install(manifest: &Manifest, progress: &mut dyn FnMut(&str, u64, u64)) ->
                 continue;
             }
         }
-        let data = download_any(&file.urls)?;
+        let data = download_any(&file.urls, file.size)?;
         verify_sha256(&data, &file.sha256)?;
         // Write to a temporary file first so an interrupted run cannot leave a
-        // half-written model behind.
-        let tmp = dir.join(format!("{}.part", file.name));
+        // half-written model behind. The process id keeps two installs running
+        // side by side from writing the same scratch file.
+        let tmp = dir.join(format!("{}.{}.part", file.name, std::process::id()));
         std::fs::write(&tmp, &data).map_err(|e| Error::io(&tmp, e))?;
         std::fs::rename(&tmp, &target).map_err(|e| Error::io(&target, e))?;
         progress(&file.name, (i + 1) as u64, manifest.files.len() as u64);
@@ -333,10 +377,10 @@ pub fn install(manifest: &Manifest, progress: &mut dyn FnMut(&str, u64, u64)) ->
 }
 
 #[cfg(feature = "download")]
-fn download_any(urls: &[String]) -> Result<Vec<u8>> {
+fn download_any(urls: &[String], size: Option<u64>) -> Result<Vec<u8>> {
     let mut last = None;
     for url in urls {
-        match download_one(url) {
+        match download_one(url, size) {
             Ok(bytes) => return Ok(bytes),
             Err(e) => {
                 log::warn!("download from {url} failed: {e}");
@@ -348,7 +392,7 @@ fn download_any(urls: &[String]) -> Result<Vec<u8>> {
 }
 
 #[cfg(feature = "download")]
-fn download_one(url: &str) -> Result<Vec<u8>> {
+fn download_one(url: &str, size: Option<u64>) -> Result<Vec<u8>> {
     use std::io::Read;
     let mut request = ureq::get(url);
     if let Some(token) = github_token(url) {
@@ -357,12 +401,21 @@ fn download_one(url: &str) -> Result<Vec<u8>> {
     let mut response = request
         .call()
         .map_err(|e| Error::Download(format!("{url}: {e}")))?;
+    // The manifest says how big the file is, so a mirror that keeps sending
+    // cannot fill memory. One byte over the limit is enough to notice.
+    let limit = size.unwrap_or(MAX_UNSIZED_DOWNLOAD);
     let mut buf = Vec::new();
     response
         .body_mut()
         .as_reader()
+        .take(limit.saturating_add(1))
         .read_to_end(&mut buf)
         .map_err(|e| Error::Download(format!("{url}: {e}")))?;
+    if buf.len() as u64 > limit {
+        return Err(Error::Download(format!(
+            "{url}: larger than the {limit} bytes the manifest declares"
+        )));
+    }
     Ok(buf)
 }
 
@@ -564,12 +617,41 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_may_not_write_outside_its_bundle() {
+        // The names end up in a path under the model cache.
+        let evil = r#"{"name": "ppocrv6", "files": [{"name": "../../.bashrc",
+                       "urls": ["https://example.invalid/x"],
+                       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}]}"#;
+        let err = Manifest::parse(evil).unwrap_err();
+        assert!(err.to_string().contains("plain file name"), "{err}");
+
+        let escaping_bundle = r#"{"name": "../evil", "files": [{"name": "det.onnx",
+                       "urls": ["https://example.invalid/x"],
+                       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}]}"#;
+        assert!(Manifest::parse(escaping_bundle).is_err());
+    }
+
+    #[test]
+    fn a_manifest_without_a_usable_checksum_is_rejected() {
+        // Without this the file would be downloaded before anything noticed.
+        let short = r#"{"name": "b", "files": [{"name": "det.onnx",
+                       "urls": ["https://example.invalid/x"], "sha256": "00ff"}]}"#;
+        let err = Manifest::parse(short).unwrap_err();
+        assert!(err.to_string().contains("64 hex digits"), "{err}");
+
+        let no_urls = r#"{"name": "b", "files": [{"name": "det.onnx", "urls": [],
+                       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}]}"#;
+        assert!(Manifest::parse(no_urls).is_err());
+    }
+
+    #[test]
     fn manifest_round_trips() {
         let json = r#"{
             "name": "ppocrv5-mobile",
             "description": "PP-OCRv5 mobile",
             "files": [{"name": "det.onnx", "urls": ["https://example.invalid/det.onnx"],
-                       "sha256": "00ff", "size": 12}]
+                       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                       "size": 12}]
         }"#;
         let m = Manifest::parse(json).unwrap();
         assert_eq!(m.files[0].size, Some(12));

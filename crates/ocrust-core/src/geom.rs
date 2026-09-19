@@ -392,6 +392,21 @@ pub fn min_area_rect(points: &[Point]) -> Option<Quad> {
     best.map(|(_, q)| q.ordered())
 }
 
+/// Aspect ratio at which [`crop_quad`] stands a crop up.
+const STAND_UP_RATIO: f32 = 1.5;
+
+/// Whether [`crop_quad`] rotates this quad's crop 90 degrees to stand it up.
+///
+/// Recognition reports character positions as fractions of the *crop* width, so
+/// everything that maps them back onto the page has to know which way the crop
+/// was turned. Keeping the rule here means the two can never drift apart.
+pub fn crop_stands_up(quad: &Quad) -> bool {
+    let q = quad.ordered();
+    let w = q.edge_width().round().max(1.0);
+    let h = q.edge_height().round().max(1.0);
+    h / w >= STAND_UP_RATIO
+}
+
 /// Cuts `quad` out of `image` and rectifies it into an upright crop.
 ///
 /// The crop keeps the quad's own aspect ratio; when the quad is much taller
@@ -430,7 +445,7 @@ pub fn crop_quad(image: &RgbImage, quad: &Quad) -> Option<RgbImage> {
     );
 
     // Vertical text: stand the crop up so the recognizer sees a wide line.
-    if out_h as f32 / out_w as f32 >= 1.5 {
+    if out_h as f32 / out_w as f32 >= STAND_UP_RATIO {
         return Some(image::imageops::rotate90(&out));
     }
     Some(out)
@@ -442,6 +457,18 @@ mod tests {
 
     fn pts(v: &[(f32, f32)]) -> Vec<Point> {
         v.iter().map(|&(x, y)| Point::new(x, y)).collect()
+    }
+
+    #[test]
+    fn tall_quads_stand_their_crop_up() {
+        // The rule `crop_quad` applies, exposed so that callers mapping
+        // character positions back onto the page agree with it.
+        let wide = Quad::from_rect(Rect::new(0.0, 0.0, 100.0, 20.0));
+        let tall = Quad::from_rect(Rect::new(0.0, 0.0, 20.0, 100.0));
+        let square = Quad::from_rect(Rect::new(0.0, 0.0, 30.0, 40.0));
+        assert!(!crop_stands_up(&wide));
+        assert!(crop_stands_up(&tall));
+        assert!(!crop_stands_up(&square), "4:3 is not vertical text");
     }
 
     #[test]

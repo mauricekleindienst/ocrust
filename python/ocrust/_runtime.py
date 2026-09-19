@@ -8,6 +8,7 @@ before the first call. No system packages, no PATH surgery.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -38,19 +39,29 @@ def _candidate_patterns() -> tuple[str, ...]:
     return _DYLIB_PATTERNS.get(sys.platform, _DEFAULT_PATTERNS)
 
 
+def _version_key(path: Path) -> tuple[int, ...]:
+    """The version numbers in a library name, as numbers.
+
+    Sorting the strings would put `libonnxruntime.so.1.9.0` above
+    `libonnxruntime.so.1.30.0`, because `9` sorts after `3`.
+    """
+    return tuple(int(part) for part in re.findall(r"\d+", path.name))
+
+
 def library_in(directory: Path) -> Path | None:
     """The ONNX Runtime library inside `directory`, if there is one.
 
-    The newest version wins when a directory holds several, which is what
-    sorting the matches gives.
+    The newest version wins when a directory holds several.
     """
     if not directory.is_dir():
         return None
     exact, pattern = _candidate_patterns()
     if (directory / exact).exists():
         return directory / exact
-    matches = sorted(directory.glob(pattern))
-    return matches[-1] if matches else None
+    # `libonnxruntime_providers_*` sit next to the library on some platforms and
+    # match the same glob; they are never the library itself.
+    matches = [p for p in directory.glob(pattern) if "_provider" not in p.name]
+    return max(matches, key=_version_key) if matches else None
 
 
 def find_onnxruntime() -> Path | None:

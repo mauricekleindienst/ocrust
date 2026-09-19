@@ -132,18 +132,36 @@ pub fn sniff(data: &[u8]) -> Container {
 
 /// Loads every page of `source`.
 pub fn load(source: &Source, cfg: &IngestConfig) -> Result<Vec<RawPage>> {
-    match source {
-        Source::Image { image, .. } => Ok(vec![RawPage {
-            index: 0,
-            image: image.clone(),
-            origin: PageOrigin::Image,
-        }]),
-        Source::Bytes { data, name } => load_bytes(data, name, cfg),
+    let pages = match source {
+        Source::Image { image, .. } => {
+            if cfg.wants(0) {
+                vec![RawPage {
+                    index: 0,
+                    image: image.clone(),
+                    origin: PageOrigin::Image,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        Source::Bytes { data, name } => load_bytes(data, name, cfg)?,
         Source::Path(path) => {
             let data = read_file(path, cfg).map_err(|e| Error::io(path, e))?;
-            load_bytes(&data, &path.display().to_string(), cfg)
+            load_bytes(&data, &path.display().to_string(), cfg)?
+        }
+    };
+    // A page filter that matches nothing is a mistake worth reporting: an empty
+    // document looks exactly like a page the recognizer found no text on.
+    if pages.is_empty() {
+        if let Some(wanted) = &cfg.pages {
+            let numbers: Vec<String> = wanted.iter().map(|p| (p + 1).to_string()).collect();
+            return Err(Error::config(format!(
+                "the document has no page {}",
+                numbers.join(", ")
+            )));
         }
     }
+    Ok(pages)
 }
 
 /// Reads a file, retrying the failures a network share produces under load.
@@ -544,6 +562,18 @@ mod tests {
     }
 
     #[test]
+    fn a_page_filter_that_matches_nothing_is_an_error() {
+        // Silently returning an empty document would look like a blank scan.
+        let cfg = IngestConfig {
+            pages: Some(vec![41]),
+            ..IngestConfig::default()
+        };
+        let src = Source::bytes(png_bytes(8, 4), "one-page.png");
+        let err = load(&src, &cfg).unwrap_err();
+        assert!(err.to_string().contains("no page 42"), "{err}");
+    }
+
+    #[test]
     fn page_filter_selects_pages() {
         let cfg = IngestConfig {
             pages: Some(vec![1, 2]),
@@ -551,8 +581,9 @@ mod tests {
         };
         assert!(!cfg.wants(0));
         assert!(cfg.wants(2));
+        // A single-page image has neither page 2 nor 3, which `load` reports.
         let src = Source::bytes(png_bytes(4, 4), "x.png");
-        assert!(load(&src, &cfg).unwrap().is_empty());
+        assert!(load(&src, &cfg).is_err());
     }
 
     #[test]
