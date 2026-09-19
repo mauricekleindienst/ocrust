@@ -7,6 +7,7 @@
   <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
   <img src="https://img.shields.io/badge/no%20compiler-required-success" alt="No compiler required">
+  <a href="https://www.buymeacoffee.com/mousewerk"><img src="https://img.shields.io/badge/buy%20me%20a%20coffee-mousewerk-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy me a coffee"></a>
 </p>
 
 **Document OCR for Python, with a Rust core.** Images, multi-page TIFF and PDF in
