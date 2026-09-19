@@ -96,11 +96,12 @@ pub struct Page {
     pub elapsed_ms: f64,
     /// Estimated share of this page's characters that are right, in `0..=1`.
     ///
-    /// `None` for a page with no text. Unlike [`Page::confidence`], which is the
-    /// recognizer's certainty about the characters it emitted, this accounts for
-    /// what recognition cannot see — text that was missed, a layout that broke
-    /// into fragments — and so ranks pages far better. It is an estimate fitted
-    /// against a ground-truth corpus, not a guarantee.
+    /// `None` for a page with too little text to judge — under five lines is
+    /// outside everything the estimate was fitted on. Unlike [`Page::confidence`],
+    /// which is the recognizer's certainty about the characters it emitted, this
+    /// accounts for what recognition cannot see — text that was missed, a layout
+    /// that broke into fragments — and so ranks pages far better. It is an
+    /// estimate fitted against a ground-truth corpus, not a guarantee.
     #[serde(default)]
     pub quality: Option<f32>,
     /// The preprocessed page image, kept only when
