@@ -33,6 +33,35 @@ pub struct LayoutConfig {
     /// from a genuine page column, which is always a substantial slice of the
     /// page.
     pub column_min_width_fraction: f32,
+    /// A corridor between two page columns has to be this many line heights
+    /// wide.
+    ///
+    /// Columns are looked for before rows, because a page whose columns sit on
+    /// one baseline grid offers a horizontal gap between every pair of lines,
+    /// and cutting there first would read the lines across the gutter. Only a
+    /// gap this wide gets that precedence; a table's gutters are far narrower.
+    pub column_corridor_gap_factor: f32,
+    /// A corridor only splits a region this wide a share of the page.
+    ///
+    /// Columns are a property of the page: they split all of it. A drawing's
+    /// title block is two columns of its own — labels down one side, values down
+    /// the other — and reading it that way is not reading it.
+    pub column_corridor_page_share: f32,
+    /// A page column carries at most this many boxes per baseline.
+    ///
+    /// A paragraph's line is one box. A table row puts a box in every cell, and
+    /// that is what tells a table with wide cells from a column of text.
+    pub column_max_boxes_per_band: f32,
+    /// A page column has to span at least this many baselines.
+    pub column_min_bands: usize,
+    /// How many corridors a page may be cut at, one fewer than its columns.
+    pub column_max_corridors: usize,
+    /// The narrowest column, over the widest one.
+    ///
+    /// A page's columns are near enough the same width. A label and the value
+    /// beside it are not, and neither is a table's name column next to its
+    /// figures.
+    pub column_width_evenness: f32,
     /// Minimum gutter width as a fraction of the content width.
     ///
     /// This is what separates a page laid out in columns from a table: a
@@ -76,6 +105,12 @@ impl Default for LayoutConfig {
             column_shared_baseline_veto: 0.6,
             column_min_width_over_gap: 2.0,
             column_min_width_fraction: 0.25,
+            column_corridor_gap_factor: 2.0,
+            column_corridor_page_share: 0.6,
+            column_max_boxes_per_band: 1.3,
+            column_min_bands: 3,
+            column_max_corridors: 4,
+            column_width_evenness: 0.6,
             heading_height_factor: 1.45,
             merge_baselines: true,
             baseline_overlap: 0.55,
@@ -133,18 +168,32 @@ pub fn reading_order(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Line> {
             scale * cfg.max_merge_gap_factor
         };
     let mut out = Vec::with_capacity(lines.len());
-    xy_cut(lines, scale, cfg, max_merge_gap, 0, &mut out);
+    let sheet = Sheet {
+        scale,
+        width: horizontal_span(&lines),
+    };
+    xy_cut(lines, sheet, cfg, max_merge_gap, 0, &mut out);
     out
+}
+
+/// What a region keeps of the page it was cut out of.
+#[derive(Clone, Copy)]
+struct Sheet {
+    /// Median line height, the scale everything else is measured in.
+    scale: f32,
+    /// Width of the page's content, which is what a column corridor divides.
+    width: f32,
 }
 
 fn xy_cut(
     lines: Vec<Line>,
-    scale: f32,
+    sheet: Sheet,
     cfg: &LayoutConfig,
     inherited_merge_gap: f32,
     depth: usize,
     out: &mut Vec<Line>,
 ) {
+    let scale = sheet.scale;
     // Each region decides for itself whether it is tabular, as long as it still
     // has enough baselines to tell: a drawing's title block is a table even
     // though the sheet around it is not, and the dimension labels outside it must
@@ -165,13 +214,30 @@ fn xy_cut(
         return;
     }
 
+    // Columns before rows: a page whose columns sit on one baseline grid has a
+    // horizontal gap between every pair of lines, and cutting there first reads
+    // the lines across the gutter.
+    if cfg.detect_columns {
+        let splits = column_corridors(&lines, sheet, cfg);
+        if !splits.is_empty() {
+            let mut columns: Vec<Vec<Line>> = vec![Vec::new(); splits.len() + 1];
+            for line in lines {
+                columns[column_of(&splits, &line)].push(line);
+            }
+            for column in columns {
+                xy_cut(column, sheet, cfg, max_merge_gap, depth + 1, out);
+            }
+            return;
+        }
+    }
+
     // Horizontal band: a y gap that no box spans.
     if let Some((split, _)) = find_gap(&lines, scale * 0.6, |l| (l.bbox.y0, l.bbox.y1)) {
         let (top, bottom): (Vec<Line>, Vec<Line>) =
             lines.into_iter().partition(|l| l.bbox.center_y() < split);
         if !top.is_empty() && !bottom.is_empty() {
-            xy_cut(top, scale, cfg, max_merge_gap, depth + 1, out);
-            xy_cut(bottom, scale, cfg, max_merge_gap, depth + 1, out);
+            xy_cut(top, sheet, cfg, max_merge_gap, depth + 1, out);
+            xy_cut(bottom, sheet, cfg, max_merge_gap, depth + 1, out);
             return;
         }
         return_sorted(lines_from(top, bottom), cfg, max_merge_gap, out);
@@ -195,14 +261,32 @@ fn xy_cut(
             let region_width = horizontal_span(&left).max(0.0) + gap + horizontal_span(&right);
             let too_narrow = narrowest < gap * cfg.column_min_width_over_gap
                 || narrowest < region_width * cfg.column_min_width_fraction;
-            if thin_side || (straddled >= cfg.column_shared_baseline_veto && too_narrow) {
+            // A column's lines are one box each. Several boxes on a baseline are
+            // the cells of a row, and a gutter between them runs through the
+            // rows however wide the sides are.
+            let left_boxes = boxes_per_band(&left, cfg.baseline_overlap);
+            let right_boxes = boxes_per_band(&right, cfg.baseline_overlap);
+            let crowded = left_boxes.max(right_boxes) > cfg.column_max_boxes_per_band;
+            log::debug!(
+                "column split at {split:.0} (gap {gap:.0}): left {} lines / {:.0} wide, \
+                 right {} lines / {:.0} wide, straddled {straddled:.2}, \
+                 thin {thin_side}, too_narrow {too_narrow}, crowded {crowded}, \
+                 boxes/band L {left_boxes:.2} R {right_boxes:.2}",
+                left.len(),
+                horizontal_span(&left),
+                right.len(),
+                horizontal_span(&right),
+            );
+            if thin_side
+                || (straddled >= cfg.column_shared_baseline_veto && (too_narrow || crowded))
+            {
                 // The gutter runs through rows, not between columns.
                 emit_leaf(lines_from(left, right), cfg, max_merge_gap, out);
                 return;
             }
             if !left.is_empty() && !right.is_empty() {
-                xy_cut(left, scale, cfg, max_merge_gap, depth + 1, out);
-                xy_cut(right, scale, cfg, max_merge_gap, depth + 1, out);
+                xy_cut(left, sheet, cfg, max_merge_gap, depth + 1, out);
+                xy_cut(right, sheet, cfg, max_merge_gap, depth + 1, out);
                 return;
             }
             return_sorted(lines_from(left, right), cfg, max_merge_gap, out);
@@ -257,7 +341,10 @@ fn has_repeating_columns(lines: &[Line], scale: f32, min_overlap: f32) -> bool {
 }
 
 /// Splits lines into groups that share a baseline.
-fn baseline_bands(lines: &[Line], min_overlap: f32) -> Vec<Vec<&Line>> {
+fn baseline_bands<'a>(
+    lines: impl IntoIterator<Item = &'a Line>,
+    min_overlap: f32,
+) -> Vec<Vec<&'a Line>> {
     let mut bands: Vec<Vec<&Line>> = Vec::new();
     for line in lines {
         let joined = bands.last_mut().is_some_and(|band| {
@@ -277,13 +364,90 @@ fn baseline_bands(lines: &[Line], min_overlap: f32) -> Vec<Vec<&Line>> {
 }
 
 /// Width covered by a group of lines.
-fn horizontal_span(lines: &[Line]) -> f32 {
-    if lines.is_empty() {
-        return 0.0;
-    }
-    let min = lines.iter().map(|l| l.bbox.x0).fold(f32::MAX, f32::min);
-    let max = lines.iter().map(|l| l.bbox.x1).fold(f32::MIN, f32::max);
+fn horizontal_span<'a>(lines: impl IntoIterator<Item = &'a Line>) -> f32 {
+    let (min, max) = lines.into_iter().fold((f32::MAX, f32::MIN), |(lo, hi), l| {
+        (lo.min(l.bbox.x0), hi.max(l.bbox.x1))
+    });
     (max - min).max(0.0)
+}
+
+/// Boxes per baseline: one for a paragraph's lines, more for a table's rows.
+fn boxes_per_band<'a>(lines: impl IntoIterator<Item = &'a Line>, min_overlap: f32) -> f32 {
+    let bands = baseline_bands(lines, min_overlap);
+    let boxes: usize = bands.iter().map(Vec::len).sum();
+    boxes as f32 / bands.len().max(1) as f32
+}
+
+/// The corridors between this region's columns, if it is laid out in columns.
+///
+/// Whitespace between columns is wide, runs the full height of the region and
+/// has a column of text on either side. That last part is what a table does not
+/// have: a table's rows put several boxes on a baseline, and its name column and
+/// its figures are nothing like the same width.
+fn column_corridors(lines: &[Line], sheet: Sheet, cfg: &LayoutConfig) -> Vec<f32> {
+    if lines.len() < cfg.column_min_bands * 2 {
+        return Vec::new();
+    }
+    let width = horizontal_span(lines);
+    if width < sheet.width * cfg.column_corridor_page_share {
+        return Vec::new();
+    }
+    let min_gap =
+        (sheet.scale * cfg.column_corridor_gap_factor).max(width * cfg.column_gap_min_fraction);
+    let gaps = find_gaps(lines, min_gap, |l| (l.bbox.x0, l.bbox.x1));
+    // The widest corridor first, then the two widest together, and so on: a page
+    // set in three columns has two corridors, and neither of them alone leaves
+    // columns of text on both sides of it.
+    for count in 1..=gaps.len().min(cfg.column_max_corridors) {
+        let mut splits: Vec<f32> = gaps[..count].iter().map(|(split, _)| *split).collect();
+        splits.sort_by(|a, b| cmp_f32(*a, *b));
+        let columns = slice_at(lines, &splits);
+        let ok =
+            columns.iter().all(|column| reads_as_column(column, cfg)) && evenly_wide(&columns, cfg);
+        log::debug!(
+            "corridors {:?} of {width:.0}: {:?} lines, columns {ok}",
+            splits.iter().map(|s| *s as i32).collect::<Vec<_>>(),
+            columns.iter().map(Vec::len).collect::<Vec<_>>(),
+        );
+        if ok {
+            return splits;
+        }
+    }
+    Vec::new()
+}
+
+/// Which column a line falls in, counting the corridors to its left.
+fn column_of(splits: &[f32], line: &Line) -> usize {
+    splits.partition_point(|split| *split <= line.bbox.center_x())
+}
+
+/// Cuts the lines at each corridor, left to right.
+fn slice_at<'a>(lines: &'a [Line], splits: &[f32]) -> Vec<Vec<&'a Line>> {
+    let mut columns = vec![Vec::new(); splits.len() + 1];
+    for line in lines {
+        columns[column_of(splits, line)].push(line);
+    }
+    columns
+}
+
+/// Whether a slice between two corridors reads as a column of text.
+fn reads_as_column(column: &[&Line], cfg: &LayoutConfig) -> bool {
+    let bands = baseline_bands(column.iter().copied(), cfg.baseline_overlap).len();
+    bands >= cfg.column_min_bands
+        && column.len() as f32 <= bands as f32 * cfg.column_max_boxes_per_band
+}
+
+/// Whether the slices are of a kind: a page's columns are near enough the same
+/// width, a label and the value beside it are not.
+fn evenly_wide(columns: &[Vec<&Line>], cfg: &LayoutConfig) -> bool {
+    let spans: Vec<f32> = columns
+        .iter()
+        .map(|column| horizontal_span(column.iter().copied()))
+        .collect();
+    let widest = spans.iter().copied().fold(0.0, f32::max);
+    spans
+        .iter()
+        .all(|span| *span >= widest * cfg.column_width_evenness)
 }
 
 /// Share of the left side's baselines that also carry a box on the right.
@@ -419,22 +583,32 @@ fn find_gap(
     min_gap: f32,
     extent: impl Fn(&Line) -> (f32, f32),
 ) -> Option<(f32, f32)> {
+    find_gaps(lines, min_gap, extent).into_iter().next()
+}
+
+/// Every whitespace band wider than `min_gap` that no box spans, widest first.
+fn find_gaps(
+    lines: &[Line],
+    min_gap: f32,
+    extent: impl Fn(&Line) -> (f32, f32),
+) -> Vec<(f32, f32)> {
     let mut spans: Vec<(f32, f32)> = lines.iter().map(&extent).collect();
     if spans.is_empty() {
-        return None;
+        return Vec::new();
     }
     spans.sort_by(|a, b| cmp_f32(a.0, b.0));
 
-    let mut best: Option<(f32, f32)> = None; // (gap size, split position)
+    let mut found: Vec<(f32, f32)> = Vec::new(); // (split position, gap size)
     let mut reach = spans[0].1;
     for &(start, end) in &spans[1..] {
         let gap = start - reach;
-        if gap > min_gap && best.is_none_or(|(g, _)| gap > g) {
-            best = Some((gap, reach + gap * 0.5));
+        if gap > min_gap {
+            found.push((reach + gap * 0.5, gap));
         }
         reach = reach.max(end);
     }
-    best.map(|(gap, split)| (split, gap))
+    found.sort_by(|a, b| cmp_f32(b.1, a.1));
+    found
 }
 
 fn cmp_f32(a: f32, b: f32) -> std::cmp::Ordering {
@@ -781,6 +955,78 @@ mod tests {
             &["L0", "L1", "L2", "L3", "L4", "L5"],
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn columns_on_a_baseline_grid_are_not_read_across() {
+        // Two columns set on one grid, with the leading a page of prose has: a
+        // horizontal gap sits between every pair of lines, so the row-wise cut
+        // comes first and reads the page across the gutter — unless the corridor
+        // between the columns is taken first.
+        let mut lines = Vec::new();
+        for row in 0..4 {
+            let y = 100.0 + row as f32 * 90.0;
+            lines.push(line_at(&format!("L{row}"), 0.0, y, 660.0, y + 24.0));
+            lines.push(line_at(&format!("R{row}"), 900.0, y, 1500.0, y + 24.0));
+        }
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        assert_eq!(
+            texts(&ordered),
+            ["L0", "L1", "L2", "L3", "R0", "R1", "R2", "R3"]
+        );
+    }
+
+    #[test]
+    fn a_tables_wide_cells_are_not_page_columns() {
+        // A price list: names down the left, three columns of figures on the
+        // right. Both sides are wide and every baseline carries boxes on both, so
+        // what says the gutter runs through the rows is that the right-hand side
+        // puts three boxes on each of them.
+        let mut lines = Vec::new();
+        for row in 0..4 {
+            let y = 100.0 + row as f32 * 30.0;
+            lines.push(line_at(&format!("Artikel{row}"), 170.0, y, 500.0, y + 24.0));
+            for (index, x) in [600.0, 800.0, 1010.0].iter().enumerate() {
+                lines.push(line_at(
+                    &format!("{row}{index}"),
+                    *x,
+                    y,
+                    x + 180.0,
+                    y + 24.0,
+                ));
+            }
+        }
+        let ordered = reading_order(lines, &LayoutConfig::default());
+        let texts = texts(&ordered);
+        assert_eq!(texts.len(), 4, "{texts:?}");
+        assert_eq!(texts[0], "Artikel0 00 01 02", "{texts:?}");
+    }
+
+    #[test]
+    fn a_corner_of_the_sheet_is_not_split_into_columns() {
+        // A drawing's title block: five labels and the values beside them. It
+        // reads label then value, and what keeps the corridor between them from
+        // cutting it in two is that it covers a corner of the sheet rather than
+        // the width of it.
+        let mut lines = Vec::new();
+        for row in 0..5 {
+            let y = 900.0 + row as f32 * 40.0;
+            lines.push(line_at(&format!("Feld{row}"), 2300.0, y, 2500.0, y + 24.0));
+            lines.push(line_at(&format!("Wert{row}"), 2650.0, y, 2950.0, y + 24.0));
+        }
+        let cfg = LayoutConfig::default();
+        let sheet = Sheet {
+            scale: 24.0,
+            width: 3000.0,
+        };
+        assert!(column_corridors(&lines, sheet, &cfg).is_empty());
+        // On a page that holds nothing else, the same block is all there is to go
+        // by, and then its two sides are the page's columns.
+        let alone = Sheet {
+            width: 650.0,
+            ..sheet
+        };
+        assert_eq!(column_corridors(&lines, alone, &cfg).len(), 1);
     }
 
     #[test]
