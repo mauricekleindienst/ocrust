@@ -28,6 +28,9 @@ Source (path | bytes | RGB frame)
     layout ─────────────  baseline merging · XY-cut reading order · paragraphs
         │                 · de-hyphenation · heading/list classification
         ▼
+    table ──────────────  rows and columns from where the cells sit, per block
+        │                 (no model, no ruling lines)
+        ▼
    Document ────────────  pages → blocks → lines → words, boxes + confidences
         │
         ├── export ──────  text · Markdown · JSON · hOCR · ALTO · CSV
@@ -59,6 +62,8 @@ Source (path | bytes | RGB frame)
 | `lang` | language table, script grouping, charset-coverage checks |
 | `geom` | points, rects, quads, convex hull, min-area rect, perspective crop |
 | `layout` | reading order, block grouping, de-hyphenation, word boxes |
+| `table` | rows and columns recovered from cell geometry, and the guardrails against reading prose as a table |
+| `quality` | the fitted estimate of how much of a page is right |
 | `doc` | the result model |
 | `export` | text, Markdown, JSON, hOCR, ALTO, CSV |
 | `export::pdf` | searchable PDF writer, and the WinAnsi encoder both PDF paths use |

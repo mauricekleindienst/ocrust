@@ -237,6 +237,11 @@ def _build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--no-preprocess", action="store_true", help="skip deskew/invert/rescale")
     scan.add_argument("--no-word-boxes", action="store_true", help="skip per-word geometry")
     scan.add_argument(
+        "--no-tables",
+        action="store_true",
+        help="do not read aligned cells as tables (markdown keeps them as text)",
+    )
+    scan.add_argument(
         "--min-confidence",
         type=float,
         help="drop lines below this mean confidence (0..1)",
@@ -507,6 +512,7 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
         pdf_dpi=getattr(args, "dpi", None),
         preprocess=not getattr(args, "no_preprocess", False),
         word_boxes=not getattr(args, "no_word_boxes", False),
+        tables=not getattr(args, "no_tables", False),
         drop_score=getattr(args, "min_confidence", None),
         lang=getattr(args, "lang", None),
         io_retries=getattr(args, "io_retries", None),

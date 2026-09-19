@@ -8,14 +8,17 @@ use serde::{Deserialize, Serialize};
 use crate::geom::{Quad, Rect};
 
 /// What a block of text looks like structurally.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockKind {
+    #[default]
     Paragraph,
     /// A short, unusually large line — rendered as a Markdown heading.
     Heading,
     /// A line starting with a bullet or an enumerator.
     ListItem,
+    /// Rows of cells that line up into columns. See [`Block::table`].
+    Table,
 }
 
 /// Where a page's pixels came from.
@@ -38,8 +41,24 @@ pub struct Word {
     pub confidence: f32,
 }
 
-/// One recognized text line.
+/// One of the detector's boxes, before it was merged into a line.
+///
+/// The detector returns boxes, not lines, and a table row arrives as one box per
+/// cell. Those boxes become a single [`Line`] so the row reads left to right —
+/// and the boxes are kept here, because where they were is what makes the row's
+/// columns recoverable afterwards.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Segment {
+    pub text: String,
+    pub bbox: Rect,
+    pub confidence: f32,
+}
+
+/// One recognized text line.
+///
+/// `Default` gives an empty line at the origin, which is what a caller building a
+/// document by hand wants to start from: `Line { text: "x".into(), bbox, ..Default::default() }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Line {
     pub text: String,
     /// Mean character confidence in `0..=1`.
@@ -60,14 +79,91 @@ pub struct Line {
     pub margin: f32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Word>,
+    /// The boxes this line was merged from, left to right.
+    ///
+    /// Empty when the line came from a single box, which is the ordinary case
+    /// for running text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<Segment>,
+}
+
+impl Line {
+    /// The boxes this line is made of, left to right — itself, when it was never
+    /// merged.
+    pub fn parts(&self) -> Vec<Segment> {
+        if self.segments.is_empty() {
+            vec![Segment {
+                text: self.text.clone(),
+                bbox: self.bbox,
+                confidence: self.confidence,
+            }]
+        } else {
+            self.segments.clone()
+        }
+    }
+}
+
+/// One cell of a [`Table`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cell {
+    /// Zero-based row, counting from the top of the table.
+    pub row: usize,
+    /// Zero-based column, counting from the left.
+    pub column: usize,
+    /// Columns this cell covers; `1` for an ordinary cell.
+    pub column_span: usize,
+    pub text: String,
+    pub bbox: Rect,
+    /// Mean character confidence of the text in this cell.
+    pub confidence: f32,
+}
+
+/// Rows and columns recovered from where the cells sit on the page.
+///
+/// There is no table model involved and no ruling lines are read: the columns
+/// are the bands of the page that every row leaves a gap between. That finds the
+/// tables people actually scan — invoices, receipts, statements, price lists —
+/// whether or not they are ruled, and it says nothing about merged header cells
+/// stacked two deep, which it cannot see.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Table {
+    pub rows: usize,
+    pub columns: usize,
+    /// Cells in reading order: row by row, left to right. A row with nothing in
+    /// a column simply has no cell for it.
+    pub cells: Vec<Cell>,
+}
+
+impl Table {
+    /// The cells of one row, left to right.
+    pub fn row(&self, index: usize) -> impl Iterator<Item = &Cell> {
+        self.cells.iter().filter(move |c| c.row == index)
+    }
+
+    /// Row `index` as one string per column, with empty strings for the gaps.
+    pub fn row_text(&self, index: usize) -> Vec<String> {
+        let mut out = vec![String::new(); self.columns];
+        for cell in self.row(index) {
+            if let Some(slot) = out.get_mut(cell.column) {
+                if !slot.is_empty() {
+                    slot.push(' ');
+                }
+                slot.push_str(&cell.text);
+            }
+        }
+        out
+    }
 }
 
 /// A group of lines that belong together.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Block {
     pub kind: BlockKind,
     pub bbox: Rect,
     pub lines: Vec<Line>,
+    /// The grid, when `kind` is [`BlockKind::Table`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<Table>,
 }
 
 impl Block {
@@ -232,6 +328,7 @@ mod tests {
             det_score: 1.0,
             margin: 0.0,
             words: Vec::new(),
+            segments: Vec::new(),
         }
     }
 
@@ -246,6 +343,7 @@ mod tests {
                 kind: BlockKind::Paragraph,
                 bbox: Rect::new(0.0, 0.0, 10.0, 5.0),
                 lines,
+                table: None,
             }],
             elapsed_ms: 1.0,
             quality: None,

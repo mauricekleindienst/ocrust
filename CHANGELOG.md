@@ -9,6 +9,35 @@ wrong page, a crash or a build that would not compile.
 
 ### Added
 
+- **Tables.** A block whose cells line up into columns comes back as a table:
+  `Page.tables`, `Document.tables`, `Block.table`, cells carrying their row,
+  column, span, box and confidence, a Markdown pipe table from
+  `render("markdown")`, and `Table.to_csv()` / `.as_rows()` / `.row_text()`. No
+  table model and no ruling lines are read, so the wheel stays one
+  self-contained artifact. Two things say where the cells are: the detector
+  returns one box per cell when the columns are far enough apart, and the layout
+  now keeps those boxes on the row it joins them into (`Line.segments`); inside a
+  box, the recognizer's word positions show the gaps. A column is then a stretch
+  of the page that row after row puts ink in.
+
+  **How wide a gap has to be is measured rather than assumed**, because word
+  spaces and column gutters are both gaps and their widths depend entirely on the
+  document: a corpus receipt's word spaces run to 0.87 of the text height while
+  its narrowest gutter is 2.5 times it, and a dense invoice has spaces at 0.66 and
+  gutters from 0.83. No multiple of the text height sits between both pairs, so
+  the threshold is twice the quarter-point of every word gap on the page. A page
+  with no table has all its gaps within a factor of two of that point, so nothing
+  is split and no table is found.
+
+  Three guardrails keep prose out: three rows and two columns at least, gaps that
+  fall in the same places row after row, and most rows carrying more than one
+  cell. Over the 102-file evaluation corpus that finds 16 tables — the four ruled
+  forms as 5x4, the four receipts as 8x2, the eight engineering drawings' title
+  blocks as 5x2 — and nothing at all in the newspapers, letters, screenshots,
+  faxes, clean pages or degraded scans. It does not read row spans, and a table
+  whose columns are closer than twice its own word spacing is read as text.
+  `Ocr(tables=False)` / `--no-tables` turns it off.
+
 - **`Page.quality` and `Document.quality`: an estimate of how much of a document
   is right.** `confidence` answers a narrower question than people read into it.
   Over the evaluation corpus it spans 0.916 to 0.997 while the character error

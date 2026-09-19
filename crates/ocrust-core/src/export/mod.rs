@@ -8,7 +8,7 @@ pub mod tiff;
 
 use std::fmt::Write as _;
 
-use crate::doc::{BlockKind, Document, Page};
+use crate::doc::{BlockKind, Document, Page, Table};
 use crate::error::Result;
 use crate::layout::strip_bullet;
 
@@ -88,6 +88,15 @@ pub fn to_markdown(doc: &Document) -> String {
                     }
                     out.push('\n');
                 }
+                BlockKind::Table => match &block.table {
+                    Some(table) => out.push_str(&markdown_table(table)),
+                    // A table kind without a table cannot happen from a scan,
+                    // only from hand-built or edited JSON; the text still goes
+                    // out rather than disappearing.
+                    None => {
+                        let _ = writeln!(out, "{body}\n");
+                    }
+                },
                 BlockKind::Paragraph => {
                     let _ = writeln!(out, "{body}\n");
                 }
@@ -95,6 +104,30 @@ pub fn to_markdown(doc: &Document) -> String {
         }
     }
     out.trim_end().to_string() + "\n"
+}
+
+/// One table as a GitHub-flavoured Markdown pipe table.
+///
+/// The first row is the header, because that is what Markdown tables are; a
+/// table whose first row is data still reads correctly, it just gets a heavier
+/// line under it. Pipes in the text are escaped, since an unescaped one would
+/// silently split a cell in two.
+fn markdown_table(table: &Table) -> String {
+    let mut out = String::new();
+    for row in 0..table.rows {
+        let cells: Vec<String> = table
+            .row_text(row)
+            .into_iter()
+            .map(|text: String| text.replace('|', "\\|").replace('\n', " "))
+            .collect();
+        let _ = writeln!(out, "| {} |", cells.join(" | "));
+        if row == 0 {
+            let rule: Vec<&str> = (0..table.columns).map(|_| "---").collect();
+            let _ = writeln!(out, "| {} |", rule.join(" | "));
+        }
+    }
+    out.push('\n');
+    out
 }
 
 /// hOCR 1.2, compatible with tesseract's output consumers.
@@ -375,10 +408,9 @@ mod tests {
             confidence: 0.91,
             quad: Quad::from_rect(r),
             bbox: r,
-            angle: 0.0,
             det_score: 0.8,
-            margin: 0.0,
             words,
+            ..Default::default()
         }
     }
 
@@ -393,6 +425,7 @@ mod tests {
             blocks: vec![
                 Block {
                     kind: BlockKind::Heading,
+                    table: None,
                     bbox: Rect::new(10.0, 10.0, 300.0, 40.0),
                     lines: vec![line(
                         "Rechnung 2026",
@@ -402,6 +435,7 @@ mod tests {
                 },
                 Block {
                     kind: BlockKind::Paragraph,
+                    table: None,
                     bbox: Rect::new(10.0, 60.0, 400.0, 100.0),
                     lines: vec![line(
                         "Betrag: 19,90 <EUR>",
@@ -415,6 +449,7 @@ mod tests {
                 },
                 Block {
                     kind: BlockKind::ListItem,
+                    table: None,
                     bbox: Rect::new(10.0, 110.0, 400.0, 130.0),
                     lines: vec![line(
                         "• Position eins",
@@ -460,6 +495,7 @@ mod tests {
             origin: PageOrigin::Image,
             blocks: vec![Block {
                 kind: BlockKind::ListItem,
+                table: None,
                 bbox: Rect::new(0.0, 0.0, 200.0, 60.0),
                 lines: vec![
                     line(
@@ -571,5 +607,61 @@ mod tests {
         let hocr = to_hocr(&d);
         assert!(!hocr.contains('\u{0007}'));
         assert!(hocr.contains("bad char"));
+    }
+
+    #[test]
+    fn a_table_renders_as_a_markdown_pipe_table() {
+        use crate::doc::{Cell, Table};
+
+        let cell = |row: usize, column: usize, text: &str| Cell {
+            row,
+            column,
+            column_span: 1,
+            text: text.into(),
+            bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
+            confidence: 0.9,
+        };
+        let table = Table {
+            rows: 3,
+            columns: 2,
+            cells: vec![
+                cell(0, 0, "Artikel"),
+                cell(0, 1, "Preis"),
+                cell(1, 0, "Widget | A"),
+                cell(1, 1, "49,90"),
+                // The third row is missing its second cell.
+                cell(2, 0, "Widget B"),
+            ],
+        };
+        let mut doc = Document::new("t.png");
+        doc.pages.push(Page {
+            index: 0,
+            width: 100,
+            height: 100,
+            rotation: 0.0,
+            origin: PageOrigin::Image,
+            blocks: vec![Block {
+                kind: BlockKind::Table,
+                bbox: Rect::new(0.0, 0.0, 100.0, 60.0),
+                lines: vec![line(
+                    "Artikel Preis",
+                    Rect::new(0.0, 0.0, 100.0, 20.0),
+                    vec![],
+                )],
+                table: Some(table),
+            }],
+            elapsed_ms: 1.0,
+            quality: None,
+            image: None,
+        });
+
+        let markdown = to_markdown(&doc);
+        let rows: Vec<&str> = markdown.lines().collect();
+        assert_eq!(rows[0], "| Artikel | Preis |");
+        assert_eq!(rows[1], "| --- | --- |");
+        // A pipe in a cell is escaped, or it would split the cell in two.
+        assert_eq!(rows[2], "| Widget \\| A | 49,90 |");
+        // A gap stays a gap rather than shifting the row left.
+        assert_eq!(rows[3], "| Widget B |  |");
     }
 }

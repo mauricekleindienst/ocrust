@@ -50,6 +50,7 @@ pub mod preprocess;
 mod quality;
 pub mod recognize;
 pub mod runtime;
+mod table;
 
 pub use classify::OrientationConfig;
 pub use detect::{DetectorConfig, LimitType};

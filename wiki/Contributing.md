@@ -75,6 +75,33 @@ Runtime at run time, not linked here — so `cargo check -p ocrust-core
 --all-features` belongs in the list too, and CI runs it on Linux. Actually
 *using* a provider still needs a matching ONNX Runtime build.
 
+## Looking at what the layout decided
+
+Reading order, block grouping and table detection are geometry, and the fastest
+way to understand a wrong answer is to see the numbers the decision was made
+from. `RUST_LOG=debug` prints them; the `table_probe` example prints the cells a
+document came out with:
+
+```bash
+export ORT_DYLIB_PATH=$(python -c "import onnxruntime, pathlib; \
+  print(next(pathlib.Path(onnxruntime.__file__).parent.glob('capi/libonnxruntime.so*')))")
+export OCRUST_MODELS_DIR=$PWD/models/ppocrv6
+RUST_LOG=debug cargo run --example table_probe --all-features -- rechnung.png
+```
+
+```
+[DEBUG ocrust_core::table] table scan: text height 41.8, gutter 41.5
+[DEBUG ocrust_core::table]   row 2: "Position"[176..281]  "Menge"[322..413] …
+[DEBUG ocrust_core::table]   run 2..7 (5 candidates) -> columns [179..294] [371..378] …
+Table lines=5
+  5x4
+    r0 c0+1 [190..227] "Position"
+```
+
+Both bugs behind the current thresholds were found this way: a block that is
+nothing but table rows measures its own word space as a gutter, and a word sitting
+in the white space between two columns is not evidence of a boundary between them.
+
 ## Test layout
 
 | Where | What it covers | Needs models? |
@@ -83,7 +110,7 @@ Runtime at run time, not linked here — so `cargo check -p ocrust-core
 | `crates/ocrust-core/tests/end_to_end.rs` | the real pipeline against the bundled models | yes |
 | `tests/test_*.py` | Python API, CLI, formats, languages, PDF layer, TIFF export, the example app | yes |
 
-Current state: 173 Rust unit tests, 8 Rust end-to-end tests, 91 Python tests.
+Current state: 193 Rust unit tests, 8 Rust end-to-end tests, 106 Python tests.
 
 The unit tests deliberately need neither models nor ONNX Runtime, which is what
 keeps them fast enough to run on every save — and why CI can check three

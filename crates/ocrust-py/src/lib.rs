@@ -71,6 +71,7 @@ impl PyEngine {
         rec_image_height = None,
         rec_space_gap = None,
         fix_orientation = true,
+        tables = true,
         languages = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -97,6 +98,7 @@ impl PyEngine {
         rec_image_height: Option<u32>,
         rec_space_gap: Option<f32>,
         fix_orientation: bool,
+        tables: bool,
         languages: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let mut config = EngineConfig::new();
@@ -108,6 +110,7 @@ impl PyEngine {
         config.word_boxes = word_boxes;
         config.keep_page_images = keep_page_images;
         config.fix_orientation = fix_orientation;
+        config.layout.detect_tables = tables;
 
         if let Some(d) = device {
             config.session.device = Device::parse(d).map_err(to_py_err)?;

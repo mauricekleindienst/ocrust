@@ -46,5 +46,6 @@ rocm = ["ort/rocm"]
 webgpu = ["ort/webgpu"]
 
 [dev-dependencies]
+env_logger = "0.11"
 hayro.workspace = true
 imageproc.workspace = true
