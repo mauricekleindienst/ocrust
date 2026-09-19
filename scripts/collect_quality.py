@@ -23,7 +23,6 @@ from pathlib import Path
 
 import ocrust
 
-
 #: Longest run of ground-truth lines that one recognized line may account for.
 #:
 #: The layout joins the boxes that share a baseline into one line, so a table row
