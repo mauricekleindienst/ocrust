@@ -9,6 +9,28 @@ wrong page, a crash or a build that would not compile.
 
 ### Added
 
+- **`Page.quality` and `Document.quality`: an estimate of how much of a document
+  is right.** `confidence` answers a narrower question than people read into it.
+  Over the evaluation corpus it spans 0.916 to 0.997 while the character error
+  rate spans 0 to 0.206, and the worst page in the set is reported at 98.8% —
+  above the median. That is not the recognizer being wrong: per line its
+  confidence lands within 1.4% of the share of that line's text that is actually
+  right. A page's error rate is simply made of what recognition never sees — text
+  the detector missed, a column read out of order, a label broken into fragments.
+  The new estimate is fitted from the shape of the output (characters per line,
+  the tenth-percentile line confidence, mean line height relative to the page,
+  mean confidence, the weakest line's margin) against 100 ground-truth files:
+  **Spearman −0.75 against the error rate, where confidence manages −0.46**,
+  better on 20 of 20 held-out splits, and it catches all 18 pages with a 10% or
+  worse error rate when flagging below 0.96. `confidence` keeps its meaning and
+  its callers — `drop_score` and `--min-confidence` still filter lines on the
+  recognizer's own score. `Line.margin` exposes the runner-up distance the
+  estimate is partly built from, and `scripts/collect_quality.py` with
+  `scripts/fit_quality.py` re-fit the weights for another corpus. It is `None`
+  for a page with fewer than five lines: every file it was fitted on has at
+  least that many, and a two-line letter in large print reads to the features
+  like a fragmented drawing, so the honest answer there is nothing at all.
+
 - **A command line that reads like one.** Rust orange (`#F74C00`) is the accent —
   what was written, the `done:` total, the version, the language scripts — with
   green, amber and red kept for what they mean: how much a number can be trusted.

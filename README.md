@@ -223,12 +223,19 @@ doc = ocr.scan("invoice.pdf", pages=[0, 1])
 doc.text                      # reading order applied
 doc.markdown()                # headings, lists, paragraphs
 doc.hocr(); doc.alto(); doc.csv(); doc.json()
-doc.confidence                # mean line confidence, 0..1
+doc.quality                   # estimated share of the text that is right, 0..1
+doc.confidence                # what the recognizer was sure of, 0..1
 
 for line in doc.lines:
     print(line.text, round(line.confidence, 3), line.box.as_tuple())
     for word in line.words:
         print("   ", word.text, word.box.as_tuple())
+
+# Route what needs a human: `quality` ranks pages by how wrong they are
+# (Spearman -0.75 over the evaluation corpus), which `confidence` does not
+# (-0.46) — it answers the narrower question of how sure the recognizer was.
+if doc.quality is not None and doc.quality < 0.96:
+    queue_for_review(doc)
 
 # Find something, with the box to highlight it.
 for hit in doc.search("gesamtbetrag"):
@@ -279,8 +286,8 @@ ocrust doctor                                # what is installed, what is missin
 The result goes to stdout and everything about the run to stderr, so
 `ocrust scan x.pdf > text.txt` gives you the text and `-f json | jq` still works.
 Colour is used sparingly — Rust orange for what was written, green, amber or red
-for how much the confidence deserves trust — and switches itself off when stderr
-is not a terminal (`NO_COLOR` honoured, `FORCE_COLOR` obeyed).
+for how much of the page is likely to be right — and switches itself off when
+stderr is not a terminal (`NO_COLOR` honoured, `FORCE_COLOR` obeyed).
 
 ## Models
 

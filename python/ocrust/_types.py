@@ -124,7 +124,7 @@ class Page:
     blocks: Sequence[Block]
     elapsed_ms: float
     #: Estimated share of this page's characters that are right, or ``None``
-    #: for a page with no text. See :attr:`Document.quality`.
+    #: for a page with too little text to judge. See :attr:`Document.quality`.
     quality: float | None = None
 
     @property
@@ -205,12 +205,14 @@ class Document:
     def quality(self) -> float | None:
         """Estimated share of the document's characters that are right.
 
-        ``None`` when no page carried text. Confidence answers a narrower
-        question: it is the recognizer's certainty about the characters it
-        emitted, and it cannot see what never reached it — text the detector
-        missed, a column read out of order, a label broken into fragments. Over
-        the evaluation corpus this estimate ranks pages at Spearman +0.75
-        against +0.50 for confidence. It is an estimate, not a guarantee.
+        ``None`` when no page carried enough text to judge — fewer than five
+        lines is outside everything the estimate was fitted on. Confidence
+        answers a narrower question: it is the recognizer's certainty about the
+        characters it emitted, and it cannot see what never reached it — text the
+        detector missed, a column read out of order, a label broken into
+        fragments. Over the evaluation corpus this estimate ranks pages at
+        Spearman +0.75 against +0.50 for confidence. It is an estimate, not a
+        guarantee.
 
         >>> doc = ocrust.scan("scan.pdf")            # doctest: +SKIP
         >>> if doc.quality and doc.quality < 0.95:   # doctest: +SKIP

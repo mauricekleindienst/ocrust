@@ -48,11 +48,21 @@ const WEIGHTS: [f32; 6] = [
     0.47998,  // the weakest line's margin
 ];
 
+/// Smallest page the estimate will judge.
+///
+/// Every file in the corpus it was fitted on carries at least five lines, so a
+/// shorter page is extrapolation: the features that matter most — how long the
+/// lines are, how tall they stand relative to the page — read a two-line letter
+/// in large print as a fragmented drawing and mark it down. Saying nothing is
+/// the honest answer where there is no evidence.
+const MIN_LINES: usize = 5;
+
 /// Estimated share of the page's characters that are correct, in `0..=1`.
 ///
-/// `None` when the page carries no text, because there is nothing to judge.
+/// `None` when the page carries no text, or too little of it to judge: see
+/// [`MIN_LINES`].
 pub(crate) fn page_quality(lines: &[LineSignals]) -> Option<f32> {
-    if lines.is_empty() {
+    if lines.len() < MIN_LINES {
         return None;
     }
     let x = features(lines);
@@ -102,8 +112,16 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_page_has_nothing_to_judge() {
+    fn a_page_with_too_little_text_is_not_judged() {
+        // No file in the corpus the weights come from has fewer than five lines,
+        // so anything shorter would be guesswork dressed up as a number.
         assert_eq!(page_quality(&[]), None);
+        for count in 1..MIN_LINES {
+            let page: Vec<_> = (0..count).map(|_| line(40, 0.99, 0.98, 0.02)).collect();
+            assert_eq!(page_quality(&page), None, "{count} lines");
+        }
+        let enough: Vec<_> = (0..MIN_LINES).map(|_| line(40, 0.99, 0.98, 0.02)).collect();
+        assert!(page_quality(&enough).is_some());
     }
 
     #[test]
@@ -134,8 +152,8 @@ mod tests {
     #[test]
     fn the_estimate_stays_a_probability() {
         for lines in [
-            vec![line(1, 0.0, 0.0, 1.0)],
-            vec![line(200, 1.0, 1.0, 0.0001)],
+            vec![line(1, 0.0, 0.0, 1.0); MIN_LINES],
+            vec![line(200, 1.0, 1.0, 0.0001); MIN_LINES],
             vec![line(0, 0.5, 0.5, 0.5); 40],
         ] {
             let q = page_quality(&lines).unwrap();

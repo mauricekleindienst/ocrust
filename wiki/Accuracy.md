@@ -147,25 +147,63 @@ Nothing panics, nothing hangs, nothing returns plausible nonsense. A blank page
 is especially worth calling out: the deskew estimator has an ink-fraction guard,
 because an earlier version confidently rotated an empty page by 12°.
 
-## Confidence is usable
+## Which number to trust
 
-Mean line confidence tracks quality closely enough to route documents:
+`confidence` and `quality` answer different questions, and the difference is
+measurable. Over the 100 ground-truth files of the corpus:
 
-| category | confidence |
-|---|---:|
-| clean, born-digital, receipts | 0.99 |
-| aged, fax | 0.98 |
-| Greek | 0.93 |
+| | ranks pages by error rate | range across the corpus |
+|---|---:|---|
+| `doc.confidence` | Spearman −0.46 | 0.916 … 0.997 |
+| `doc.quality` | **Spearman −0.75** | 0.893 … 0.987 |
+
+**`confidence` is the recognizer's certainty about the characters it emitted.**
+It is good at that and badly suited to anything else. Per line it is nearly
+exact: a line's mean character probability lands within 1.4% of the share of
+that line's text that is actually right, and only 58 of 1907 lines in the corpus
+fall below 95% precision. But a page's error rate is made of something the
+recognizer never sees — text the detector missed, a column read out of order, a
+label broken into fragments — so the worst page in the corpus (CER 0.206) is
+reported at 98.8% confident, above the median.
+
+**`quality` estimates how much of a page is right.** It is fitted from the shape
+of the output: characters per line, the tenth-percentile line confidence, mean
+line height relative to the page, mean confidence and the weakest line's margin.
+Held out a third of the files twenty times, it ranked better than confidence on
+20 splits out of 20.
 
 ```python
 doc = ocrust.scan("scan.tiff")
-if doc.confidence < 0.9:
-    queue_for_human_review(doc)
+if doc.quality is not None and doc.quality < 0.96:
+    queue_for_human_review(doc)          # catches every bad page in the corpus
+```
 
+On the corpus, that threshold flags 25 of 100 pages and among them all 18 with a
+character error rate of 10% or worse. Tighten it to 0.97 for a wider net, loosen
+it to 0.94 for the obvious failures only.
+
+`confidence` stays the right number for dropping junk *lines* — it is what
+`drop_score` and `--min-confidence` filter on:
+
+```python
 for line in doc.lines:
     if line.confidence < 0.7:
         highlight(line.box)
 ```
+
+`quality` is `None` for a page with fewer than five lines. Every file the
+weights were fitted on carries at least that many, so a shorter page would be
+extrapolation — and the features that matter most, how long the lines are and
+how tall they stand relative to the page, read a two-line letter in large print
+as a fragmented drawing. Saying nothing is the honest answer where there is no
+evidence; the command line then prints the page and line counts and no quality
+figure.
+
+The estimate is narrow: 0.893 to 0.987 over the corpus. It ranks pages well and
+it does not claim to say "this page is 20% wrong". Widening it needs more ground
+truth than 100 files. Re-fit it for your own documents with
+`scripts/collect_quality.py` and `scripts/fit_quality.py`, which print their own
+held-out numbers.
 
 ## Measuring your own documents
 
