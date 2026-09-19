@@ -9,10 +9,14 @@ wrong page, a crash or a build that would not compile.
 
 ### Added
 
-- **A command line that reads like one.** Colour used sparingly and switched off
-  for a pipe (`NO_COLOR` honoured, `FORCE_COLOR` respected): a red `ocrust:` on
-  errors, confidence in green, amber or red, output paths in bold, dim labels in
-  `doctor`, `languages` and `models`. Counts in English (`1 page, 2 lines`, not
+- **A command line that reads like one.** Rust orange (`#F74C00`) is the accent —
+  what was written, the `done:` total, the version, the language scripts — with
+  green, amber and red kept for what they mean: how much a number can be trusted.
+  Colour is used sparingly, switched off for a pipe (`NO_COLOR` honoured,
+  `FORCE_COLOR` respected), and stepped down through 256 and 16 colours for
+  terminals that cannot do 24-bit. A red `ocrust:` on errors, dim labels in
+  `doctor`, `languages` and `models`, and long paths folded on their separators
+  so a diagnostic never runs off the screen. Counts in English (`1 page, 2 lines`, not
   `1 page(s)`), durations that turn into seconds and minutes when they should,
   sizes in kB or MB, a `done:` total after a batch, a hint when `ocr` skipped
   every page because it already had text, long messages folded to the terminal
