@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-19
 
 Accuracy is unchanged throughout: the corpus run reproduces mean CER 0.040,
 median 0.006, WER 0.120 and word recall 0.892 file for file, and a drawing's

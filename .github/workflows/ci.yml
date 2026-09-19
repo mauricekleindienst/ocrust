@@ -181,6 +181,11 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: upload/models
+          # The model bundle has its own version and changes far more rarely than
+          # the engine. A release that does not touch the models rebuilds the same
+          # wheel, and uploading it again is an error that would stop the engine
+          # being published at all.
+          skip-existing: true
       - name: Publish ocrust
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
