@@ -29,9 +29,9 @@ Français: déjà payé
 | **[Quickstart](Quickstart.md)** | The five calls that cover most work |
 | **[Python API](Python-API.md)** | `Ocr`, `Document`, every keyword argument, result objects |
 | **[CLI](CLI.md)** | `scan`, `ocr`, `pdf`, `tiff`, `languages`, `models`, `doctor` |
-| **[PDF workflows](PDF-workflows.md)** | Adding a text layer to existing PDFs versus building one from images |
+| **[PDF workflows](PDF-workflows.md)** | Adding a text layer to existing PDFs, and converting anything readable into one |
 | **[Network shares](Network-shares.md)** | UNC paths, mapped drives, retries on a share that drops |
-| **[Languages](Languages.md)** | The 27 covered languages, and why declaring one is a check |
+| **[Languages](Languages.md)** | The 26 covered languages, and why declaring one is a check |
 | **[Models](Models.md)** | Where models come from, how to bring your own, the one-GitHub-source rule |
 | **[Performance](Performance.md)** | Measured numbers, what the knobs do, worker scaling |
 | **[Accuracy](Accuracy.md)** | Error rates per document type, and where the engine is weak |
@@ -60,7 +60,7 @@ three rules:
 | | |
 |---|---|
 | Input | PNG, JPEG, WebP, BMP, GIF, PNM/PBM/PGM/PPM, TGA, HDR, QOI, multi-page TIFF (1-bit CCITT included), PDF, `bytes`, numpy arrays, PIL images |
-| Output | text, Markdown, JSON, hOCR, ALTO XML, CSV, searchable PDF (Unicode text layer), PDF text layer, multi-page TIFF |
+| Output | text, Markdown, JSON, hOCR, ALTO XML, CSV, searchable PDF (Unicode text layer, one file from many inputs), PDF text layer, multi-page TIFF |
 | Languages | 26 complete (Latin, Japanese, Chinese); 35 known and checkable, Greek among the ones refused |
 | Models | PP-OCRv6, 18 708 characters, 31 MB, Apache-2.0 |
 | Speed | ~670 ms per 200 dpi A4 page on four CPU cores |

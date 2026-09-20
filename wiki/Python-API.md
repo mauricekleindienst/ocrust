@@ -12,6 +12,7 @@ ocrust.scan(source)          -> Document
 ocrust.scan_many(sources)    -> Iterator[Document]
 ocrust.ocr_pdf(source)       -> tuple[bytes, dict[str, int]]
 ocrust.searchable_pdf(src)   -> bytes
+ocrust.searchable_pdf_many(sources) -> tuple[bytes, int]   # one PDF, many inputs
 ocrust.to_tiff(source)       -> tuple[bytes, Document]
 ocrust.languages()           -> tuple[dict, ...]
 ocrust.known_languages()     -> tuple[dict, ...]
@@ -75,6 +76,7 @@ ocr.scan_many(sources) -> Iterator[Document]      # paths, directories, patterns
 ocr.ocr_pdf(source, *, dpi=None, skip_pages_with_text=True, compress=True) -> (bytes, report)
 ocr.plan_pdf(source, *, skip_pages_with_text=True) -> tuple[dict, ...]
 ocr.searchable_pdf(source, *, dpi=None, jpeg_quality=80) -> bytes
+ocr.searchable_pdf_many(sources, *, dpi=None, jpeg_quality=80) -> (bytes, pages)
 ocr.to_tiff(source, *, gray=False) -> (bytes, Document)
 
 ocr.models            # the four resolved file paths
@@ -146,6 +148,30 @@ some pages were scanned. The box is the union of the *words* the hit covers, whi
 is what makes highlighting possible; without word boxes (`word_boxes=False`) it is
 the line's box. Matching is case-insensitive by default, because OCR case is not
 reliable enough to search on.
+
+## Converting into one PDF
+
+```python
+data, pages = ocrust.searchable_pdf_many(["fax.tiff", "photo.jpg", "old.pdf"])
+data, pages = ocrust.searchable_pdf_many(["archive/"])        # a folder, recursively
+data, pages = ocrust.searchable_pdf_many(["scans/*.tif"])     # or a pattern
+Path("one.pdf").write_bytes(data)
+```
+
+Anything in `READABLE_SUFFIXES` can be mixed — images in any offered format,
+multi-page TIFFs, existing PDFs — and they become the pages of one searchable
+document, in the order given. Folders are walked recursively and sorted, so the
+same folder gives the same PDF twice running. Each page keeps its own size,
+computed from its pixels and `dpi`, rather than being stretched onto a common
+sheet. The second return value is the page count, which is not the number of
+inputs when a multi-page TIFF or PDF is among them.
+
+Pages are compressed as they are scanned, so a hundred inputs cost the memory of
+one.
+
+It re-renders every page, which is what lets different formats sit on equal
+footing. For a PDF whose pages must stay exactly as they are, use `ocr_pdf`
+instead — it only adds the text layer.
 
 ## Results
 

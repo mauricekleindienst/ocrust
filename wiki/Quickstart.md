@@ -65,6 +65,8 @@ added. Pages that already contain text are skipped. See [PDF workflows](PDF-work
 ocrust scan invoice.pdf                      # text on stdout
 ocrust scan *.tiff -f json -o results/       # batch, one file per input
 ocrust ocr scan.pdf -o scan.ocr.pdf          # text layer over the original
+ocrust pdf photo.jpg                         # a searchable PDF from an image
+ocrust pdf archive/ -o archive.pdf           # a folder of mixed formats, one PDF
 ocrust tiff scan.pdf --gray --sidecar text   # archive TIFF plus its text
 ocrust languages                             # what the model covers
 ```

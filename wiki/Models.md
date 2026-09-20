@@ -28,8 +28,9 @@ The files are byte-identical to that distribution; every SHA-256 is recorded in
 `models/ppocrv6.json`.
 
 Why v6 and not v5: the v5 charset (18 383 classes) is missing characters several
-European languages need, so v5 cannot spell them. v6 (18 708) covers 27
-languages completely. See [Languages](Languages.md).
+European languages need, so v5 cannot spell them. v6 (18 708) covers 26
+languages completely — Greek and Vietnamese are not among them, for the reason
+given in [Languages](Languages.md).
 
 ## One source for everything
 

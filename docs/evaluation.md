@@ -71,10 +71,11 @@ the engine or its defaults, not a measurement artifact:
 
 ## Results after the fixes
 
-118 files, 203 pages, 416 MB on four CPU cores, with the shipped defaults:
+132 files, 217 pages, 449 MB on four CPU cores, with the shipped defaults:
 
-- **median 673 ms per page** (mean 805, which the A0 sheet dominates), 163.3 s for
-  the whole corpus
+- **median 592 ms per page**, 723 ms averaged over the corpus as a whole, and a
+  per-file mean of 814 ms that the A0 sheet dominates at 27.9 s; 156.8 s for the
+  whole run
 - **median CER 0.003**, mean 0.026, mean WER 0.083, mean word recall 0.927,
   over the 118 files in a language the bundle can write (the four Greek and four
   Vietnamese pages are held out and reported on their own)
@@ -101,8 +102,9 @@ rotated PDFs 0.79 → 0.054, drawings 0.47 → 0.170, forms 0.156 → 0.063, rec
 columns before rows: three-column pages 0.003 → 0.000, two-column pages from
 being read across the gutter to 0.000, and a full-page price list from two
 columns to four — every document already in the corpus unchanged, the mean
-0.040 → 0.036 on a corpus grown by those two layouts (0.031 once Greek, which
-the bundle cannot write, stopped counting toward it).
+0.040 → 0.036 on a corpus grown by those two layouts, and 0.026 today: Greek and
+Vietnamese, which the bundle cannot write, no longer count toward it, and the
+orientation classifier stopped turning single lines over.
 
 What is still weak, and why:
 

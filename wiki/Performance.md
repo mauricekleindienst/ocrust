@@ -8,7 +8,7 @@ All numbers below were measured on the generated corpus — 132 files, 217 pages
 
 | | |
 |---|---|
-| Throughput | **median 673 ms per page** (mean 805, dominated by one A0 sheet) |
+| Throughput | **median 592 ms per page** (723 ms averaged over the corpus; the per-file mean of 814 ms is dominated by one A0 sheet) |
 | Whole corpus | 163.3 s for 203 pages, 416 MB of input |
 | Typical A4 at 200 dpi | 0.6–1.0 s, one page worker |
 | Cold start | ~130 MB and a moment to load the models — once per `Ocr` |

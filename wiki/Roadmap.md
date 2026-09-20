@@ -4,33 +4,38 @@ Ordered by how much the measurements say it matters, not by how interesting it i
 to build. Every item here is a known gap, named in [Accuracy](Accuracy.md) or
 [Languages](Languages.md) with the number that justifies it.
 
-## 1. Table structure recognition
+## 1. Table structure from a model, not a threshold
 
-**Why:** the largest remaining accuracy loss by a wide margin, and the one place
-where a threshold is doing a model's job. Receipts sit at CER 0.188 with word
-recall 0.882, drawings at 0.170 / 0.855, forms at 0.063 / 0.744, and the A0 sheet
-at 0.151 / 0.868. The words are read correctly; their *order* is wrong. Reading
-order today is geometric — XY-cut with baseline merging and repeating-column
-detection — and it cannot infer that a form's cells are a grid, or that a title
+The geometric half of this shipped in 0.2.0: cells are found from ruling lines
+and alignment, rows and columns are assigned, and a `Table` block renders into
+Markdown, hOCR and CSV. Price lists went to CER 0.000 and the corpus finds 16
+tables. What remains is the part a threshold cannot do.
+
+**Why:** it is still the largest accuracy loss by a wide margin, and the words are
+read correctly — their *order* is wrong. Drawings sit at CER 0.170 with word
+recall 0.855, forms at 0.063 / 0.744, the A0 sheet at 0.147 / 0.895. Reading order
+is geometric, and it cannot infer that a form's cells are a grid or that a title
 block's two columns are fields rather than a row.
 
 The A0 sheet makes the case concretely: joining a title block's fields into rows
 is what the A3 drawings need (0.391 → 0.197) and what the A0 sheet loses by
-(0.042 → 0.151). No gap threshold separates those two, because they are the same
+(0.042 → 0.147). No gap threshold separates those two, because they are the same
 document at two sheet sizes. A structure model would decide it properly.
 
-**Shape of the fix:** cell detection over the detected boxes (ruling lines when
-they exist, alignment clustering when they do not), then row/column assignment,
-then a `Table` block kind that Markdown, hOCR and CSV can render — and, with
-cells known, field-wise rather than row-wise text for blocks that are forms
-rather than tables. A learned table-structure model would do better; a geometric
-one would already close most of the gap.
+**Shape of the fix:** a learned table- and form-structure model over the detected
+boxes, and — with cells known — field-wise rather than row-wise text for blocks
+that are forms rather than tables. Receipts show the other half of the problem:
+CER 0.183 against a word error rate of 0.059, which is a reading-order cost, not
+a recognition one.
 
 ## 2. More scripts
 
 **Why:** Cyrillic (Russian, Ukrainian, Bulgarian, Serbian), Korean, Arabic and
 Devanagari are known, checked and **not covered** — `Ocr(lang="ru")` refuses
-rather than returning nonsense, which is correct but not useful.
+rather than returning nonsense, which is correct but not useful. Greek and
+Vietnamese joined them in 0.2.2: the bundle has their plain letters and not the
+accents or tone marks the languages are written with, which is the same gap in a
+less obvious disguise.
 
 **Shape of the fix:** additional PP-OCR recognition bundles in `models/`, each
 with its manifest entry, plus per-bundle language coverage so `ocrust languages`
@@ -60,6 +65,19 @@ the calibration curve, and document a threshold that means something.
 
 ## Done since this list was written
 
+- **A converter.** `ocrust pdf` takes files, folders and patterns together and
+  writes anything readable as the pages of one searchable PDF (0.2.3).
+- **Bilevel TIFF is readable.** Mode-1 pages — scanned archives and CCITT faxes —
+  failed outright until 0.2.3, and four formats that could not be opened at all
+  are no longer offered.
+- **Tables from line geometry**, with `Table` and `Cell` in the API and Markdown,
+  hOCR and CSV renderings (0.2.0). See item 1 for what is left.
+- **Pages are streamed, not buffered.** Peak memory no longer follows the page
+  count, for TIFF, PDF and the searchable-PDF path (0.2.0).
+- **The language check tells the truth.** Greek and Vietnamese were reported as
+  covered while the bundle could not write them; both are now refused with their
+  missing characters named, and `ẞ` is reported as a substitution rather than
+  costing German its coverage (0.2.2).
 - **Unicode PDF text layers.** CJK, Cyrillic and Greek go into the layer as
   UTF-16 through a Type0 font with a `ToUnicode` map, instead of `?`. Nothing is
   embedded, because nothing is drawn. Corpus `unmappable_chars`: 340 → 0.
