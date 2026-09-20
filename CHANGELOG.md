@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 — 2026-09-20
+
+An honesty release. Nothing about how pages are read changed except for one bug,
+and that bug is the reason the rest was found: chasing a single shredded line
+through a rotated PDF meant auditing the language table, which turned out to be
+claiming two languages the bundled model cannot write. `ocrust languages` now
+reports 26 covered rather than 27, and the corpus figures cover only the
+languages that are actually claimed.
+
+Accuracy over the 108 files in a language the bundle can write: mean CER
+**0.029**, median **0.003**, WER 0.089, word recall **0.922**. The median halved
+against 0.2.1 because of the orientation fix; the mean moved because Greek and
+Vietnamese stopped being averaged in with the languages that work.
+
+216 Rust unit tests, 8 Rust end-to-end tests, 116 Python tests.
 
 ### Fixed
 
