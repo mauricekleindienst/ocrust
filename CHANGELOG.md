@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A single line was turned upside down on a page that was not.** The
+  orientation classifier samples eight line crops and, when they agree, applies
+  their verdict to the whole page. When the sample *disagreed* it fell back to
+  deciding crop by crop — and one line of eleven on a `/Rotate 90` PDF then
+  disagreed with its neighbours and was rotated alone:
+
+  ```text
+  truth:  Zahlbar innerhalb 30 Tagen ohne Abzug.
+  got:    ahz n   h ug
+  ```
+
+  Detection was never at fault: the box matched the one on the page that read
+  correctly to within four pixels, and German is fully covered by the charset.
+  The line's own confidence fell to 0.67 while the ten around it stayed above
+  0.98, so the page average of 0.963 hid it.
+
+  A page is upside down as a whole, which is what the module always documented,
+  so the verdict is now the page's: when the sample disagrees every crop is
+  scored and the majority decides for all of them, with an even split going to
+  the stronger evidence. `/Rotate 90` and `/Rotate 180` pages now read character
+  for character, the rotated-PDF category went from CER 0.054 to **0.002**, and
+  the corpus median moved 0.006 → 0.003.
+
+- **Alphabets that named one case of a letter but not the other.** `Ả` hid behind
+  `ả` in Vietnamese, `Ĺ Ŕ` behind `ĺ ŕ` in Slovak, `Í Î Ó Ú` behind their
+  lowercase in Italian, and Serbian's capital `Џ` was a second `Д`. Estonian
+  never declared `š ž` at all. Only the Vietnamese one was hiding a real gap in
+  the bundle, but text set in the undeclared case walked past the check in every
+  case. A test now derives the pairs and fails on the next one.
+
 ### Removed
 
 - **Greek is no longer claimed as a supported language.** `ocrust languages` now
@@ -25,11 +57,41 @@
   itself the moment a Greek-capable recognizer is installed. A unit test pins
   that the plain letters alone do not count as coverage.
 
+- **Vietnamese is no longer offered as a near miss.** It was reported at "98%,
+  missing `ạ ả`" — measured against 21 of the 146 letter forms the language
+  actually has. Quốc ngữ is 12 vowel letters × 5 tones in both cases, and the
+  bundle carries 58 of them: no tone mark on any circumflex, breve or horn vowel,
+  so `ấ ầ ẩ ẫ ậ ắ ằ ẳ ẵ ặ ế ề ể ễ ệ ố ồ ổ ỗ ộ ớ ờ ở ỡ ợ ứ ừ ử ữ ự` and their
+  capitals are all absent. The marks are the language — `phai`, `phái` and
+  `phải` are three words — and the vowel was dropped outright rather than
+  substituted: `Phải trả` came back as `Phi tr`, `Tổng cộng` as `Tng cng`, at
+  confidence 0.98. The entry now declares the alphabet, which puts Vietnamese at
+  55%, and `lang="vi"` refuses naming all 88 characters instead of two.
+
   Accuracy figures now cover the 108 corpus files in a language the bundle can
-  write: mean CER **0.031**, median 0.006, WER 0.093, word recall **0.918**. No
-  document reads differently — the four Greek pages stay in the corpus and are
-  scored in a section of their own in the evaluation report, so the cost of the
-  gap stays on the record instead of being averaged into the languages that work.
+  write: mean CER **0.029**, median 0.003, WER 0.089, word recall **0.922**. No
+  document reads differently for this reason — the Greek and Vietnamese pages
+  stay in the corpus and are scored in a section of their own in the evaluation
+  report, so the cost of the gap stays on the record instead of being averaged
+  into the languages that work.
+
+### Added
+
+- **Characters a language accepts but does not require are now reported instead
+  of ignored.** `ẞ` is absent from the bundle, and German stays covered: the
+  canonical uppercase of `ß` is `SS`, `ẞ` has only been permitted since 2017, and
+  what the recognizer returns for `STRAẞE` is `STRAßE` — the right letters with
+  one in the wrong case, not a corrupted word. Requiring it would have refused
+  German over a character German obliges nobody to use, so `ocrust languages`
+  says so instead:
+
+  ```console
+  covered, with a substitution (the language does not require these):
+    de (German): no ẞ
+  ```
+
+  New: `Ocr.optional_language_gaps()` in Python, `Engine::optional_language_gaps`
+  in Rust, and `Coverage::missing_optional`, which never counts against coverage.
 
 ## 0.2.1 — 2026-09-19
 

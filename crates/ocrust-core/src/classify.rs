@@ -59,39 +59,60 @@ impl OrientationClassifier {
 
     /// Rotates crops that are upside down, in place.
     ///
-    /// Returns the angle applied per crop (`0.0` or `180.0`).
+    /// Returns the angle applied per crop (`0.0` or `180.0`) — one verdict for
+    /// the whole page, so every crop gets the same angle.
     ///
     /// A sample is classified first; when it is unanimous its verdict covers the
-    /// whole page, which is the common case and saves most of the work.
+    /// whole page, which is the common case and saves most of the work. When the
+    /// sample disagrees every crop is scored and the page decides by majority.
     pub fn correct(&self, crops: &mut [RgbImage]) -> Result<Vec<f32>> {
+        if crops.is_empty() {
+            return Ok(Vec::new());
+        }
         let sample = self.config.sample_size;
         if sample > 0 && crops.len() > sample {
             let step = crops.len() / sample;
             let indices: Vec<usize> = (0..sample).map(|i| i * step).collect();
-            let mut probe: Vec<RgbImage> = indices.iter().map(|&i| crops[i].clone()).collect();
-            let verdicts = self.classify_all(&mut probe)?;
-
-            let flipped = verdicts.iter().filter(|a| **a >= 90.0).count();
+            let probe: Vec<RgbImage> = indices.iter().map(|&i| crops[i].clone()).collect();
+            let scores = self.probabilities(&probe)?;
+            let flipped = self.votes_for_upside_down(&scores);
             if flipped == 0 {
                 // Unanimously upright: nothing to do for any crop.
                 return Ok(vec![0.0; crops.len()]);
             }
-            if flipped == verdicts.len() {
+            if flipped == scores.len() {
                 // Unanimously upside down: turn every crop without asking again.
-                for crop in crops.iter_mut() {
-                    *crop = image::imageops::rotate180(crop);
-                }
-                return Ok(vec![180.0; crops.len()]);
+                return Ok(self.turn_over(crops));
             }
+            // The sample disagrees, so ask about every crop below.
         }
-        self.classify_all(crops)
+
+        let scores = self.probabilities(crops)?;
+        if page_reads_upside_down(&scores, self.config.threshold) {
+            Ok(self.turn_over(crops))
+        } else {
+            Ok(vec![0.0; crops.len()])
+        }
     }
 
-    /// Classifies and rotates every crop.
-    fn classify_all(&self, crops: &mut [RgbImage]) -> Result<Vec<f32>> {
-        let mut angles = vec![0.0f32; crops.len()];
+    fn votes_for_upside_down(&self, scores: &[f32]) -> usize {
+        votes_for_upside_down(scores, self.config.threshold)
+    }
+
+    /// Turns every crop over, which is the only way a page is ever turned.
+    fn turn_over(&self, crops: &mut [RgbImage]) -> Vec<f32> {
+        for crop in crops.iter_mut() {
+            *crop = image::imageops::rotate180(crop);
+        }
+        vec![180.0; crops.len()]
+    }
+
+    /// The model's probability that each crop is upside down. Leaves the crops
+    /// untouched: rotating is `correct`'s decision, once, for the page.
+    fn probabilities(&self, crops: &[RgbImage]) -> Result<Vec<f32>> {
+        let mut scores = vec![0.0f32; crops.len()];
         if crops.is_empty() {
-            return Ok(angles);
+            return Ok(scores);
         }
         let (h, w) = (
             self.config.image_height.max(8) as usize,
@@ -100,7 +121,7 @@ impl OrientationClassifier {
 
         for chunk_start in (0..crops.len()).step_by(self.config.batch_size.max(1)) {
             let chunk_end = (chunk_start + self.config.batch_size.max(1)).min(crops.len());
-            let chunk = &mut crops[chunk_start..chunk_end];
+            let chunk = &crops[chunk_start..chunk_end];
             let n = chunk.len();
 
             let mut data = vec![0f32; n * 3 * h * w];
@@ -133,16 +154,35 @@ impl OrientationClassifier {
                     "unexpected orientation output shape {shape:?}, expected [batch, 2]"
                 )));
             }
-            for (b, img) in chunk.iter_mut().enumerate() {
-                let p_upside_down = out[[b, 1]];
-                if p_upside_down >= self.config.threshold {
-                    *img = image::imageops::rotate180(img);
-                    angles[chunk_start + b] = 180.0;
-                }
+            for b in 0..n {
+                scores[chunk_start + b] = out[[b, 1]];
             }
         }
-        Ok(angles)
+        Ok(scores)
     }
+}
+
+/// Whether the page as a whole reads upside down.
+///
+/// The verdict belongs to the page, never to a single line. A page is upside
+/// down as a whole, and this classifier is not good enough per crop to be
+/// trusted against its neighbours: deciding line by line turned one correctly
+/// detected line of a `/Rotate 90` PDF into `ahz n   h ug` while the ten lines
+/// around it read perfectly — and dropped that line's confidence to 0.67 while
+/// theirs stayed above 0.98.
+fn page_reads_upside_down(scores: &[f32], threshold: f32) -> bool {
+    let flipped = votes_for_upside_down(scores, threshold);
+    let upright = scores.len() - flipped;
+    if flipped != upright {
+        return flipped > upright;
+    }
+    // An even split goes to the stronger evidence.
+    let mean = scores.iter().sum::<f32>() / scores.len().max(1) as f32;
+    mean >= threshold
+}
+
+fn votes_for_upside_down(scores: &[f32], threshold: f32) -> usize {
+    scores.iter().filter(|p| **p >= threshold).count()
 }
 
 #[cfg(test)]
@@ -156,6 +196,34 @@ mod tests {
         // With fewer crops than the sample size every crop is classified, which
         // is what `correct` falls back to.
         assert!(config.sample_size > 0);
+    }
+
+    /// The failure this rule exists for: one line of eleven scoring as upside
+    /// down on a page that plainly is not. Before the page decided as a whole,
+    /// that line was rotated on its own and came back as `ahz n   h ug`.
+    #[test]
+    fn one_dissenting_line_does_not_turn_itself_over() {
+        let t = OrientationConfig::default().threshold;
+        let mut scores = vec![0.01f32; 11];
+        scores[9] = 0.95;
+        assert!(!page_reads_upside_down(&scores, t));
+        assert_eq!(votes_for_upside_down(&scores, t), 1);
+    }
+
+    #[test]
+    fn a_page_that_is_upside_down_turns_over_whole() {
+        let t = OrientationConfig::default().threshold;
+        let mut scores = vec![0.99f32; 11];
+        // One line reads upright against ten that do not; the page still turns.
+        scores[3] = 0.2;
+        assert!(page_reads_upside_down(&scores, t));
+    }
+
+    #[test]
+    fn an_even_split_follows_the_stronger_evidence() {
+        let t = OrientationConfig::default().threshold;
+        assert!(page_reads_upside_down(&[0.99, 0.99, 0.89, 0.85], t));
+        assert!(!page_reads_upside_down(&[0.91, 0.92, 0.02, 0.03], t));
     }
 
     #[test]

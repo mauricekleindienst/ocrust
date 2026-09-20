@@ -236,6 +236,12 @@ impl Engine {
     }
 
     /// Languages the model *almost* covers, best first.
+    /// Covered languages the model is short of an optional character for, such
+    /// as German without `ẞ`. A note for the reader, never a refusal.
+    pub fn optional_language_gaps(&self) -> Vec<Coverage> {
+        lang::optional_gaps(self.recognizer.dict())
+    }
+
     pub fn partial_languages(&self, min_ratio: f32) -> Vec<Coverage> {
         lang::partial(self.recognizer.dict(), min_ratio)
     }

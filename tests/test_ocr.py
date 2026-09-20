@@ -140,10 +140,12 @@ def test_scan_many_reads_a_directory(engine, invoice_pdf, tmp_path):
 
 
 def test_cli_prints_on_a_console_that_is_not_utf8(engine):
-    """A redirected stdout on Windows is cp1252, and `languages` lists Vietnamese.
+    """A redirected stdout on Windows is cp1252, and `languages` prints `ẞ`.
 
     `ocrust languages` ended in a `UnicodeEncodeError` there, which
-    `PYTHONIOENCODING` reproduces on any platform.
+    `PYTHONIOENCODING` reproduces on any platform. The character that trips it
+    used to be Vietnamese `ạ ả`; now that Vietnamese is no longer offered it is
+    the `ẞ` in German's substitution note, which cp1252 cannot encode either.
     """
     import os
     import shutil
@@ -160,7 +162,7 @@ def test_cli_prints_on_a_console_that_is_not_utf8(engine):
     result = subprocess.run([exe, "languages"], capture_output=True, env=env)  # noqa: S603
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
     assert b"UnicodeEncodeError" not in result.stderr
-    assert b"Vietnamese" in result.stdout
+    assert b"German" in result.stdout
 
 
 def test_page_selection_applies_to_in_memory_images(engine, invoice_pdf):
