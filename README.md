@@ -109,11 +109,17 @@ completely:
 | Latin | English, German, French, Spanish, Italian, Portuguese, Dutch, Swedish, Danish, Norwegian, Finnish, Icelandic, Polish, Czech, Slovak, Hungarian, Romanian, Turkish, Croatian, Slovenian, Estonian, Latvian, Lithuanian |
 | Han / Kana | Chinese (Simplified and Traditional), Japanese |
 
-Greek is **not** among them. The bundle has the plain Greek letters but none of
-the accented vowels and no final sigma, and Greek cannot be written without
-them, so asking for `el` fails with the missing characters named rather than
-returning accent-stripped text. Point `--models` at a Greek-capable bundle and
+Greek and Vietnamese are **not** among them. The bundle has the plain Greek
+letters but no accented vowel and no final sigma, and 58 of Vietnamese's 146
+tone-marked forms; neither language can be written without what is missing, so
+asking for `el` or `vi` fails with the characters named rather than returning
+text with the marks stripped out. Point `--models` at a bundle that has them and
 the check passes on its own.
+
+One character is reported without being refused: `ẞ` is absent, and German is
+covered anyway, because German does not require it — `ß` uppercases to `SS`, and
+the recognizer returns `STRAßE` for `STRAẞE`, the right letters with one in the
+wrong case.
 
 ```bash
 ocrust languages          # what the installed model covers

@@ -66,10 +66,14 @@ def load_font(kind: str, size: int) -> ImageFont.FreeTypeFont:
 
 #: Corpus languages the bundled recognizer cannot write, kept as evidence.
 #:
+#: Greek has the plain letters and no accented vowel; Vietnamese has the plain
+#: vowels and 58 of its 146 tone-marked forms. Neither is a script the bundle is
+#: short of — it is the marks that carry the language.
+#:
 #: Their pages are still generated and still scanned — a reader deserves to see
 #: what an unsupported script actually looks like coming out — but they are held
 #: out of the accuracy figures, which describe the languages ocrust claims.
-UNSUPPORTED_SCRIPTS: frozenset[str] = frozenset({"el"})
+UNSUPPORTED_SCRIPTS: frozenset[str] = frozenset({"el", "vi"})
 
 TEXTS: dict[str, list[str]] = {
     "de": [
@@ -144,6 +148,16 @@ TEXTS: dict[str, list[str]] = {
         "Σύνολο: 4.812,50 EUR",
         "ΦΠΑ 24 %: 1.155,00 EUR",
         "Πληρωτέο: 5.967,50 EUR",
+    ],
+    "vi": [
+        "HÓA ĐƠN 2026-04-1187",
+        "Công ty Cơ khí Thành phố",
+        "Đường Nguyễn Huệ 42, Quận 1",
+        "Ngày giao hàng: 17/03/2026",
+        "Mặt hàng 1: thanh dẫn hướng FS-220, số lượng 12",
+        "Tổng cộng: 4.812,50 EUR",
+        "Thuế 10 %: 481,25 EUR",
+        "Phải trả: 5.293,75 EUR",
     ],
     "ja": [
         "請求書 2026-04-1187",

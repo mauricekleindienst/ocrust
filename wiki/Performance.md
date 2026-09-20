@@ -1,6 +1,6 @@
 # Performance
 
-All numbers below were measured on the generated corpus — 118 files, 203 pages,
+All numbers below were measured on the generated corpus — 122 files, 207 pages,
 416 MB — on **four CPU cores**, with the shipped defaults. Reproduce them with
 `scripts/evaluate_corpus.py` ([Evaluation](Evaluation.md)).
 

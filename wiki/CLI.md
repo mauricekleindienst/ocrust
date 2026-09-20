@@ -197,8 +197,8 @@ $ ocrust languages
   kana        ja (Japanese)
   latin       cs (Czech), da (Danish), de (German), en (English), …
 
-nearly covered (a few characters missing):
-  vi (Vietnamese): 98%, missing ạ ả
+covered, with a substitution (the language does not require these):
+  de (German): no ẞ
 ```
 
 `--all` lists every language `ocrust` can check, covered or not; `--json` gives

@@ -423,6 +423,18 @@ class Ocr:
             for code, name, ratio, missing in self._engine.partial_languages(min_ratio)
         )
 
+    def optional_language_gaps(self) -> tuple[dict[str, object], ...]:
+        """Covered languages the model lacks an optional character for.
+
+        German is the case in point: without ``ẞ`` the model returns ``STRAßE``
+        for ``STRAẞE`` — the right letters, one in the wrong case. The language
+        is covered, so this is a note rather than a refusal.
+        """
+        return tuple(
+            {"code": code, "name": name, "missing": missing}
+            for code, name, missing in self._engine.optional_language_gaps()
+        )
+
     @property
     def charset_size(self) -> int:
         """Number of characters the recognition model can emit."""

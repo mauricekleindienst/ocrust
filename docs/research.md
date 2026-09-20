@@ -110,7 +110,12 @@ Worth knowing, and covered by the test suite:
 
 - PP-OCRv6 transcribes the uppercase ligature `Æ` as `AE`. Lowercase `æ` is
   returned correctly.
-- Vietnamese is at 98% coverage (`ạ ả` are missing), so it is reported as a near
-  miss rather than as supported.
+- Vietnamese is at 55% coverage: the bundle has 58 of the 146 precomposed
+  tone-marked forms of quốc ngữ, so the language cannot be written with it. It
+  was reported as a 98% near miss until the entry listed the alphabet instead of
+  a sample of it.
+- `ẞ` is absent, and German is covered anyway: the language does not require it
+  (`ß` uppercases to `SS`), and the recognizer returns `STRAßE` for `STRAẞE`.
+  It is reported as a substitution rather than refused.
 - Cyrillic, Arabic and Devanagari are not covered by this bundle at all and need
   a script-specific recognition model.

@@ -1,19 +1,20 @@
 # Accuracy
 
-Every number here comes from the generated corpus — 118 files, 203 pages, all
+Every number here comes from the generated corpus — 122 files, 207 pages, all
 with exact ground truth — and can be reproduced in about three minutes
 ([Evaluation](Evaluation.md)). Nothing is cherry-picked, including the bad rows.
 The figures cover the 108 files in a language the bundled model can actually
-write; the four Greek pages are scored separately, for the reason below.
+write; the four Greek and four Vietnamese pages are scored separately, for the
+reason below.
 
 ## Overall
 
 | metric | value |
 |---|---|
-| mean character error rate (CER) | **0.031** |
-| median CER | **0.006** |
-| mean word error rate (WER) | 0.093 |
-| mean word recall | 0.918 |
+| mean character error rate (CER) | **0.029** |
+| median CER | **0.003** |
+| mean word error rate (WER) | 0.089 |
+| mean word recall | 0.922 |
 | unexpected failures | **0** |
 
 The gap between mean and median is the whole story: most documents are read
@@ -144,10 +145,35 @@ being read straight across the gutter to 0.000, and a page that is nothing but a
 price list from two columns to four. Every document that was already in the
 corpus reads exactly as it did — the mean moved 0.040 → 0.036 because the corpus
 grew by the layouts it had been missing, which is also why these three bugs
-lasted as long as they did. (It reads 0.031 now only because Greek, which the
-bundle cannot write, no longer counts toward it.)
+lasted as long as they did. (It reads 0.029 now because Greek and Vietnamese,
+which the bundle cannot write, no longer count toward it, and because the
+orientation classifier stopped turning single lines over — see below.)
 
 ## Robustness
+
+### One line, turned over on its own
+
+A page that arrives upside down is fixed by the orientation classifier, which
+asks the `cls` model whether a line crop reads the right way up. It samples eight
+crops and, when they agree, applies their verdict to the page — but when the
+sample *disagreed* it used to fall back to deciding line by line. On a
+`/Rotate 90` PDF that made one line of eleven disagree with its neighbours, and
+it was turned over on its own:
+
+```text
+truth:  Zahlbar innerhalb 30 Tagen ohne Abzug.
+got:    ahz n   h ug
+```
+
+Detection was never wrong — the box matched the one on the page that read
+correctly to within four pixels — and that line's confidence dropped to 0.67
+while the ten around it stayed above 0.98, so the page average of 0.963 hid it.
+A page is upside down as a whole, so the verdict is now the page's: when the
+sample disagrees every crop is scored and the majority decides for all of them.
+Rotated PDFs went from CER 0.054 to **0.002** as a category, `/Rotate 90` and
+`/Rotate 180` now read character for character, and the corpus median moved
+0.006 → 0.003.
+
 
 Seven deliberately broken files, and every one behaves as designed:
 

@@ -68,6 +68,14 @@ impl Language {
     pub fn is_latin(&self) -> bool {
         self.script == Script::Latin
     }
+
+    /// Characters this language accepts but can be written correctly without.
+    pub fn optional_letters(&self) -> impl Iterator<Item = char> + '_ {
+        OPTIONAL
+            .iter()
+            .filter(move |(code, _)| *code == self.code)
+            .flat_map(|(_, chars)| chars.chars())
+    }
 }
 
 /// Looks up a language by ISO code or English name, case-insensitively.
@@ -164,7 +172,13 @@ static LANGUAGES: &[Language] = &[
         "",
     ),
     lang("es", "Spanish", Script::Latin, "áéíóúüñÁÉÍÓÚÜÑ", ""),
-    lang("it", "Italian", Script::Latin, "àèéìíîòóùúÀÈÉÌÒÙ", ""),
+    lang(
+        "it",
+        "Italian",
+        Script::Latin,
+        "àèéìíîòóùúÀÈÉÌÍÎÒÓÙÚ",
+        "",
+    ),
     lang(
         "pt",
         "Portuguese",
@@ -190,7 +204,7 @@ static LANGUAGES: &[Language] = &[
         "sk",
         "Slovak",
         Script::Latin,
-        "áäčďéíĺľňóôŕšťúýžÁÄČĎÉÍĽŇÓÔŠŤÚÝŽ",
+        "áäčďéíĺľňóôŕšťúýžÁÄČĎÉÍĹĽŇÓÔŔŠŤÚÝŽ",
         "",
     ),
     lang("hu", "Hungarian", Script::Latin, "áéíóöőúüűÁÉÍÓÖŐÚÜŰ", ""),
@@ -198,14 +212,19 @@ static LANGUAGES: &[Language] = &[
     lang("tr", "Turkish", Script::Latin, "çğıöşüÇĞİÖŞÜ", ""),
     lang("hr", "Croatian", Script::Latin, "čćđšžČĆĐŠŽ", ""),
     lang("sl", "Slovenian", Script::Latin, "čšžČŠŽ", ""),
-    lang("et", "Estonian", Script::Latin, "äöõüÄÖÕÜ", ""),
+    lang("et", "Estonian", Script::Latin, "äöõüšžÄÖÕÜŠŽ", ""),
     lang("lv", "Latvian", Script::Latin, "āčēģīķļņšūžĀČĒĢĪĶĻŅŠŪŽ", ""),
     lang("lt", "Lithuanian", Script::Latin, "ąčęėįšųūžĄČĘĖĮŠŲŪŽ", ""),
     lang(
         "vi",
         "Vietnamese",
         Script::Latin,
-        "ăâđêôơưáàảãạÁÀĂÂĐÊÔƠƯ",
+        // Quoc ngu in full: 12 vowel letters x 5 tones, both cases, plus d-bar.
+        // The tones are the language, not decoration — `phai`, `phái`, `phải`
+        // and `phải` are different words — so a sample of the alphabet is not a
+        // coverage test. Listing twenty of these forms once put Vietnamese at
+        // "98%, missing ạ ả" when the bundle is short of 88 of the 146.
+        "aàáảãạăằắẳẵặâầấẩẫậeèéẻẽẹêềếểễệiìíỉĩịoòóỏõọôồốổỗộơờớởỡợuùúủũụưừứửữựyỳýỷỹỵđAÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬEÈÉẺẼẸÊỀẾỂỄỆIÌÍỈĨỊOÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢUÙÚỦŨỤƯỪỨỬỮỰYỲÝỶỸỴĐ",
         "",
     ),
     lang(
@@ -233,21 +252,21 @@ static LANGUAGES: &[Language] = &[
         "Ukrainian",
         Script::Cyrillic,
         "",
-        "абвгґдеєжзиіїйклмнопрстуфхцчшщьюяАБВГДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЮЯ",
+        "абвгґдеєжзиіїйклмнопрстуфхцчшщьюяАБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ",
     ),
     lang(
         "bg",
         "Bulgarian",
         Script::Cyrillic,
         "",
-        "абвгдежзийклмнопрстуфхцчшщъьюяАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЮЯ",
+        "абвгдежзийклмнопрстуфхцчшщъьюяАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЬЮЯ",
     ),
     lang(
         "sr",
         "Serbian",
         Script::Cyrillic,
         "",
-        "абвгдђежзијклљмнњопрстћуфхцчџшАБВГДЂЕЖЗИЈКЛЉМНЊОПРСТЋУФХЦЧДШ",
+        "абвгдђежзијклљмнњопрстћуфхцчџшАБВГДЂЕЖЗИЈКЛЉМНЊОПРСТЋУФХЦЧЏШ",
     ),
     lang(
         "ja",
@@ -293,6 +312,17 @@ static LANGUAGES: &[Language] = &[
     ),
 ];
 
+/// Characters a language accepts but does not need in order to be written
+/// correctly. A model that lacks these still covers the language, so they are
+/// reported and never refused.
+///
+/// `ẞ` is the case in point: the capital of `ß`, permitted since 2017 and never
+/// required — the canonical uppercase of `ß` is `SS`, and a recognizer without
+/// `ẞ` returns `STRAßE` for `STRAẞE`: the right letters, one in the wrong case.
+/// Requiring it would refuse German over a character German does not oblige
+/// anyone to use, which is the opposite of what the check is for.
+static OPTIONAL: &[(&str, &str)] = &[("de", "ẞ")];
+
 const fn lang(
     code: &'static str,
     name: &'static str,
@@ -317,6 +347,10 @@ pub struct Coverage {
     pub missing: Vec<char>,
     /// Characters the language needs, in total.
     pub required: usize,
+    /// Accepted-but-optional characters the model cannot emit. These never
+    /// count against coverage — see `OPTIONAL` — but a reader deserves to know
+    /// that `ẞ` will come back as `ß`.
+    pub missing_optional: Vec<char>,
 }
 
 impl Coverage {
@@ -359,10 +393,15 @@ pub fn coverage(dict: &CharDict, language: &'static Language) -> Coverage {
         .copied()
         .filter(|c| !dict.contains(*c))
         .collect();
+    let missing_optional: Vec<char> = language
+        .optional_letters()
+        .filter(|c| !dict.contains(*c))
+        .collect();
     Coverage {
         language,
         required: required.len(),
         missing,
+        missing_optional,
     }
 }
 
@@ -378,6 +417,17 @@ pub fn supported(dict: &CharDict) -> Vec<&'static Language> {
 ///
 /// Useful for a diagnostic listing: a model at 0.95 is usable for most text of
 /// that language but will stumble on a few accents.
+/// Covered languages whose accepted-but-optional characters the model is short
+/// of: the language is written correctly without them, so this is a note, not a
+/// refusal.
+pub fn optional_gaps(dict: &CharDict) -> Vec<Coverage> {
+    all()
+        .iter()
+        .map(|l| coverage(dict, l))
+        .filter(|c| c.is_complete() && !c.missing_optional.is_empty())
+        .collect()
+}
+
 pub fn partial(dict: &CharDict, min_ratio: f32) -> Vec<Coverage> {
     let mut out: Vec<Coverage> = LANGUAGES
         .iter()
@@ -479,6 +529,81 @@ mod tests {
         assert_eq!(near.first().map(|c| c.language.code), Some("de"));
         assert_eq!(near[0].missing, vec!['ß']);
         assert!(near[0].missing_display().contains('ß'));
+    }
+
+    /// `ẞ` is reported, never required. Requiring it would refuse German over a
+    /// character German does not oblige anyone to use — and the substitute a
+    /// model without it produces, `STRAßE`, is the right letters in the wrong
+    /// case, not a corrupted word.
+    #[test]
+    fn a_missing_capital_sharp_s_does_not_cost_german_its_coverage() {
+        let de = parse("de").unwrap();
+        assert!(de.optional_letters().any(|c| c == 'ẞ'));
+        assert!(
+            !de.required_letters().any(|c| c == 'ẞ'),
+            "ẞ must not be required"
+        );
+
+        let dict = dict_of(&format!("{}äöüÄÖÜß", ascii()));
+        let cov = coverage(&dict, de);
+        assert!(cov.is_complete(), "German must stay covered without ẞ");
+        assert_eq!(cov.missing_optional, vec!['ẞ']);
+
+        // And when the model does have it there is nothing to report.
+        let richer = dict_of(&format!("{}äöüÄÖÜßẞ", ascii()));
+        assert!(coverage(&richer, de).missing_optional.is_empty());
+    }
+
+    /// Vietnamese tone marks are the language, not decoration: `phai`, `phái`
+    /// and `phải` are three words. Declaring a sample of the alphabet reported
+    /// the bundle at 98% when it is short of most of it.
+    #[test]
+    fn vietnamese_requires_every_tone_mark() {
+        let vi = parse("vi").unwrap();
+        let required: String = vi.required_letters().collect();
+        assert_eq!(required.chars().count(), 146, "{required}");
+        for c in ['ả', 'Ả', 'ệ', 'Ệ', 'ớ', 'Ớ', 'ự', 'Ự', 'đ', 'Đ'] {
+            assert!(required.contains(c), "Vietnamese must require {c}");
+        }
+        // The twenty forms that used to stand in for the alphabet are not a
+        // coverage test: a dict holding just those must not pass.
+        let thin = dict_of(&format!("{}ăâđêôơưáàảãạÁÀĂÂĐÊÔƠƯ", ascii()));
+        let cov = coverage(&thin, vi);
+        assert!(!cov.is_complete());
+        assert!(cov.ratio() < 0.5, "ratio {}", cov.ratio());
+    }
+
+    /// Every declared letter needs its other case declared too, or text set in
+    /// that case walks past the check. This is how `Ả` hid behind `ả`.
+    #[test]
+    fn declared_alphabets_name_both_cases() {
+        for language in all() {
+            let declared: Vec<char> = language
+                .required_letters()
+                .chain(language.optional_letters())
+                .collect();
+            for c in &declared {
+                for other in [c.to_uppercase().next(), c.to_lowercase().next()] {
+                    let Some(other) = other else { continue };
+                    // Only single-character case pairs: `ß` uppercases to `SS`.
+                    // ASCII needs no declaring — `coverage` requires all of it
+                    // for a Latin script, which is why Turkish `ı` may name no
+                    // `I` of its own.
+                    if other == *c
+                        || other.is_ascii()
+                        || other.to_lowercase().count() != 1
+                        || c.to_uppercase().count() != 1
+                    {
+                        continue;
+                    }
+                    assert!(
+                        declared.contains(&other),
+                        "{} declares {c} but not {other}",
+                        language.code
+                    );
+                }
+            }
+        }
     }
 
     /// The bundled PP-OCRv6 recognizer carries plain Greek and nothing else.

@@ -321,6 +321,25 @@ impl PyEngine {
             .collect()
     }
 
+    /// Covered languages missing an optional character: `(code, name, missing)`.
+    fn optional_language_gaps(&self) -> Vec<(String, String, String)> {
+        self.inner
+            .optional_language_gaps()
+            .into_iter()
+            .map(|c| {
+                (
+                    c.language.code.to_string(),
+                    c.language.name.to_string(),
+                    c.missing_optional
+                        .iter()
+                        .map(|ch| ch.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            })
+            .collect()
+    }
+
     /// Number of characters the recognition model can emit.
     fn charset_size(&self) -> usize {
         self.inner.charset_size()

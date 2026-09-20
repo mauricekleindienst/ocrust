@@ -16,8 +16,8 @@ $ ocrust languages
               pt (Portuguese), ro (Romanian), sk (Slovak), sl (Slovenian),
               sv (Swedish), tr (Turkish)
 
-nearly covered (a few characters missing):
-  vi (Vietnamese): 98%, missing ạ ả
+covered, with a substitution (the language does not require these):
+  de (German): no ẞ
 ```
 
 ## Declaring a language is a check, not a hint
@@ -70,17 +70,37 @@ Traditional Chinese, not `zh`.
 
 | Language | Coverage | Why |
 |---|---:|---|
-| Vietnamese | 98% | two tone-marked vowels (`ạ`, `ả`) are outside the charset |
+| Vietnamese | 55% | 88 of its 146 tone-marked vowel forms are outside the charset |
 | Greek | 70% | the plain letters are there; every accented vowel and the final sigma are not |
 | Russian, Ukrainian, Bulgarian, Serbian | 0% | no Cyrillic in the PP-OCRv6 charset |
 | Korean | 0% | no Hangul |
 | Arabic | 0% | no Arabic script |
 | Hindi | 0% | no Devanagari |
 
-"Nearly covered" is still a failure: `lang="vi"` refuses with
-`cannot write ạ ả`, because a tone mark silently dropped from a Vietnamese word
-is exactly the error the check exists to prevent. Drop the requirement if you
-want the partial result anyway.
+Vietnamese was reported at 98%, missing `ạ ả`, until the entry was measured
+against the alphabet rather than a sample of it: quốc ngữ is 12 vowel letters
+× 5 tones in both cases, 146 precomposed forms, and the bundle has 58. A tone
+mark is not decoration — `phai`, `phái` and `phải` are three different words —
+and what came back was the vowel deleted outright: `Phải trả` as `Phi tr`,
+`Tổng cộng` as `Tng cng`, at confidence 0.98. Drop the language requirement if
+you want the partial result anyway.
+
+## Characters a language does not require
+
+`ẞ`, the capital of `ß`, is not in the bundle. German is still covered, because
+German does not require it: the canonical uppercase of `ß` is `SS`, and `ẞ` has
+only been permitted since 2017. What the recognizer returns for `STRAẞE` is
+`STRAßE` — the right letters, one in the wrong case, not a corrupted word. So it
+is reported rather than refused:
+
+```console
+covered, with a substitution (the language does not require these):
+  de (German): no ẞ
+```
+
+Refusing German over it would be the check working against its own purpose. The
+German opening quotes `„` and `‚` are missing too, and are treated the same way:
+punctuation is reported, never required.
 
 These are known, named and checked — `ocrust.Ocr(lang="ru")` fails immediately
 rather than returning nonsense. Adding a Cyrillic/Arabic/Devanagari bundle is a
@@ -88,7 +108,10 @@ matter of shipping a second recognizer, which is on the [Roadmap](Roadmap.md).
 
 ```python
 ocrust.Ocr().partial_languages(min_ratio=0.5)
-# ({'code': 'vi', 'name': 'Vietnamese', 'ratio': 0.976, 'missing': ['ạ', 'ả']},)
+# ({'code': 'vi', 'name': 'Vietnamese', 'ratio': 0.553, 'missing': ['ạ', 'Ả', …]},)
+
+ocrust.Ocr().optional_language_gaps()
+# ({'code': 'de', 'name': 'German', 'missing': 'ẞ'},)
 ```
 
 ## Mixed-language documents

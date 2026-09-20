@@ -1268,7 +1268,8 @@ def _cmd_languages(args: argparse.Namespace) -> int:
         print(f"  {_paint(label_text, 'rust', stream=out)} {_wrap(names, 14)}")
 
     if not args.all:
-        near = Ocr(models_dir=args.models).partial_languages(0.8)
+        engine = Ocr(models_dir=args.models)
+        near = engine.partial_languages(0.8)
         if near:
             heading = _paint("nearly covered", "amber", stream=out)
             print(f"\n{heading} (a few characters missing):")
@@ -1277,6 +1278,12 @@ def _cmd_languages(args: argparse.Namespace) -> int:
                     f"  {entry['code']} ({entry['name']}): {entry['ratio'] * 100:.0f}%"
                     f", missing {entry['missing']}"
                 )
+        optional = engine.optional_language_gaps()
+        if optional:
+            heading = _paint("covered, with a substitution", "amber", stream=out)
+            print(f"\n{heading} (the language does not require these):")
+            for entry in optional:
+                print(f"  {entry['code']} ({entry['name']}): no {entry['missing']}")
     return 0
 
 
