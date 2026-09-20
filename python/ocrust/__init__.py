@@ -161,13 +161,8 @@ def _coerce_image(obj: Any) -> tuple[bytes, int, int] | None:
 #: Suffixes worth reading when a directory is handed to :meth:`Ocr.scan_many`.
 #: Content sniffing decides what a file really is, but a folder should not be
 #: opened blind.
-READABLE_SUFFIXES = frozenset(
-    {
-        ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
-        ".pnm", ".pbm", ".pgm", ".ppm", ".tga", ".dds", ".hdr", ".exr",
-        ".qoi", ".ico", ".pdf",
-    }
-)  # fmt: skip
+#: Taken from the reader itself, so this cannot drift from what it can open.
+READABLE_SUFFIXES = frozenset(f".{suffix}" for suffix in _ocrust.supported_suffixes())
 
 
 def _glob(pattern: Path) -> list[Path]:

@@ -505,17 +505,37 @@ def age(image: Image.Image, rng: random.Random, *, level: float = 1.0) -> Image.
     return out
 
 
+def radiance_hdr(image: Image.Image) -> bytes:
+    """Radiance RGBE, uncompressed. Pillow has no HDR encoder, and `.hdr` is a
+    format ocrust offers, so the corpus has to be able to write one itself."""
+    a = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    h, w, _ = a.shape
+    top = a.max(axis=2)
+    top[top <= 0] = 1e-9
+    exponent = np.ceil(np.log2(top)).astype(np.int32) + 128
+    scale = np.ldexp(1.0, 128 - exponent)[:, :, None]
+    mantissa = np.clip(a * scale * 256, 0, 255).astype(np.uint8)
+    rgbe = np.dstack([mantissa, np.clip(exponent, 0, 255).astype(np.uint8)])
+    header = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n" + f"-Y {h} +X {w}\n".encode()
+    return header + rgbe.tobytes()
+
+
 def fax(image: Image.Image, rng: random.Random) -> Image.Image:
-    """1-bit fax look: dithered, streaked, low resolution."""
+    """1-bit fax: dithered, streaked, low resolution — and genuinely bilevel.
+
+    Mode ``1``, not ``RGB``. This function used to hand back 24-bit pixels that
+    merely looked dithered, so nothing in the corpus was ever a real bilevel
+    file and the decoder's refusal to read one went unnoticed for every release.
+    """
     small = image.resize((image.width // 2, image.height // 2), Image.LANCZOS)
-    bilevel = small.convert("L").convert("1", dither=Image.FLOYDSTEINBERG).convert("RGB")
+    bilevel = small.convert("L").convert("1", dither=Image.FLOYDSTEINBERG)
     draw = ImageDraw.Draw(bilevel)
     for _ in range(rng.randint(2, 6)):
         y = rng.randrange(bilevel.height)
-        draw.line([0, y, bilevel.width, y], fill=(255, 255, 255), width=rng.randint(1, 3))
+        draw.line([0, y, bilevel.width, y], fill=1, width=rng.randint(1, 3))
     for _ in range(rng.randint(1, 3)):
         x = rng.randrange(bilevel.width)
-        draw.line([x, 0, x, bilevel.height], fill=(0, 0, 0), width=1)
+        draw.line([x, 0, x, bilevel.height], fill=0, width=1)
     return bilevel
 
 
@@ -700,8 +720,14 @@ class Corpus:
             "tif": "TIFF",
             "tiff": "TIFF",
             "ppm": "PPM",
+            "pnm": "PPM",
+            "pbm": "PPM",
+            "pgm": "PPM",
+            "qoi": "QOI",
             "tga": "TGA",
         }
+        if suffix == "hdr":
+            return radiance_hdr(image)
         image.save(buffer, formats[suffix], **kwargs)
         return buffer.getvalue()
 
@@ -779,15 +805,15 @@ def build(root: Path, small: bool = False) -> Corpus:
         name = f"fax/fax_{index:02d}_{language}.tiff"
         corpus.add(
             name,
-            corpus.save_image(name, faxed.copy()),
+            corpus.save_image(name, faxed.copy(), compression="group4"),
             category="fax",
             lines=spec.lines,
             language=language,
-            notes="1-bit dithered fax at half resolution",
+            notes="true 1-bit CCITT Group 4 fax at half resolution",
         )
         corpus.add(
             f"fax/fax_{index:02d}_{language}.pdf",
-            image_only_pdf([faxed], dpi=100, quality=50),
+            image_only_pdf([faxed.convert("RGB")], dpi=100, quality=50),
             category="fax-pdf",
             lines=spec.lines,
             language=language,
@@ -1017,23 +1043,48 @@ def build(root: Path, small: bool = False) -> Corpus:
 
     print("every raster format ...")
     spec = text_page(TEXTS["de"][:8], dpi=200, font_kind="sans", point_size=12)
-    for suffix, kwargs in {
-        "png": {},
-        "jpg": {"quality": 85},
-        "webp": {"quality": 85},
-        "bmp": {},
-        "gif": {},
-        "ppm": {},
-        "tga": {},
-        "tiff": {},
-    }.items():
+    # One file per suffix `ocrust` offers, so a format cannot be advertised
+    # without something in the corpus opening it. `mode` is what the format
+    # needs: PBM is bilevel by definition, PGM is grey.
+    for suffix, mode, kwargs in [
+        ("png", "RGB", {}),
+        ("jpg", "RGB", {"quality": 85}),
+        ("jpeg", "RGB", {"quality": 85}),
+        ("webp", "RGB", {"quality": 85}),
+        ("bmp", "RGB", {}),
+        ("gif", "P", {}),
+        ("ppm", "RGB", {}),
+        ("pnm", "RGB", {}),
+        ("pgm", "L", {}),
+        ("pbm", "1", {}),
+        ("tga", "RGB", {}),
+        ("tif", "RGB", {}),
+        ("tiff", "RGB", {}),
+        ("qoi", "RGB", {}),
+        ("hdr", "RGB", {}),
+    ]:
         name = f"formats/page.{suffix}"
         corpus.add(
             name,
-            corpus.save_image(name, spec.image, **kwargs),
+            corpus.save_image(name, spec.image.convert(mode), **kwargs),
             category="format",
             lines=spec.lines,
             notes=f"same page as {suffix.upper()}",
+        )
+
+    # And the layout an archive actually stores: bilevel, CCITT-coded.
+    bilevel = spec.image.convert("1")
+    for name, kwargs, note in [
+        ("formats/bilevel_g4.tiff", {"compression": "group4"}, "1-bit CCITT Group 4"),
+        ("formats/bilevel_raw.tiff", {}, "1-bit uncompressed"),
+        ("formats/bilevel_lzw.tiff", {"compression": "tiff_lzw"}, "1-bit LZW"),
+    ]:
+        corpus.add(
+            name,
+            corpus.save_image(name, bilevel, **kwargs),
+            category="format",
+            lines=spec.lines,
+            notes=note,
         )
 
     print("broken and hostile inputs ...")

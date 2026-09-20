@@ -1,9 +1,9 @@
 # Accuracy
 
-Every number here comes from the generated corpus — 122 files, 207 pages, all
+Every number here comes from the generated corpus — 132 files, 217 pages, all
 with exact ground truth — and can be reproduced in about three minutes
 ([Evaluation](Evaluation.md)). Nothing is cherry-picked, including the bad rows.
-The figures cover the 108 files in a language the bundled model can actually
+The figures cover the 118 files in a language the bundled model can actually
 write; the four Greek and four Vietnamese pages are scored separately, for the
 reason below.
 
@@ -11,10 +11,10 @@ reason below.
 
 | metric | value |
 |---|---|
-| mean character error rate (CER) | **0.029** |
+| mean character error rate (CER) | **0.026** |
 | median CER | **0.003** |
-| mean word error rate (WER) | 0.089 |
-| mean word recall | 0.922 |
+| mean word error rate (WER) | 0.083 |
+| mean word recall | 0.927 |
 | unexpected failures | **0** |
 
 The gap between mean and median is the whole story: most documents are read
@@ -145,11 +145,34 @@ being read straight across the gutter to 0.000, and a page that is nothing but a
 price list from two columns to four. Every document that was already in the
 corpus reads exactly as it did — the mean moved 0.040 → 0.036 because the corpus
 grew by the layouts it had been missing, which is also why these three bugs
-lasted as long as they did. (It reads 0.029 now because Greek and Vietnamese,
+lasted as long as they did. (It reads 0.026 now because Greek and Vietnamese,
 which the bundle cannot write, no longer count toward it, and because the
 orientation classifier stopped turning single lines over — see below.)
 
 ## Robustness
+
+### A fixture that was not what it said
+
+The corpus has had a `fax` category since the beginning — "1-bit dithered fax at
+half resolution", the format a scanned archive actually stores. It was saved as
+24-bit RGB. The generator dithered the *look* of bilevel and then converted back,
+so no file in the corpus was ever a real 1-bit image, and this was the result of
+handing the reader one:
+
+```text
+unsupported input: TIFF page 1: unsupported pixel layout (Gray(1))
+```
+
+Every bilevel TIFF failed — Group 4, LZW, uncompressed, one page or many. Packed
+rows arrive eight pixels to the byte and were measured as though there were one
+byte each, so the length check rejected them. The same bits as a PNG read fine,
+which is why it looked like a format nobody used rather than a bug.
+
+The fax fixtures are now genuinely mode-1 and CCITT-coded, there are three more
+bilevel files in `formats/`, and the reader unpacks 1-, 2- and 4-bit grey
+honouring `PhotometricInterpretation` — a fax is usually WhiteIsZero, and
+reading that tag wrong inverts the page. The size difference is the reason the
+format exists: the same page is 6 KB bilevel against 11.6 MB as RGB.
 
 ### One line, turned over on its own
 
@@ -331,7 +354,7 @@ figure.
 
 The estimate is narrow: 0.893 to 0.987 over the corpus. It ranks pages well and
 it does not claim to say "this page is 20% wrong". Widening it needs more ground
-truth than 108 files. Re-fit it for your own documents with
+truth than 118 files. Re-fit it for your own documents with
 `scripts/collect_quality.py` and `scripts/fit_quality.py`, which print their own
 held-out numbers.
 

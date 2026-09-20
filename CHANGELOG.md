@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A bilevel TIFF could not be read at all.** Mode-1 TIFF is what a scanned
+  archive and every CCITT fax is stored as, and handing the reader one produced:
+
+  ```text
+  unsupported input: TIFF page 1: unsupported pixel layout (Gray(1))
+  ```
+
+  Group 4, LZW, uncompressed, one page or many — all of them. Packed rows arrive
+  eight pixels to the byte and were measured as though there were one byte each,
+  so the length check rejected them before anything was decoded. The same bits
+  as a PNG read fine, which is what made it look like a format nobody used.
+
+  The reader now unpacks 1-, 2- and 4-bit grey, honouring
+  `PhotometricInterpretation`: a fax is usually WhiteIsZero, and reading that tag
+  wrong inverts the page. A test decodes the same 16×4 page written both ways
+  round and asserts the two come out pixel for pixel identical, which a decoder
+  that ignored the tag — or inverted twice — would fail.
+
+  It survived every release because the fixture lied. The corpus's `fax`
+  category, "1-bit dithered fax at half resolution", was saved as 24-bit RGB:
+  the generator dithered the look of bilevel and converted back. The fax
+  fixtures are now genuinely mode-1 and CCITT-coded, and `formats/` carries
+  three more bilevel files. The same page is 6 KB bilevel against 11.6 MB as
+  RGB, which is the whole reason archives use it.
+
+### Removed
+
+- **Four formats that were advertised and could not be opened.** `dds`, `exr`,
+  `ico` and `avif` are no longer offered. None of them was a missing feature
+  flag: the DDS decoder takes no uncompressed surface and DXT wants dimensions
+  in multiples of four (an A4 page at 200 dpi is 1654×2338), an ICO frame stored
+  as PNG has to be RGBA so the common 256-pixel icon fails, and AVIF is not
+  compiled in. `avif` was only ever in the Rust list, which is the other half of
+  the problem.
+
+### Changed
+
+- **The list of readable suffixes has one home.** It was kept in three places —
+  the Rust reader, the Python package and the CLI's directory filter — and they
+  had already drifted. Python now derives it from the reader through
+  `supported_suffixes()`, so a format cannot be offered by one and refused by
+  another. The corpus carries a file in every suffix on the list, including the
+  `.hdr` that Pillow cannot write and the generator now encodes itself.
+
+  Accuracy over the 118 corpus files in a language the bundle can write: mean CER
+  **0.026**, median 0.003, WER 0.083, word recall **0.927**.
+
 ## 0.2.2 — 2026-09-20
 
 An honesty release. Nothing about how pages are read changed except for one bug,

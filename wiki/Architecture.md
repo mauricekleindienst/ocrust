@@ -4,7 +4,7 @@
 Source (path | bytes | RGB frame)
         │
         ▼
-   ingest ──────────────  image::  PNG/JPEG/WebP/BMP/GIF/PNM/TGA/DDS/HDR/EXR/QOI/ICO
+   ingest ──────────────  image::  PNG/JPEG/WebP/BMP/GIF/PNM/TGA/HDR/QOI
         │                 tiff::   every page of a multi-page TIFF
         │                 hayro::  PDF pages rasterized at a chosen DPI
         │                 EXIF orientation applied; TGA resolved by file name

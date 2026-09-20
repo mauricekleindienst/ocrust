@@ -75,8 +75,8 @@ the engine or its defaults, not a measurement artifact:
 
 - **median 673 ms per page** (mean 805, which the A0 sheet dominates), 163.3 s for
   the whole corpus
-- **median CER 0.003**, mean 0.029, mean WER 0.089, mean word recall 0.922,
-  over the 108 files in a language the bundle can write (the four Greek and four
+- **median CER 0.003**, mean 0.026, mean WER 0.083, mean word recall 0.927,
+  over the 118 files in a language the bundle can write (the four Greek and four
   Vietnamese pages are held out and reported on their own)
 - **zero unexpected failures**; the seven deliberately broken files behave as
   designed (five error cleanly, the PNG named `.pdf` is read anyway, the blank
