@@ -301,8 +301,18 @@ def _build_parser() -> argparse.ArgumentParser:
     scan.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
     pdf = sub.add_parser("pdf", help="write a searchable PDF (image plus text layer)")
-    pdf.add_argument("input", type=Path)
-    pdf.add_argument("-o", "--output", type=Path, help="defaults to <input>.ocr.pdf")
+    pdf.add_argument(
+        "inputs",
+        nargs="+",
+        type=Path,
+        help="files, folders or patterns; several become one PDF, in the order given",
+    )
+    pdf.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="defaults to <input>.ocr.pdf, and is required for more than one input",
+    )
     pdf.add_argument("--dpi", type=float, help="assumed page resolution")
     pdf.add_argument("--quality", type=int, default=80, help="JPEG quality (default 80)")
     pdf.add_argument("--models", type=Path)
@@ -1128,20 +1138,37 @@ def _cmd_completions(args: argparse.Namespace) -> int:
 
 
 def _cmd_pdf(args: argparse.Namespace) -> int:
-    if not args.input.exists():
-        _fail(f"no such file: {args.input}")
+    """Converts everything named into one searchable PDF.
+
+    Any readable input can be mixed — images, multi-page TIFFs, PDFs — and the
+    pages come out in the order the inputs were given, each sized from its own
+    pixels. `ocrust ocr` is the other path: it leaves an existing PDF's pages
+    exactly as they are and only adds the text layer.
+    """
+    inputs, missing = _expand_inputs(list(args.inputs))
+    if missing:
+        for path, reason in missing:
+            _fail(f"{path}: {reason}")
         return 2
+    if not inputs:
+        _fail("no readable input")
+        return 2
+    if len(inputs) > 1 and args.output is None:
+        _fail(f"{len(inputs)} inputs become one PDF, so --output is needed")
+        return 2
+
     engine = Ocr(models_dir=args.models, device=args.device, keep_page_images=True)
     try:
-        data = engine.searchable_pdf(args.input, dpi=args.dpi, jpeg_quality=args.quality)
+        data, pages = engine.searchable_pdf_many(inputs, dpi=args.dpi, jpeg_quality=args.quality)
     except (OcrustError, OSError, ValueError) as exc:
         _fail(str(exc))
         return 1
-    target = args.output or args.input.with_suffix(".ocr.pdf")
+    target = args.output or inputs[0].with_suffix(".ocr.pdf")
     _write(target, data, retries=_io_retries(args))
     if not args.quiet:
-        print(_arrow(args.input, target), file=sys.stderr)
-        print(f"  {_size(len(data))}", file=sys.stderr)
+        first = inputs[0] if len(inputs) == 1 else Path(f"{len(inputs)} inputs")
+        print(_arrow(first, target), file=sys.stderr)
+        print(f"  {pages} page(s), {_size(len(data))}", file=sys.stderr)
     return 0
 
 

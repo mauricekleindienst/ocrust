@@ -451,3 +451,28 @@ def test_watch_needs_a_directory(tmp_path, capsys):
     assert "needs a directory" in capsys.readouterr().err
     assert main(["scan", "-", "--watch"]) == 2
     assert "not stdin" in capsys.readouterr().err
+
+
+def test_pdf_converts_a_whole_folder_into_one_file(engine, tmp_path):
+    """`ocrust pdf folder/ -o out.pdf` merges everything readable it finds."""
+    from PIL import Image, ImageDraw
+
+    folder = tmp_path / "scans"
+    folder.mkdir()
+    for name in ("one.png", "two.tiff"):
+        page = Image.new("RGB", (1200, 1600), "white")
+        ImageDraw.Draw(page).text((80, 200), f"SEITE {name}", fill="black")
+        page.save(folder / name)
+
+    out = tmp_path / "merged.pdf"
+    assert main(["pdf", str(folder), "-o", str(out), "-q"]) == 0
+    assert out.read_bytes().startswith(b"%PDF")
+
+
+def test_pdf_of_several_inputs_needs_an_output_name(engine, tmp_path):
+    """Two inputs and one PDF: where it goes is not something to guess."""
+    from PIL import Image
+
+    for name in ("a.png", "b.png"):
+        Image.new("RGB", (400, 300), "white").save(tmp_path / name)
+    assert main(["pdf", str(tmp_path / "a.png"), str(tmp_path / "b.png"), "-q"]) == 2

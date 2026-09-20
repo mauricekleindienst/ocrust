@@ -166,15 +166,30 @@ page 3: 595x842 pt -> skip (has text)
 
 Full details in [PDF workflows](PDF-workflows.md).
 
-## `ocrust pdf` — searchable PDF from images
+## `ocrust pdf` — anything readable into one searchable PDF
 
 ```bash
 ocrust pdf photo.jpg                     # -> photo.ocr.pdf
 ocrust pdf scan.tiff -o scan.pdf --dpi 300 --quality 90
+ocrust pdf archive/ -o archive.pdf       # a whole folder, one PDF
+ocrust pdf fax.tiff photo.jpg old.pdf -o complete.pdf
+ocrust pdf 'scans/*.tif' -o scans.pdf    # patterns too, shell or not
 ```
 
-Use it for phone photos and loose scans. When a PDF already exists, use
-`ocrust ocr` instead — it keeps the original bytes.
+Every input the reader accepts can be mixed in one command — an image in any
+offered format, a multi-page TIFF, an existing PDF — and the pages come out in
+the order the inputs were given. A folder is walked recursively, sorted, and
+filtered to readable suffixes, so the same folder gives the same PDF twice
+running. Each page keeps its own size, computed from its pixels and `--dpi`,
+rather than being stretched onto a common sheet.
+
+More than one input means one output file, so `-o` is required; a single input
+still defaults to `<input>.ocr.pdf`.
+
+When a PDF already exists and its pages should stay untouched, use `ocrust ocr`
+instead — it adds the text layer without rasterizing anything. `ocrust pdf` is
+the converter: it re-renders every page, which is what makes mixing formats
+possible.
 
 ## `ocrust tiff` — archive copy
 

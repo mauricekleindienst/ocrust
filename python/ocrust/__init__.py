@@ -58,6 +58,7 @@ __all__ = [
     "scan",
     "scan_many",
     "searchable_pdf",
+    "searchable_pdf_many",
     "ocr_pdf",
     "to_tiff",
     "languages",
@@ -532,6 +533,34 @@ class Ocr:
         except Exception as exc:
             raise OcrustError(str(exc)) from exc
 
+    def searchable_pdf_many(
+        self,
+        sources: Iterable[str | os.PathLike[str]],
+        *,
+        dpi: float | None = None,
+        jpeg_quality: int = 80,
+    ) -> tuple[bytes, int]:
+        """Converts every source, in order, into the pages of one PDF.
+
+        Anything :data:`READABLE_SUFFIXES` covers can go in — images in any of
+        the formats the reader offers, multi-page TIFFs, PDFs — and they come out
+        as one searchable document, each page sized from its own pixels rather
+        than forced onto a common sheet. Returns the PDF and its page count.
+
+        Pages are compressed as they are scanned, so a hundred files cost the
+        memory of one.
+        """
+        # A folder or a glob is one input as far as the caller is concerned.
+        paths = [str(source) for source in _expand_sources(sources)]
+        if not paths:
+            raise OcrustError("a PDF needs at least one input")
+        try:
+            return self._pdf_engine().searchable_pdf_many(paths, dpi, jpeg_quality)
+        except OcrustError:
+            raise
+        except Exception as exc:
+            raise OcrustError(str(exc)) from exc
+
     def _pdf_engine(self) -> Any:
         """An engine that keeps page images, which a text layer needs.
 
@@ -587,6 +616,13 @@ def scan_many(sources: Iterable[Any]) -> Iterator[Document]:
 def searchable_pdf(source: str | os.PathLike[str], **kwargs: Any) -> bytes:
     """Produces a searchable PDF for `source` with the default engine."""
     return _default().searchable_pdf(source, **kwargs)
+
+
+def searchable_pdf_many(
+    sources: Iterable[str | os.PathLike[str]], **kwargs: Any
+) -> tuple[bytes, int]:
+    """Converts several sources into one searchable PDF with the default engine."""
+    return _default().searchable_pdf_many(sources, **kwargs)
 
 
 def ocr_pdf(source: Any, **kwargs: Any) -> tuple[bytes, dict[str, int]]:
