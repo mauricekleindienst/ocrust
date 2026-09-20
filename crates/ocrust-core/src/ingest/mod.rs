@@ -506,11 +506,19 @@ impl TiffFrames {
             .decoder
             .colortype()
             .map_err(|e| tiff_error(page, &e.to_string()))?;
+        // A bilevel page stores 0 for white when it is a fax (WhiteIsZero, the
+        // default in CCITT-coded TIFFs), and 0 for black otherwise. The tag is
+        // the only thing that says which, and reading it wrong inverts the page.
+        let white_is_zero = self
+            .decoder
+            .get_tag_unsigned(tiff::tags::Tag::PhotometricInterpretation)
+            .map(|v: u32| v == 0)
+            .unwrap_or(false);
         let decoded = self
             .decoder
             .read_image()
             .map_err(|e| tiff_error(page, &e.to_string()))?;
-        tiff_to_rgb(w, h, color, decoded)
+        tiff_to_rgb(w, h, color, decoded, white_is_zero)
             .ok_or_else(|| tiff_error(page, &format!("unsupported pixel layout ({color:?})")))
     }
 }
@@ -530,6 +538,7 @@ fn tiff_to_rgb(
     h: u32,
     color: tiff::ColorType,
     decoded: tiff::decoder::DecodingResult,
+    white_is_zero: bool,
 ) -> Option<RgbImage> {
     use tiff::decoder::DecodingResult;
     use tiff::ColorType;
@@ -544,11 +553,37 @@ fn tiff_to_rgb(
 
     let mut out = Vec::with_capacity(pixels * 3);
     match color {
+        // Bilevel and other sub-byte depths arrive packed, several pixels to the
+        // byte, each row padded to a byte boundary. This is what a scanned
+        // archive and every CCITT fax is stored as: the same page is a few
+        // kilobytes bilevel against eleven megabytes as RGB.
+        ColorType::Gray(bits @ (1 | 2 | 4)) => {
+            let per_byte = 8 / bits as usize;
+            let row_bytes = (w as usize).div_ceil(per_byte);
+            if bytes.len() < row_bytes * h as usize {
+                return None;
+            }
+            let levels = (1u16 << bits) - 1;
+            for y in 0..h as usize {
+                let row = &bytes[y * row_bytes..(y + 1) * row_bytes];
+                for x in 0..w as usize {
+                    let byte = row[x / per_byte];
+                    let shift = 8 - bits as usize * (x % per_byte + 1);
+                    let v = (byte >> shift) as u16 & levels;
+                    // Spread the level over the full range, then apply the
+                    // photometric sense: under WhiteIsZero, 0 is white.
+                    let g = (v * 255 / levels) as u8;
+                    let g = if white_is_zero { 255 - g } else { g };
+                    out.extend_from_slice(&[g, g, g]);
+                }
+            }
+        }
         ColorType::Gray(_) => {
             if bytes.len() < pixels {
                 return None;
             }
             for &g in &bytes[..pixels] {
+                let g = if white_is_zero { 255 - g } else { g };
                 out.extend_from_slice(&[g, g, g]);
             }
         }
@@ -590,20 +625,84 @@ fn tiff_to_rgb(
 }
 
 /// True when `path` looks like something [`load`] can read.
+///
+/// Every suffix here is one the decoder actually handles, and the corpus has a
+/// file in each. `dds`, `exr`, `ico` and `avif` were listed once and none of
+/// them could be read: the DDS decoder takes no uncompressed surface and DXT
+/// wants dimensions in multiples of four, an ICO frame stored as PNG has to be
+/// RGBA, and AVIF is not compiled in. Claiming a format nobody could open is
+/// worse than not claiming it.
 pub fn is_supported_path(path: &Path) -> bool {
-    const EXTS: &[&str] = &[
-        "pdf", "png", "jpg", "jpeg", "jpe", "jfif", "webp", "tif", "tiff", "bmp", "gif", "pnm",
-        "pbm", "pgm", "ppm", "tga", "dds", "hdr", "exr", "qoi", "ico", "avif",
-    ];
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
-        .is_some_and(|e| EXTS.contains(&e.as_str()))
+        .is_some_and(|e| SUPPORTED_EXTENSIONS.contains(&e.as_str()))
 }
+
+/// Every file suffix [`load`] can read, lowercase and without the dot.
+///
+/// One list, so the CLI's directory filter and the Python package cannot drift
+/// from what the decoder does — `avif` was once offered by this list alone.
+pub const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "pdf", "png", "jpg", "jpeg", "jpe", "jfif", "webp", "tif", "tiff", "bmp", "gif", "pnm", "pbm",
+    "pgm", "ppm", "tga", "hdr", "qoi",
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 16x4 bilevel TIFF: white, with a black bar across row 1. Photometric 1.
+    const TINY_BLACK_IS_ZERO: &[u8] = &[
+        73, 73, 42, 0, 8, 0, 0, 0, 8, 0, 0, 1, 4, 0, 1, 0, 0, 0, 16, 0, 0, 0, 1, 1, 4, 0, 1, 0, 0,
+        0, 4, 0, 0, 0, 3, 1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 6, 1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 17,
+        1, 4, 0, 1, 0, 0, 0, 110, 0, 0, 0, 22, 1, 4, 0, 1, 0, 0, 0, 4, 0, 0, 0, 23, 1, 4, 0, 1, 0,
+        0, 0, 8, 0, 0, 0, 28, 1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 255, 255, 192, 3, 255,
+        255, 255, 255,
+    ];
+
+    /// The same page with its bits flipped and photometric 0 — the fax convention.
+    const TINY_WHITE_IS_ZERO: &[u8] = &[
+        73, 73, 42, 0, 8, 0, 0, 0, 8, 0, 0, 1, 4, 0, 1, 0, 0, 0, 16, 0, 0, 0, 1, 1, 4, 0, 1, 0, 0,
+        0, 4, 0, 0, 0, 3, 1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 6, 1, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 17,
+        1, 4, 0, 1, 0, 0, 0, 110, 0, 0, 0, 22, 1, 4, 0, 1, 0, 0, 0, 4, 0, 0, 0, 23, 1, 4, 0, 1, 0,
+        0, 0, 8, 0, 0, 0, 28, 1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 255, 255, 192, 3, 255,
+        255, 255, 255,
+    ];
+
+    /// Bilevel is how a scanned archive and every CCITT fax is stored, and it
+    /// used to fail outright: the packed rows fell through to "unsupported pixel
+    /// layout (Gray(1))". The corpus never caught it because its "1-bit fax"
+    /// fixture was saved as RGB.
+    #[test]
+    fn a_bilevel_tiff_decodes_either_way_round() {
+        let expect = |page: &RgbImage| {
+            assert_eq!(page.dimensions(), (16, 4));
+            // Row 0 is blank, row 1 carries the bar between x=2 and x=13.
+            assert_eq!(
+                page.get_pixel(0, 0).0,
+                [255, 255, 255],
+                "row 0 must be white"
+            );
+            assert_eq!(page.get_pixel(8, 1).0, [0, 0, 0], "the bar must be black");
+            assert_eq!(page.get_pixel(0, 1).0, [255, 255, 255], "before the bar");
+            assert_eq!(page.get_pixel(15, 1).0, [255, 255, 255], "after the bar");
+        };
+
+        let decode = |bytes: &[u8]| {
+            TiffFrames::new(Arc::new(bytes.to_vec()))
+                .expect("a readable TIFF")
+                .frame(0)
+                .expect("page 1 must decode")
+        };
+        let black_is_zero = decode(TINY_BLACK_IS_ZERO);
+        let white_is_zero = decode(TINY_WHITE_IS_ZERO);
+        expect(&black_is_zero);
+        expect(&white_is_zero);
+        // The two files are the same page written both ways round, so a decoder
+        // that ignored the tag — or inverted twice — would disagree here.
+        assert_eq!(black_is_zero, white_is_zero);
+    }
 
     /// A reader that fails a given number of times before succeeding.
     fn flaky(mut failures: u32, kind: std::io::ErrorKind) -> impl FnMut() -> std::io::Result<u8> {
@@ -772,6 +871,18 @@ mod tests {
         assert!(is_supported_path(Path::new("a/b/c.PDF")));
         assert!(is_supported_path(Path::new("x.jpeg")));
         assert!(!is_supported_path(Path::new("x.docx")));
+    }
+
+    /// Formats that were advertised and could not be opened. Each one is a real
+    /// failure, not a missing feature flag: see `is_supported_path`.
+    #[test]
+    fn formats_that_cannot_be_decoded_are_not_advertised() {
+        for suffix in ["dds", "exr", "ico", "avif"] {
+            assert!(
+                !is_supported_path(&PathBuf::from(format!("page.{suffix}"))),
+                "{suffix} cannot be decoded, so it must not be offered"
+            );
+        }
     }
 
     /// A TIFF with `pages` frames, each a different shade so they can be told

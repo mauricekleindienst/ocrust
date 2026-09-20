@@ -234,7 +234,7 @@ for doc in ocr.scan_many([r"\\fileserver\scans\2026"]):
 
 | | formats |
 |---|---|
-| Images | PNG, JPEG, WebP, BMP, GIF, PNM/PBM/PGM/PPM, TGA, DDS, HDR, OpenEXR, QOI, ICO |
+| Images | PNG, JPEG, WebP, BMP, GIF, PNM/PBM/PGM/PPM, TGA, HDR, QOI, TIFF (including 1-bit CCITT) |
 | Multi-page | TIFF (every page), PDF (every page) |
 | In memory | `bytes`, `numpy` arrays, PIL images |
 

@@ -59,7 +59,7 @@ three rules:
 
 | | |
 |---|---|
-| Input | PNG, JPEG, WebP, BMP, GIF, PNM, TGA, DDS, HDR, OpenEXR, QOI, ICO, multi-page TIFF, PDF, `bytes`, numpy arrays, PIL images |
+| Input | PNG, JPEG, WebP, BMP, GIF, PNM/PBM/PGM/PPM, TGA, HDR, QOI, multi-page TIFF (1-bit CCITT included), PDF, `bytes`, numpy arrays, PIL images |
 | Output | text, Markdown, JSON, hOCR, ALTO XML, CSV, searchable PDF (Unicode text layer), PDF text layer, multi-page TIFF |
 | Languages | 26 complete (Latin, Japanese, Chinese); 35 known and checkable, Greek among the ones refused |
 | Models | PP-OCRv6, 18 708 characters, 31 MB, Apache-2.0 |

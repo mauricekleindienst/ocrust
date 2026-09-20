@@ -139,6 +139,53 @@ def test_scan_many_reads_a_directory(engine, invoice_pdf, tmp_path):
     assert all("INVOICE" in d.text.upper() for d in docs)
 
 
+def test_a_bilevel_tiff_is_read(engine, tmp_path):
+    """Mode-1 TIFF is how a scanned archive and every CCITT fax is stored.
+
+    It used to fail outright with "unsupported pixel layout (Gray(1))": the
+    packed rows, eight pixels to the byte, were measured as though there were
+    one byte each. The corpus never caught it because its "1-bit fax" fixture
+    was saved as RGB.
+    """
+    from PIL import Image, ImageOps, TiffImagePlugin
+
+    page = Image.new("RGB", (900, 200), "white")
+    from PIL import ImageDraw
+
+    ImageDraw.Draw(page).text((20, 60), "RECHNUNG 2026", fill="black")
+    bilevel = page.convert("1")
+
+    plain = tmp_path / "bilevel.tiff"
+    bilevel.save(plain, "TIFF", compression="group4")
+    assert "RECHNUNG" in engine.scan(plain).text
+
+    # The same page the other way round: bits flipped, WhiteIsZero declared —
+    # the CCITT convention. Reading the tag wrong inverts the page.
+    info = TiffImagePlugin.ImageFileDirectory_v2()
+    info[262] = 0
+    flipped = tmp_path / "white_is_zero.tiff"
+    ImageOps.invert(bilevel.convert("L")).convert("1").save(
+        flipped, "TIFF", compression="group4", tiffinfo=info
+    )
+    assert "RECHNUNG" in engine.scan(flipped).text
+
+
+def test_every_offered_suffix_is_one_the_reader_opens():
+    """The list the CLI filters directories with comes from the reader itself.
+
+    `dds`, `exr`, `ico` and `avif` were offered once and none could be opened,
+    and `avif` was in the Rust list alone — which is what deriving it prevents.
+    """
+    import ocrust
+
+    from_reader = frozenset(f".{s}" for s in ocrust._ocrust.supported_suffixes())
+    assert from_reader == ocrust.READABLE_SUFFIXES
+    for gone in (".dds", ".exr", ".ico", ".avif"):
+        assert gone not in ocrust.READABLE_SUFFIXES
+    for kept in (".png", ".pdf", ".tiff", ".qoi", ".hdr", ".pbm"):
+        assert kept in ocrust.READABLE_SUFFIXES
+
+
 def test_cli_prints_on_a_console_that_is_not_utf8(engine):
     """A redirected stdout on Windows is cp1252, and `languages` prints `ẞ`.
 

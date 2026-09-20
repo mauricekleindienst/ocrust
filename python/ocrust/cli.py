@@ -22,7 +22,15 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import FORMATS, Ocr, OcrustError, __version__, _glob, runtime_info
+from . import (
+    FORMATS,
+    READABLE_SUFFIXES,
+    Ocr,
+    OcrustError,
+    __version__,
+    _glob,
+    runtime_info,
+)
 
 #: The input that means "read the document from standard input", the convention
 #: every unix tool uses. A file really called `-` is reachable as `./-`.
@@ -407,17 +415,6 @@ def _parse_pages(spec: str | None) -> list[int] | None:
             # `--pages 1-x` is a typo, not a crash.
             raise _bad_argument(f"{part!r} is not a page or a page range") from None
     return sorted(set(pages))
-
-
-#: Suffixes worth reading when a directory is handed in. Content sniffing
-#: decides what a file really is, but a folder should not be opened blind.
-READABLE_SUFFIXES = frozenset(
-    {
-        ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
-        ".pnm", ".pbm", ".pgm", ".ppm", ".tga", ".dds", ".hdr", ".exr",
-        ".qoi", ".ico", ".pdf",
-    }
-)  # fmt: skip
 
 
 #: Windows redirector codes that mean "the share hiccuped", not "no".

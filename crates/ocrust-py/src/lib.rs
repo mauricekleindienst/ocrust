@@ -503,6 +503,15 @@ fn render_document(document_json: &str, format: &str) -> PyResult<String> {
 }
 
 /// Reports the ONNX Runtime the extension can load.
+/// Every file suffix the reader can open, without the leading dot.
+#[pyfunction]
+fn supported_suffixes() -> Vec<String> {
+    ocrust_core::ingest::SUPPORTED_EXTENSIONS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 #[pyfunction]
 fn runtime_version() -> PyResult<String> {
     ocrust_core::runtime_version().map_err(to_py_err)
@@ -575,6 +584,7 @@ fn _ocrust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEngine>()?;
     m.add_function(wrap_pyfunction!(render_document, m)?)?;
     m.add_function(wrap_pyfunction!(runtime_version, m)?)?;
+    m.add_function(wrap_pyfunction!(supported_suffixes, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_models, m)?)?;
     m.add_function(wrap_pyfunction!(models_cache_dir, m)?)?;
     m.add_function(wrap_pyfunction!(known_languages, m)?)?;
