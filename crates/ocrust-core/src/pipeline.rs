@@ -431,24 +431,56 @@ impl Engine {
         source: &Source,
         opts: &crate::export::pdf::PdfOptions,
     ) -> Result<(Vec<u8>, Document)> {
+        self.to_searchable_pdf_many(std::slice::from_ref(source), opts)
+    }
+
+    /// Scans every source in order and returns them as one searchable PDF.
+    ///
+    /// This is the converter: anything [`ingest`] can read — an image in any of
+    /// the formats it offers, a multi-page TIFF, a PDF — becomes pages of one
+    /// document, in the order given, each page sized from its own pixels rather
+    /// than forced onto a common sheet.
+    ///
+    /// Page pictures are compressed as they are scanned, exactly as for a single
+    /// source, so a hundred files cost what one does: nothing holds a raw page
+    /// beyond the moment it is encoded.
+    pub fn to_searchable_pdf_many(
+        &self,
+        sources: &[Source],
+        opts: &crate::export::pdf::PdfOptions,
+    ) -> Result<(Vec<u8>, Document)> {
+        if sources.is_empty() {
+            return Err(Error::config("a PDF needs at least one input"));
+        }
         let started = Instant::now();
-        let mut doc = Document::new(source.name());
+        let label = match sources {
+            [only] => only.name(),
+            many => format!("{} inputs", many.len()),
+        };
+        let mut doc = Document::new(label);
         let mut encoded = Vec::new();
-        ingest::open(source, &self.config.ingest)?.for_each_page(&mut |raw| {
-            let options = PageOptions {
-                // Needed here regardless of how the engine is configured.
-                keep_image: true,
-                ..PageOptions::from_config(&self.config)
-            };
-            let mut page = self.scan_page_inner(raw, options)?;
-            let image = page
-                .image
-                .take()
-                .ok_or_else(|| Error::config("the page was scanned without keeping its picture"))?;
-            encoded.push(crate::export::pdf::encode_page(&image, opts.jpeg_quality)?);
-            doc.pages.push(page);
-            Ok(())
-        })?;
+        for source in sources {
+            ingest::open(source, &self.config.ingest)?.for_each_page(&mut |raw| {
+                let options = PageOptions {
+                    // Needed here regardless of how the engine is configured.
+                    keep_image: true,
+                    ..PageOptions::from_config(&self.config)
+                };
+                let mut page = self.scan_page_inner(raw, options)?;
+                let image = page.image.take().ok_or_else(|| {
+                    Error::config("the page was scanned without keeping its picture")
+                })?;
+                encoded.push(crate::export::pdf::encode_page(&image, opts.jpeg_quality)?);
+                // One running sequence: a merged document's page numbers are its
+                // own, not the ones each file used.
+                page.index = doc.pages.len();
+                doc.pages.push(page);
+                Ok(())
+            })?;
+        }
+        if doc.pages.is_empty() {
+            return Err(Error::config("the inputs held no pages"));
+        }
         doc.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         let bytes = crate::export::pdf::build_with_encoded(&doc, &encoded, opts)?;
         Ok((bytes, doc))

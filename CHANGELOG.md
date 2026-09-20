@@ -1,6 +1,44 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 — 2026-09-20
+
+A converter, and the format work that made it worth having: a bilevel TIFF — the
+way scanned archives and faxes are actually stored — could not be read at all
+until this release, and four formats were offered that nothing could open.
+
+Accuracy over the 118 corpus files in a language the bundle can write: mean CER
+**0.026**, median 0.003, WER 0.083, word recall **0.927**.
+
+218 Rust unit tests, 10 Rust end-to-end tests, 121 Python tests.
+
+### Added
+
+- **`ocrust pdf` converts anything readable into one searchable PDF.** It took a
+  single file; it now takes files, folders and patterns together:
+
+  ```bash
+  ocrust pdf archive/ -o archive.pdf                  # a folder, recursively
+  ocrust pdf fax.tiff photo.jpg old.pdf -o one.pdf    # mixed kinds, in order
+  ```
+
+  Images in any offered format, multi-page TIFFs and existing PDFs can be mixed
+  in one command, and the pages come out in the order the inputs were given. Each
+  page keeps its own size, computed from its pixels and `--dpi`, instead of being
+  stretched onto a common sheet. A folder is walked recursively, sorted and
+  filtered to readable suffixes, so the same folder gives the same PDF twice
+  running. More than one input means `-o` is required, since where one file goes
+  is not something to guess.
+
+  Pages are compressed as they are scanned, the same as for a single file, so a
+  hundred inputs cost the memory of one.
+
+  It does not preserve an input PDF's vector content: every page is re-rendered,
+  which is what lets different formats sit on equal footing. `ocrust ocr` remains
+  the lossless path for a PDF whose pages must stay exactly as they are.
+
+  New: `Engine::to_searchable_pdf_many` in Rust, `Ocr.searchable_pdf_many` and
+  the module-level `ocrust.searchable_pdf_many` in Python, both returning the PDF
+  and its page count.
 
 ### Fixed
 

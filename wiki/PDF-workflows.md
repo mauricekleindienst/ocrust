@@ -7,6 +7,37 @@ archives get ruined.
 |---|---|---|
 | A scanned PDF should become searchable | `ocrust ocr scan.pdf` | Kept exactly as they are; an invisible text layer is added |
 | An image should become a PDF | `ocrust pdf photo.jpg` | A new PDF is built: JPEG plus an invisible text layer |
+| Many files should become one PDF | `ocrust pdf archive/ -o all.pdf` | Every readable input, in order, as the pages of one searchable PDF |
+
+## Converting anything into one PDF
+
+```bash
+ocrust pdf archive/ -o archive.pdf                  # a folder, recursively
+ocrust pdf fax.tiff photo.jpg old.pdf -o one.pdf    # mixed kinds, in this order
+```
+
+This is the converter. Anything the reader opens goes in — images in any offered
+format, multi-page TIFFs, existing PDFs — and one searchable PDF comes out, page
+sizes taken from each input's own pixels rather than forced onto a common sheet.
+A folder is walked recursively and sorted, so the result is the same twice
+running.
+
+Pages are compressed as they are scanned, so a hundred files cost the memory of
+one. What it does *not* do is preserve an input PDF's vector content: every page
+is re-rendered, which is the price of putting different formats on equal footing.
+For a PDF whose pages must stay exactly as they are, use `ocrust ocr` below.
+
+In Python:
+
+```python
+import ocrust
+
+data, pages = ocrust.searchable_pdf_many(["fax.tiff", "photo.jpg", "old.pdf"])
+Path("one.pdf").write_bytes(data)
+print(pages, "pages")
+```
+
+A folder or a glob can be passed instead of a list of files.
 
 ## Making an existing PDF searchable
 

@@ -316,6 +316,7 @@ ocrust scan inbox/ -o out/ --watch           # scan files as they land
 ocrust completions zsh > "${fpath[1]}/_ocrust"
 ocrust ocr scan.pdf -o scan.ocr.pdf          # add a text layer
 ocrust pdf photo.jpg -o photo.pdf            # searchable PDF from an image
+ocrust pdf archive/ -o archive.pdf           # a folder of mixed formats, one PDF
 ocrust tiff scan.pdf --gray --sidecar text   # archive TIFF plus text
 ocrust languages                             # model coverage
 ocrust models                                # which files are in use

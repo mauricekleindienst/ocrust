@@ -261,6 +261,33 @@ impl PyEngine {
             .collect()
     }
 
+    /// Every input, in order, as the pages of one searchable PDF.
+    #[pyo3(signature = (paths, dpi = None, jpeg_quality = 80))]
+    fn searchable_pdf_many<'py>(
+        &self,
+        py: Python<'py>,
+        paths: Vec<PathBuf>,
+        dpi: Option<f32>,
+        jpeg_quality: u8,
+    ) -> PyResult<(Bound<'py, PyBytes>, usize)> {
+        let dpi = dpi.unwrap_or(self.inner.config().ingest.pdf_dpi);
+        let sources: Vec<Source> = paths.into_iter().map(Source::path).collect();
+        let built = py.detach(|| -> ocrust_core::Result<(Vec<u8>, usize)> {
+            self.inner
+                .to_searchable_pdf_many(
+                    &sources,
+                    &PdfOptions {
+                        dpi,
+                        jpeg_quality,
+                        text_layer: true,
+                    },
+                )
+                .map(|(bytes, doc)| (bytes, doc.pages.len()))
+        });
+        let (bytes, pages) = built.map_err(to_py_err)?;
+        Ok((PyBytes::new(py, &bytes), pages))
+    }
+
     /// Scans `path` and returns a searchable PDF: the page images with an
     /// invisible text layer on top.
     #[pyo3(signature = (path, dpi = None, jpeg_quality = 80))]

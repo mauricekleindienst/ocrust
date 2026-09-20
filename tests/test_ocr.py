@@ -139,6 +139,40 @@ def test_scan_many_reads_a_directory(engine, invoice_pdf, tmp_path):
     assert all("INVOICE" in d.text.upper() for d in docs)
 
 
+def test_mixed_inputs_convert_into_one_pdf(engine, tmp_path):
+    """The converter: anything readable, in order, as the pages of one PDF.
+
+    A bilevel TIFF, a three-page TIFF, a QOI and a PDF go in; eight A4 pages
+    with a searchable text layer come out.
+    """
+    from PIL import Image, ImageDraw
+
+    def page(text: str) -> Image.Image:
+        im = Image.new("RGB", (1654, 2338), "white")
+        ImageDraw.Draw(im).text((120, 300), text, fill="black")
+        return im
+
+    one = page("ERSTE SEITE")
+    one.convert("1").save(tmp_path / "a.tiff", "TIFF", compression="group4")
+    three = page("DREI SEITEN")
+    three.save(tmp_path / "b.tiff", save_all=True, append_images=[three, three])
+    page("EIN QOI").save(tmp_path / "c.qoi")
+    page("EIN PDF").save(tmp_path / "d.pdf", resolution=200)
+
+    data, pages = engine.searchable_pdf_many(sorted(tmp_path.iterdir()))
+    assert pages == 6, f"1 + 3 + 1 + 1 pages, got {pages}"
+    assert data.startswith(b"%PDF")
+
+    import io
+
+    reader = pytest.importorskip("pypdf").PdfReader(io.BytesIO(data))
+    assert len(reader.pages) == 6
+    for number, rendered in enumerate(reader.pages):
+        box = rendered.mediabox
+        assert abs(float(box.width) - 595) < 15, f"page {number} is not A4: {box.width}"
+        assert (rendered.extract_text() or "").strip(), f"page {number} has no text layer"
+
+
 def test_a_bilevel_tiff_is_read(engine, tmp_path):
     """Mode-1 TIFF is how a scanned archive and every CCITT fax is stored.
 

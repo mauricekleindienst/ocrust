@@ -236,6 +236,79 @@ fn writes_a_searchable_pdf() {
     );
 }
 
+/// The converter: several inputs of different kinds, one PDF.
+#[test]
+fn many_inputs_become_the_pages_of_one_pdf() {
+    let Some(engine) = engine() else { return };
+    use ocrust_core::export::pdf::PdfOptions;
+
+    // Three kinds at once: a PDF, a multi-page TIFF and a plain image. The
+    // picture for the last two comes from rasterizing a PDF of known text, so
+    // every input carries words the text layer can be checked against.
+    let pdf = text_pdf(&[("First from a PDF", 30)]);
+    let other = text_pdf(&[("Second from elsewhere", 30)]);
+    let page = ocrust_core::ingest::load(
+        &Source::bytes(other, "other.pdf"),
+        &ocrust_core::IngestConfig::default(),
+    )
+    .expect("render")[0]
+        .image
+        .clone();
+
+    let tiff = ocrust_core::export::tiff::write_pages(
+        std::slice::from_ref(&page),
+        ocrust_core::export::tiff::TiffOptions::new(ocrust_core::export::tiff::TiffColor::Rgb),
+    )
+    .expect("write tiff");
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgb8(page.clone())
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("write png");
+
+    let sources = [
+        Source::bytes(pdf, "one.pdf"),
+        Source::bytes(tiff, "two.tiff"),
+        Source::bytes(png, "three.png"),
+    ];
+    let (out, doc) = engine
+        .to_searchable_pdf_many(&sources, &PdfOptions::default())
+        .expect("convert");
+
+    assert_eq!(doc.pages.len(), 3, "one page per input here");
+    // The page numbers are the merged document's own running sequence.
+    let indices: Vec<usize> = doc.pages.iter().map(|p| p.index).collect();
+    assert_eq!(indices, vec![0, 1, 2]);
+
+    let parsed = hayro::hayro_syntax::Pdf::new(std::sync::Arc::new(out.clone()))
+        .expect("the converted PDF must parse");
+    assert_eq!(parsed.pages().len(), 3);
+    assert!(
+        String::from_utf8_lossy(&out).contains("First"),
+        "the text layer must carry the first input's words"
+    );
+
+    // And a single source still goes through the same path.
+    let (one, _) = engine
+        .to_searchable_pdf(&sources[2], &PdfOptions::default())
+        .expect("one source");
+    assert_eq!(
+        hayro::hayro_syntax::Pdf::new(std::sync::Arc::new(one))
+            .expect("parses")
+            .pages()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_pdf_of_nothing_is_an_error() {
+    let Some(engine) = engine() else { return };
+    use ocrust_core::export::pdf::PdfOptions;
+    assert!(engine
+        .to_searchable_pdf_many(&[], &PdfOptions::default())
+        .is_err());
+}
+
 /// Builds an engine that must cover `languages`, or `None` when no models exist.
 fn engine_for(languages: &[&str]) -> Option<Engine> {
     let mut config = EngineConfig::new().with_languages(languages).ok()?;
