@@ -304,7 +304,32 @@ impl Engine {
 
     /// The one scan implementation: every other entry point routes through it, so
     /// page selection and progress reporting cannot drift apart.
+    /// [`Self::run_unguarded`], with a panic turned into this document's error.
+    ///
+    /// A bug met on one page of one document — an index out of range in the
+    /// layout, say — used to unwind through the batch and end it, taking every
+    /// other document with it. It is still a bug, and says so; but it is this
+    /// document's failure, reported like any other.
     fn run(
+        &self,
+        source: &Source,
+        pages: Option<&[usize]>,
+        progress: &mut (dyn FnMut(Progress) + Send),
+    ) -> Result<Document> {
+        let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.run_unguarded(source, pages, progress)
+        }));
+        guarded.unwrap_or_else(|payload| {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic without a message".to_string());
+            Err(Error::Internal(message))
+        })
+    }
+
+    fn run_unguarded(
         &self,
         source: &Source,
         pages: Option<&[usize]>,

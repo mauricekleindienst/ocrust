@@ -66,8 +66,8 @@ batch API ran at 0.73× — the classic thread-fight. If you tune this yourself,
 keep `page_workers × threads ≈ cores`.
 
 The default is one worker, because a one-page scan is the common case and a
-single worker with all threads is fastest there. The CLI raises it to 4 when you
-pass several files.
+single worker with all threads is fastest there. The CLI raises it to one per
+core (at most 16) when you pass several files.
 
 ## Batching
 
@@ -78,8 +78,39 @@ for doc in ocr.scan_many(paths):    # 1.01× versus one at a time
 
 `scan_many` hands the whole list to Rust and scans documents with rayon. Over 20
 files it is 13.6 s versus 13.5 s — effectively identical, because a single
-document already saturates the cores. Use it for the ergonomics (one call, GIL
-released once, results streamed), not for a speed-up.
+document already saturates the cores. It returns once the whole list is done,
+and one unreadable file raises and ends it.
+
+For large batches use `scan_each`: the same parallel scan a chunk at a time, so
+results arrive while the batch runs and memory is bounded by the chunk; each
+input comes back with its document, or with its exception, in input order.
+
+```python
+for path, result in ocr.scan_each(["/mnt/share"]):
+    ...
+```
+
+### Many cores, many machines
+
+Every page worker gets a model session of its own and the cores are divided
+between the sessions (`plan_parallelism` in the Rust crate). Until 0.2.6
+sessions stopped at four whatever the number of workers, so on a sixteen-core
+machine sixteen workers queued for four sessions of one thread each and three
+quarters of the cores idled; that is fixed, but it is measured here only on
+four cores, where it changes nothing.
+
+On one machine one process is fastest — four cores, 36 pages of `ocrust vs`:
+
+| Layout | Seconds |
+|---|---:|
+| 1 process, 4 workers | **45.3** |
+| 2 processes × 2 workers | 52.6 |
+| 1 process, 1 worker | 56.7 |
+| 4 processes × 1 worker | 67.0 |
+
+Across machines, `--shard K/N` on `ocrust vs` and `ocrust find` splits the files
+by a hash of their path below the walked folder, and `--resume` continues an
+interrupted JSON Lines report; see [Search profiles](Search-profiles.md#large-jobs-in-parallel).
 
 ## The knobs that actually move the clock
 

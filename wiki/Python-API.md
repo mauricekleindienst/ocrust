@@ -139,6 +139,21 @@ for doc in ocr.scan_many(["scans/*.tiff"]):    # expanded here, not by the shell
 Files you name yourself come back one document per input, duplicates included, so
 `zip(paths, docs)` lines up. Only expanded files are de-duplicated.
 
+`scan_many` returns once the whole list is scanned and raises on the first file
+it cannot read. For large batches, `scan_each` is the loop to write:
+
+```python
+for path, result in ocr.scan_each(["archive/"], chunk=32):
+    if isinstance(result, Exception):   # OSError, ValueError or OcrustError
+        print(path, "skipped:", result)
+    else:
+        print(path, len(result.pages))
+```
+
+It scans a chunk of files at a time in parallel across the page workers, so
+results arrive while the batch runs and memory is bounded by the chunk, and a
+file that cannot be read arrives as its exception instead of ending the batch.
+
 ### Searching a result
 
 ```python
@@ -259,6 +274,19 @@ rows = list(csv.reader(io.StringIO(doc.tables[0].to_csv())))
 behind this and no ruling lines are read — see
 [Accuracy](Accuracy.md#tables) for how the columns are found, what the guardrails
 are, and what it cannot see.
+
+### Search profiles
+
+```python
+profile = ocrust.terms.load("profil.toml")     # .toml, .json, one phrase per line, or a list
+for hit in ocrust.scan("akte.pdf").find(profile):
+    print(hit.page, hit.term, hit.text, hit.how, hit.score)
+```
+
+`Document.find` returns a `TermReport`: every occurrence of every term, found
+however the scan broke it up — letter-spaced, hyphenated, over two lines, glued,
+misread — with its page, boxes, zone, severity and how it was broken. See
+[Search profiles](Search-profiles.md).
 
 ### Classification markings
 

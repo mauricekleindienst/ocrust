@@ -176,8 +176,10 @@ ocrust vs inbox/ --mentions                   # also the sentences that talk abo
 | `-f text\|json\|jsonl\|csv` | report format; `json` and `csv` carry every finding with its page, box, reason and confidence |
 | `-o FILE` | write the report to a file (atomically) instead of stdout |
 | `--mentions` | list mentions under each file in the text report |
-| `--workers N` | files scanned in parallel (default 4) |
-| `--pages`, `--dpi`, `--password`, `--max-pixels`, `--models`, `--device` | as for `ocrust scan` |
+| `--workers N` | pages scanned in parallel (default: one per core, at most 16) |
+| `--terms FILE`, `--term PHRASE` | also look for the terms of a search profile ([Search profiles](Search-profiles.md)); a hit then trips the default gate too |
+| `--shard K/N`, `--resume` | split a large job between machines, and continue an interrupted one |
+| `--pages`, `--dpi`, `--password`, `--max-pixels`, `--models`, `--device`, `--threads` | as for `ocrust scan` |
 
 Files are scanned in parallel, a chunk at a time, and reported in the order they
 were given as each chunk finishes — a share of ten thousand files starts

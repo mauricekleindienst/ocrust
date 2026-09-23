@@ -55,6 +55,11 @@ pub enum Error {
 
     #[error("operation cancelled")]
     Cancelled,
+
+    /// A bug in ocrust met on one document. Caught so a batch goes on with
+    /// the next document instead of ending with this one.
+    #[error("internal error while reading this document ({0}); this is a bug in ocrust — please report it, with the file if you can")]
+    Internal(String),
 }
 
 impl Error {

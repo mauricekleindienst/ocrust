@@ -239,8 +239,11 @@ def _term(entry: dict[str, Any], where: str) -> Term:
         raise ProfileError(f"{where}: unknown {sorted(bad)}; known: {sorted(_TERM_KEYS)}")
     match = _strings(entry.get("match"), "match", where)
     regex = _strings(entry.get("regex"), "regex", where)
+    if not match and not regex and isinstance(entry.get("name"), str) and entry["name"].strip():
+        # A term that is only named is looked for by its name.
+        match = (entry["name"].strip(),)
     if not match and not regex:
-        raise ProfileError(f"{where}: needs `match` (phrases) or `regex`")
+        raise ProfileError(f"{where}: needs `match` (phrases), `regex` or at least a `name`")
     for pattern in regex:
         try:
             re.compile(pattern)
@@ -381,7 +384,7 @@ class TermReport:
 # ------------------------------------------------------------------ folding
 
 #: Gaps between two letters of the stream, by what stood between them.
-_NONE, _SPACE, _PUNCT, _LINE, _HYPHEN, _BLOCK, _SPACED = range(7)
+_NONE, _SPACE, _PUNCT, _LINE, _HYPHEN, _BLOCK, _SPACED, _CASE = range(8)
 _DASHES = set("-‐‑‒–—―−﹘﹣－­")
 _INVISIBLE = set("​‌‍⁠﻿")
 #: Symbols the recognizer puts where a letter was, inside a word.
@@ -427,6 +430,9 @@ class _Stream:
     #: (line number, character offset in that line's text)
     origin: list[tuple[int, int]] = field(default_factory=list)
     lines: list[Line] = field(default_factory=list)
+    #: Per line: the layout line it is part of, and where in its text it starts
+    #: (a piece of a line read in column order is part of the whole line).
+    parents: list[tuple[Line, int]] = field(default_factory=list)
     zones: list[str] = field(default_factory=list)
 
     _text: str = ""
@@ -459,7 +465,7 @@ def _spaced_positions(text: str) -> set[int]:
         run.clear()
 
     for start, token in tokens:
-        if len(token) == 1 and token.isalnum():
+        if len(token) == 1 and (token.isalnum() or token in "-/.:"):
             run.append(start)
         else:
             close()
@@ -467,16 +473,85 @@ def _spaced_positions(text: str) -> set[int]:
     return inside
 
 
-def _stream(page: Page) -> _Stream:
-    s = _Stream()
-    pending = _BLOCK
+def _reading_columns(page: Page) -> list[tuple[Line, Line, int]]:
+    """The page's pieces in the order a reader of columns takes them, each with
+    the line it is part of and where in that line's text it starts.
+
+    The layout reads a row at a time, and on a two-column page it can take the
+    two columns' lines for one: "Sicherheit Nordlicht wird bis zum Sommer". A
+    phrase that wraps inside a column or a table cell ("Zutritts" /
+    "kontrollanlage"), or from the foot of one column to the head of the next
+    ("Mit dem Projekt" … "Nordlicht wird"), then has other text between its
+    halves. Cut the page where it is emptiest, again and again — between two
+    columns, between two sections — and read the parts in order, and the
+    halves meet again.
+    """
+    from .markings import _pieces
+
+    pieces: list[tuple[Line, Line, int]] = []
     for block in page.blocks:
         if block.kind == "tick_box":
             continue
-        pending = max(pending, _BLOCK) if s.chars else pending
         for line in block.lines:
+            cursor = 0
+            for piece in _pieces(line):
+                offset = line.text.find(piece.text, cursor) if piece is not line else 0
+                if offset < 0:
+                    offset = cursor
+                cursor = offset + len(piece.text)
+                pieces.append((piece, line, offset))
+    order: list[tuple[Line, Line, int]] = []
+    stack = [pieces]
+    while stack:
+        group = stack.pop()
+        if len(group) < 2:
+            order.extend(group)
+            continue
+        x_gap, x_cut = _widest_gap([(p.box.x0, p.box.x1) for p, _, _ in group])
+        y_gap, y_cut = _widest_gap([(p.box.y0, p.box.y1) for p, _, _ in group])
+        if x_gap <= 0 and y_gap <= 0:
+            order.extend(sorted(group, key=lambda g: (g[0].box.y0, g[0].box.x0)))
+            continue
+        if x_gap > y_gap:
+            before = [g[0].box.x1 <= x_cut for g in group]
+        else:
+            before = [g[0].box.y1 <= y_cut for g in group]
+        stack.append([g for g, b in zip(group, before) if not b])
+        stack.append([g for g, b in zip(group, before) if b])
+    return order
+
+
+def _widest_gap(spans: list[tuple[float, float]]) -> tuple[float, float]:
+    """The widest stretch no span covers, and its middle."""
+    spans = sorted(spans)
+    reach = spans[0][1]
+    best = (0.0, 0.0)
+    for lo, hi in spans[1:]:
+        if lo - reach > best[0]:
+            best = (lo - reach, (reach + lo) / 2)
+        reach = max(reach, hi)
+    return best
+
+
+def _stream(page: Page, columns: bool = False) -> _Stream:
+    """The page as one stream, in the layout's reading order or, with
+    `columns`, column by column (see `_reading_columns`)."""
+    s = _Stream()
+    pending = _BLOCK
+    if columns:
+        runs = [_reading_columns(page)]
+    else:
+        runs = [
+            [(line, line, 0) for line in block.lines]
+            for block in page.blocks
+            if block.kind != "tick_box"
+        ]
+    for run in runs:
+        pending = max(pending, _BLOCK) if s.chars else pending
+        for line, whole, offset in run:
             number = len(s.lines)
             s.lines.append(line)
+            s.parents.append((whole, offset))
             s.zones.append(_zone(line, page))
             text = line.text
             spaced = _spaced_positions(text)
@@ -494,6 +569,10 @@ def _stream(page: Page) -> _Stream:
                 gap = pending
                 if gap == _SPACE and i in spaced:
                     gap = _SPACED
+                elif gap == _NONE and i > 0 and ch.isupper() and text[i - 1].islower():
+                    # "HerrWeißmüller", "DieAuswertung": a space the scan lost
+                    # between two words still shows as a capital after a small.
+                    gap = _CASE
                 for c in folded:
                     s.chars.append(c)
                     s.gaps.append(gap)
@@ -561,13 +640,17 @@ def _budget(term: Term, length: int) -> int:
     return 1 if length <= 8 else 2
 
 
-def _canon(text: str) -> tuple[str, list[int]]:
-    """Look-alike classes collapsed, rn read as m, vv as w and ae as a, for
-    finding candidate places fast; `index` maps back to the stream."""
+def _canon(text: str, collapse: bool = True) -> tuple[str, list[int]]:
+    """Look-alike classes collapsed, and with `collapse` rn read as m, vv as w
+    and ae as a, for finding candidate places fast; `index` maps back to the
+    stream. Both views are searched: a collapse can also join the end of one
+    word to the next ("SERVER NOX" reads "SERVEMOX")."""
+    translated = text.translate(_CANON)
+    if not collapse:
+        return translated, list(range(len(text)))
     out: list[str] = []
     index: list[int] = []
     i = 0
-    translated = text.translate(_CANON)
     while i < len(translated):
         pair = text[i : i + 2]
         if pair in ("AE", "OE", "UE"):
@@ -591,26 +674,16 @@ def _canon(text: str) -> tuple[str, list[int]]:
     return "".join(out), index
 
 
-def _align(
-    pattern: str,
-    p_umlaut: list[bool],
-    text: str,
-    t_umlaut: list[bool],
-    budget: int,
-    max_lookalikes: int,
-) -> list[tuple[int, int, int]]:
-    """Every place `pattern` fits inside `text` within the budget: (start,
-    end, cost), best first, not overlapping.
-
-    Semi-global weighted edit distance: the pattern must be used whole, the
-    text around it is free. A look-alike (0 for O, "rn" for "m") costs
-    `LOOK`, "ae" for an "ä" `SPELL`, anything else `EDIT`.
-    """
+def _table(
+    pattern: str, p_umlaut: list[bool], text: str, t_umlaut: list[bool], free: bool
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Weighted edit distance of `pattern` against `text`, and where each
+    alignment began. With `free`, the text before and after costs nothing."""
     m, n = len(pattern), len(text)
     inf = 10**9
-    # cost[i][j] and where the alignment of pattern[:i] ending at text[:j] began.
-    cost = [[0] * (n + 1)] + [[inf] * (n + 1) for _ in range(m)]
-    begin = [list(range(n + 1))] + [[0] * (n + 1) for _ in range(m)]
+    first = [0] * (n + 1) if free else [j * EDIT for j in range(n + 1)]
+    cost = [first] + [[inf] * (n + 1) for _ in range(m)]
+    begin = [list(range(n + 1)) if free else [0] * (n + 1)] + [[0] * (n + 1) for _ in range(m)]
     for i in range(1, m + 1):
         cost[i][0] = i * EDIT
         pc = pattern[i - 1]
@@ -643,10 +716,34 @@ def _align(
                 best, b = cost[i - 2][j - 1] + SPELL, begin[i - 2][j - 1]
             row[j] = best
             brow[j] = b
+    return cost, begin
+
+
+def _within(cost: int, budget: int, max_lookalikes: int) -> bool:
+    return cost // EDIT <= budget and cost % EDIT // LOOK <= max_lookalikes
+
+
+def _align(
+    pattern: str,
+    p_umlaut: list[bool],
+    text: str,
+    t_umlaut: list[bool],
+    budget: int,
+    max_lookalikes: int,
+) -> list[tuple[int, int, int]]:
+    """Every place `pattern` fits inside `text` within the budget: (start,
+    end, cost), best first, not overlapping.
+
+    Semi-global weighted edit distance: the pattern must be used whole, the
+    text around it is free. A look-alike (0 for O, "rn" for "m") costs
+    `LOOK`, "ae" for an "ä" `SPELL`, anything else `EDIT`.
+    """
+    m, n = len(pattern), len(text)
+    cost, begin = _table(pattern, p_umlaut, text, t_umlaut, free=True)
     ends = [
         (cost[m][j], begin[m][j], j)
         for j in range(1, n + 1)
-        if cost[m][j] // EDIT <= budget and cost[m][j] % EDIT // LOOK <= max_lookalikes
+        if _within(cost[m][j], budget, max_lookalikes)
     ]
     ends.sort()
     chosen: list[tuple[int, int, int]] = []
@@ -659,27 +756,36 @@ def _align(
     return chosen
 
 
-def _candidates(canon: str, index: list[int], pattern: str, budget: int) -> list[tuple[int, int]]:
+def _fit(pattern: str, p_umlaut: list[bool], text: str, t_umlaut: list[bool]) -> int:
+    """The cost of reading all of `text` as `pattern`."""
+    cost, _ = _table(pattern, p_umlaut, text, t_umlaut, free=False)
+    return cost[len(pattern)][len(text)]
+
+
+def _candidates(
+    views: Sequence[tuple[str, list[int], bool]], pattern: str, budget: int
+) -> list[tuple[int, int]]:
     """Windows of the stream where `pattern` could be, by the pigeonhole rule:
     with k edits, one of k + 1 pieces of the pattern appears unchanged."""
-    cpattern, _ = _canon(pattern)
-    m = len(cpattern)
-    pieces = max(1, min(budget + 1, m // 2))
-    size = m // pieces
     windows: list[tuple[int, int]] = []
     slack = budget + 2
-    for p in range(pieces):
-        offset = p * size
-        piece = cpattern[offset : offset + size if p < pieces - 1 else m]
-        if not piece:
-            continue
-        start = canon.find(piece)
-        while start >= 0:
-            s = index[start]
-            lo = max(0, s - offset - slack - budget)
-            hi = s - offset + len(pattern) + slack + budget
-            windows.append((lo, hi))
-            start = canon.find(piece, start + 1)
+    for canon, index, collapse in views:
+        cpattern, _ = _canon(pattern, collapse)
+        m = len(cpattern)
+        pieces = max(1, min(budget + 1, m // 2))
+        size = m // pieces
+        for p in range(pieces):
+            offset = p * size
+            piece = cpattern[offset : offset + size if p < pieces - 1 else m]
+            if not piece:
+                continue
+            start = canon.find(piece)
+            while start >= 0:
+                s = index[start]
+                lo = max(0, s - offset - slack - budget)
+                hi = s - offset + len(pattern) + slack + budget
+                windows.append((lo, hi))
+                start = canon.find(piece, start + 1)
     windows.sort()
     merged: list[tuple[int, int]] = []
     for lo, hi in windows:
@@ -707,58 +813,214 @@ def find(document: Document, profile: Profile | Any) -> TermReport:
     profile = load(profile)
     hits: list[Hit] = []
     for page in document.pages:
-        stream = _stream(page)
-        if not stream.chars:
+        streams = [_stream(page)]
+        by_columns = _stream(page, columns=True)
+        if by_columns.text != streams[0].text:
+            streams.append(by_columns)
+        if not streams[0].chars:
             continue
-        canon, index = _canon(stream.text)
-        flat: _Flat | None = None
-        tight: _Flat | None = None
+        prepared = [_Prepared(stream) for stream in streams]
         for term in profile.terms:
-            found: list[tuple[Hit, int, int]] = []
-            for phrase in term.match:
-                found.extend(_phrase_hits(term, phrase, page, stream, canon, index))
-            if term.regex:
-                flat = flat or _flat(stream)
-                tight = tight or _flat(stream, close_lines=True)
+            found: list[_Found] = []
+            for ready in prepared:
+                for phrase in term.match:
+                    found.extend(_phrase_hits(term, phrase, page, ready))
                 for pattern in term.regex:
-                    found.extend(_regex_hits(term, pattern, page, stream, flat))
-                    # "KD-12" at a line end and "3456" on the next: a number
-                    # the layout broke is one number.
-                    found.extend(_regex_hits(term, pattern, page, stream, tight))
-            for hit, start, end in _unique(found):
-                if hit.zone not in term.zones:
+                    for flat in ready.flats():
+                        found.extend(_regex_hits(term, pattern, page, ready.stream, flat))
+            for item in _distinct(found):
+                if item.hit.zone not in term.zones:
                     continue
-                if not _context_ok(term, stream, start, end):
+                if not _context_ok(term, item.stream, item.start, item.end):
                     continue
-                hits.append(hit)
+                hits.append(item.hit)
     hits.sort(key=lambda h: (h.page, h.box.y0, h.box.x0))
     return TermReport(source=document.source, hits=tuple(hits))
 
 
-def _phrase_hits(
-    term: Term, phrase: str, page: Page, stream: _Stream, canon: str, index: list[int]
-) -> Iterator[tuple[Hit, int, int]]:
+@dataclass
+class _Found:
+    hit: Hit
+    stream: _Stream
+    start: int
+    end: int
+    #: Per layout line it touches: the line, the character range in its text,
+    #: and the box around that range.
+    places: tuple[tuple[Line, int, int, Box], ...] = ()
+
+
+def _places(stream: _Stream, spots: Iterable[tuple[int, int]]) -> tuple:
+    per_line: dict[int, list[int]] = {}
+    for line, offset in spots:
+        per_line.setdefault(line, []).append(offset)
+    places = []
+    for n, offsets in per_line.items():
+        line, lo, hi = stream.lines[n], min(offsets), max(offsets) + 1
+        whole, shift = stream.parents[n]
+        places.append((whole, lo + shift, hi + shift, _box_for_span(line, lo, hi)))
+    return tuple(places)
+
+
+class _Prepared:
+    """A stream with its prefilter views and regex texts, built once a page."""
+
+    def __init__(self, stream: _Stream) -> None:
+        self.stream = stream
+        text = stream.text
+        self.views = [(*_canon(text, True), True), (*_canon(text, False), False)]
+        self._flats: list[_Flat] | None = None
+
+    def flats(self) -> list[_Flat]:
+        """The page text for regular expressions, three ways: as read; with a
+        line that ends in a letter or digit joined to the next ("KD-12" /
+        "3456"); and with the spaces around single characters taken out, which
+        is how a form's comb fields read ("K D - 4 3 8 3 0 0")."""
+        if self._flats is None:
+            self._flats = [
+                _flat(self.stream),
+                _flat(self.stream, close_lines=True),
+                _flat(self.stream, compact=True),
+            ]
+        return self._flats
+
+
+def _distinct(found: list[_Found]) -> list[_Found]:
+    """One hit per place: two phrases of a term, a phrase and a regex, the two
+    reading orders, or a stamp read twice that found the same words."""
+    kept: list[_Found] = []
+    for item in sorted(found, key=lambda f: -f.hit.score):
+        if any(_same_place(item, k) for k in kept):
+            continue
+        kept.append(item)
+    return kept
+
+
+def _same_place(a: _Found, b: _Found) -> bool:
+    """Whether two hits cover the same letters: on one line, the same
+    characters; on two lines (a stamp read twice, a cell read in both
+    orders), the same spot on the page."""
+    for line_a, lo_a, hi_a, x in a.places:
+        for line_b, lo_b, hi_b, y in b.places:
+            if line_a is line_b:
+                if lo_a < hi_b and lo_b < hi_a:
+                    return True
+                continue
+            w = min(x.x1, y.x1) - max(x.x0, y.x0)
+            h = min(x.y1, y.y1) - max(x.y0, y.y0)
+            if w > 0 and h > 0:
+                smaller = min(x.width * x.height, y.width * y.height) or 1.0
+                if w * h > 0.3 * smaller:
+                    return True
+    return False
+
+
+def _phrase_hits(term: Term, phrase: str, page: Page, ready: _Prepared) -> Iterator[_Found]:
+    stream = ready.stream
     pattern, breaks, p_umlaut = _skeleton_of(phrase)
     budget = min(_budget(term, len(pattern)), max(0, (len(pattern) - 1) // 3))
     # Look-alikes are forgiven, but not so many that the word is gone.
     lookalikes = max(1, len(pattern) // 3)
     taken: list[tuple[int, int]] = []
-    for lo, hi in _candidates(canon, index, pattern, budget):
+    for lo, hi in _candidates(ready.views, pattern, budget):
         hi = min(hi, len(stream.chars))
         window = stream.text[lo:hi]
         for start, end, c in _align(
             pattern, p_umlaut, window, stream.umlauts[lo:hi], budget, lookalikes
         ):
             start, end = start + lo, end + lo
+            if term.whole_words:
+                snapped = _snap(stream, pattern, p_umlaut, start, end, budget, lookalikes)
+                if snapped is None:
+                    continue
+                start, end, c = snapped
             if any(start < e and s < end for s, e in taken):
-                continue
-            if term.whole_words and not (_boundary(stream, start) and _boundary(stream, end)):
                 continue
             if term.case and not _same_case(phrase, stream, start, end):
                 continue
+            if not _short_words_kept(pattern, breaks, stream, start, end):
+                continue
             taken.append((start, end))
             hit = _hit(term, phrase, page, stream, start, end, c, breaks, len(pattern))
-            yield hit, start, end
+            yield _Found(hit, stream, start, end, _places(stream, stream.origin[start:end]))
+
+
+def _snap(
+    stream: _Stream,
+    pattern: str,
+    p_umlaut: list[bool],
+    start: int,
+    end: int,
+    budget: int,
+    lookalikes: int,
+) -> tuple[int, int, int] | None:
+    """The hit moved onto word boundaries, or ``None`` if it cannot be.
+
+    Two alignments often cost the same — "Opperation" read as "Operation" can
+    drop the first P or turn the O into the second one — and the one the
+    alignment kept may start inside the word. Nearby boundaries are tried, and
+    the cheapest reading that starts and ends on one is kept.
+    """
+    if _boundary(stream, start) and _boundary(stream, end):
+        fitted = _fit(pattern, p_umlaut, stream.text[start:end], stream.umlauts[start:end])
+        return start, end, fitted
+    reach = budget + 1
+    starts = [s for s in range(max(0, start - reach), start + reach + 1) if _boundary(stream, s)]
+    ends = [
+        e
+        for e in range(max(start + 1, end - reach), min(len(stream.chars), end + reach) + 1)
+        if _boundary(stream, e)
+    ]
+    best: tuple[int, int, int] | None = None
+    for s in starts:
+        for e in ends:
+            if e - s < max(1, len(pattern) - budget):
+                continue
+            c = _fit(pattern, p_umlaut, stream.text[s:e], stream.umlauts[s:e])
+            if _within(c, budget, lookalikes) and (best is None or c < best[2]):
+                best = (s, e, c)
+    return best
+
+
+def _short_words_kept(
+    pattern: str, breaks: list[bool], stream: _Stream, start: int, end: int
+) -> bool:
+    """Whether the one- and two-letter words of a phrase — an initial, a house
+    number, the X4 of "Sentinel X4" — were read as written.
+
+    The fuzzy budget is meant for long words. Spent on an initial, it makes
+    "Schöllhorn" and "Ms Schöllhorn" into "M. Schöllhorn": a letter dropped or
+    added, well within the budget of an eleven-letter phrase, and a different
+    person.
+    """
+    words: list[str] = []
+    for c, starts in zip(pattern, breaks):
+        if starts or not words:
+            words.append(c)
+        else:
+            words[-1] += c
+    if len(words) < 2 or all(len(w) > 2 for w in words):
+        return True
+    tokens = [""]
+    for k in range(start, end):
+        if k > start and stream.gaps[k] not in (_NONE, _SPACED, _HYPHEN):
+            tokens.append("")
+        tokens[-1] += stream.chars[k]
+    words = [w.translate(_CANON) for w in words]
+    tokens = [t.translate(_CANON) for t in tokens]
+    for i, word in enumerate(words):
+        if len(word) > 2:
+            continue
+        if len(tokens) == len(words):
+            kept = tokens[i] == word
+        elif i == 0:
+            kept = tokens[0].startswith(word)
+        elif i == len(words) - 1:
+            kept = tokens[-1].endswith(word)
+        else:
+            kept = any(word in t for t in tokens)
+        if not kept:
+            return False
+    return True
 
 
 def _same_case(phrase: str, stream: _Stream, start: int, end: int) -> bool:
@@ -866,12 +1128,12 @@ class _Flat:
     origin: list[tuple[int, int] | None]
 
 
-def _flat(stream: _Stream, close_lines: bool = False) -> _Flat:
+def _flat(stream: _Stream, close_lines: bool = False, compact: bool = False) -> _Flat:
     chars: list[str] = []
     origin: list[tuple[int, int] | None] = []
     for number, line in enumerate(stream.lines):
         text = line.text
-        spaced = _spaced_positions(text)
+        spaced = _spaced_positions(text) if not compact else _beside_singles(text)
         tail = text.rstrip()
         hyphenated = len(tail) > 1 and tail[-1] in _DASHES and tail[-2].isalpha()
         for i, ch in enumerate(tail[:-1] if hyphenated else text):
@@ -887,9 +1149,20 @@ def _flat(stream: _Stream, close_lines: bool = False) -> _Flat:
     return _Flat("".join(chars), origin)
 
 
+def _beside_singles(text: str) -> set[int]:
+    """Offsets just after every space that touches a one-character token, so
+    that `_flat` drops those spaces: "KD- 5 6 6 0 8 9" reads "KD-566089"."""
+    tokens = [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
+    after: set[int] = set()
+    for (s1, e1), (s2, e2) in zip(tokens, tokens[1:]):
+        if e1 - s1 == 1 or e2 - s2 == 1:
+            after.update(range(e1 + 1, s2 + 1))
+    return after
+
+
 def _regex_hits(
     term: Term, pattern: str, page: Page, stream: _Stream, flat: _Flat
-) -> Iterator[tuple[Hit, int, int]]:
+) -> Iterator[_Found]:
     flags = re.UNICODE | (0 if term.case else re.IGNORECASE)
     for m in re.finditer(pattern, flat.text, flags):
         spots = [o for o in flat.origin[m.start() : m.end()] if o is not None]
@@ -919,19 +1192,7 @@ def _regex_hits(
             score=1.0,
             zone=stream.zones[spots[0][0]],
         )
-        yield hit, span[0], span[1]
-
-
-def _unique(found: list[tuple[Hit, int, int]]) -> list[tuple[Hit, int, int]]:
-    """One hit per place: two phrases of a term, or a phrase and a regex, that
-    found the same words are one occurrence."""
-    kept: list[tuple[Hit, int, int]] = []
-    for item in sorted(found, key=lambda f: -f[0].score):
-        _, start, end = item
-        if any(start < e and s < end for _, s, e in kept):
-            continue
-        kept.append(item)
-    return kept
+        yield _Found(hit, stream, span[0], span[1], _places(stream, spots))
 
 
 def _context_ok(term: Term, stream: _Stream, start: int, end: int) -> bool:

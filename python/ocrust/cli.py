@@ -477,6 +477,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "machine: run 1/N … N/N side by side to split a large share",
         )
         searcher.add_argument(
+            "--threads",
+            type=int,
+            help="threads per inference; set cores/processes when several runs share a machine",
+        )
+        searcher.add_argument(
             "--resume",
             action="store_true",
             help="with -f jsonl -o FILE: skip the files FILE already has and append the rest",

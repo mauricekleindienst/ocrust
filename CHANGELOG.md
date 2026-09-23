@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.2.6 — 2026-09-23
+
+Search profiles: `ocrust find` looks for whatever a profile names — code names,
+people, companies, compound words, part and customer numbers — and finds it
+however the scan broke it up. Large jobs use every core, split between
+machines and survive an interruption.
+
+235 Rust unit tests, 10 Rust end-to-end tests, 297 Python tests.
+
+### Added
+
+- **`ocrust find FILES --terms profil.toml`**, `Document.find(profile)` and
+  `ocrust.terms`. A profile is TOML, JSON or one phrase per line; each term has
+  phrases or a regular expression, a category, a severity (info … critical),
+  its own fuzziness, case and word-boundary rule, the page zones it counts in
+  (header, body, footer) and words it must or must not stand near. A mistake in
+  a profile stops the run with the file, the term and what is wrong.
+- **Found however broken.** A page is matched as one stream of letters and
+  digits with every space, dash and line break taken out, so a word
+  letter-spaced on a stamp, hyphenated at a line end, over two lines, two table
+  cells or two columns, glued to the next or split by a stray space reads as the
+  word; what was taken out is kept to hold hits to word boundaries (`Adler` is
+  not in `Radler`) and to say per hit how it was broken. OCR look-alikes (`0`
+  for `O`, `rn` for `m`) and `ae` for `ä` cost almost nothing, real edits count
+  against the term's budget, and one- and two-letter words (an initial, a house
+  number) must be read as written. A regex also sees a number broken over two
+  lines or printed in a form's comb fields (`K D - 4 3 8 3 0 0`).
+- **Columns.** Each page is also read column by column — cut where it is
+  emptiest, between columns and between sections, again and again — so a phrase
+  from the foot of one newsletter column to the head of the next, or wrapped
+  inside a table cell, is found although the layout read the page a row at a
+  time.
+- **Reports and gates**: text, JSON, JSON Lines or CSV, every hit with page,
+  boxes, zone, severity, how it was broken and a score. Exit status 3 when a
+  file has a hit at or above `--fail-on` (a severity, `any`, `none`, or with
+  `--markings` a grade; repeatable). `ocrust vs --terms` adds a profile to the
+  classification scan.
+- **`--shard K/N`** gives each of N runs a fixed part of the files, by a hash of
+  the path below the walked folder, so N machines with a share mounted anywhere
+  cover every file once; **`--resume`** continues an interrupted JSON Lines
+  report, which is written as the run goes; **`--threads`** sets the threads a
+  page worker uses.
+- **`Ocr.scan_each(sources)`**: a parallel scan a chunk at a time, each input
+  with its document or its exception, in input order — results arrive while the
+  batch runs, memory is bounded, and an unreadable file no longer ends it.
+- `scripts/make_terms_holdout.py` and `scripts/evaluate_terms.py`: a test set
+  written independently of the matcher, and the measurement below.
+
+### Improved
+
+- **Every page worker has a model session of its own.** Sessions stopped at four
+  whatever the number of workers, so on a sixteen-core machine sixteen workers
+  queued for four sessions of one thread each. Now each worker has one and the
+  cores are divided between them. Batches default to one worker per core, at
+  most 16 (was 4). Measured on four cores only, where one process with four
+  workers takes 45.3 s for 36 pages against 56.7 s with one.
+
+### Fixed
+
+- **One page could end a whole batch.** A table's header row could be adopted by
+  the table below it while still belonging to the one above, and the two
+  overlapping tables made the layout panic (`split index (is 5) should be <= len
+  (is 4)`); in `scan_many` and every batch command that ended the run. A header
+  row now goes to one table only, the layout skips any table run that overlaps
+  another, and a panic anywhere in reading a document becomes that document's
+  error, so the batch goes on.
+
+### Measured
+
+`scripts/evaluate_terms.py` on 84 files, 96 pages — letters, faxes, invoices,
+minutes, e-mails, contracts, forms, slides, data sheets and two-column
+newsletters, some blurred, faint, skewed, JPEG-compressed or stamped — with 411
+expected hits of 34 terms and 62 decoys (`Hafenstraße 120` for `Hafenstraße
+12`, `Kranichsteiner Straße` for `Kranich`):
+
+| | precision | recall | files entirely right |
+|---|---:|---:|---:|
+| first run, blind | 98.7 % | 95.4 % | 64 |
+| after the fixes it prompted | 99.8 % | 99.8 % | 82 |
+
+The set was written by someone who had not seen the matcher; its first run is
+the honest figure, the second is no longer blind. Still counted wrong: `über
+orka` read as `überorka`, and a `NOX` 65 letters from its `not_near` word where
+the profile's window is 50. Matching takes about 11 ms a page.
+
 ## 0.2.5 — 2026-09-23
 
 Finding classified documents: `ocrust vs` and `Document.markings()` say which

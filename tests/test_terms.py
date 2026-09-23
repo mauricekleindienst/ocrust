@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from ocrust import Block, Box, Document, Line, Page, terms
+from ocrust import Block, Box, Document, Line, Page, Segment, terms
 from ocrust.cli import main
 
 PROFILE = terms.parse(
@@ -141,6 +141,119 @@ def test_case_sensitive_terms():
     assert [h.text for h in _doc(["BAföG und Bafög"]).find(profile)] == ["BAföG"]
 
 
+def test_an_initial_or_a_house_number_is_not_spent_on_fuzziness():
+    profile = terms.parse({"term": [{"match": "M. Schöllhorn"}, {"match": "Hafenstraße 12"}]})
+
+    def texts(line: str) -> list[str]:
+        return [h.text for h in _doc([line]).find(profile)]
+
+    assert texts("Gez. M. Schöllhorn") == ["M. Schöllhorn"]
+    assert texts("Gez. MSchöllhorn") == ["MSchöllhorn"]
+    assert texts("Gez. M. Schöllhom") == ["M. Schöllhom"]  # the long word forgives
+    assert texts("Frau Schöllhorn schreibt") == []
+    assert texts("Ms Schöllhorn wrote") == []
+    assert texts("Hafenstraße 12 und Hafenstraße12") == ["Hafenstraße 12", "Hafenstraße12"]
+    assert texts("Hafenstraße 1, Hafenstraße 120") == []
+
+
+def test_comb_fields_read_as_one_number():
+    # A form prints one character a box; the regex sees "KD-438300".
+    hits = _found(["Kundennummer: K D - 4 3 8 3 0 0 bitte angeben", "Teil F S - 2 2 0"])
+    assert [(h[0], h[1]) for h in hits] == [
+        ("Kunde", "K D - 4 3 8 3 0 0"),
+        ("Teil", "F S - 2 2 0"),
+    ]
+
+
+def test_a_lost_space_still_shows_as_a_capital():
+    profile = terms.parse({"term": [{"match": "Weißmüller", "fuzzy": 0}]})
+    assert [h.text for h in _doc(["Sehr geehrter HerrWeißmüller,"]).find(profile)] == ["Weißmüller"]
+    # Without the capital nothing marks the boundary: a limit, not a guess.
+    assert not _doc(["Sehr geehrter Herrweißmüller,"]).find(profile).hits
+
+
+def test_a_misspelling_is_read_from_the_start_of_the_word():
+    # "Opperation" is "Operation" with a P too many, or, one letter in,
+    # "pperation" with a P for the O: the same cost, but inside the word.
+    profile = terms.parse({"term": [{"match": "Operation Silberfuchs", "fuzzy": 1}]})
+    hits = _doc(["Die Opperation Silberfuchs läuft"]).find(profile)
+    assert [(h.text, h.how) for h in hits] == [("Opperation Silberfuchs", ("fuzzy",))]
+
+
+def test_a_short_code_after_a_word_ending_in_r():
+    # The prefilter reads "rn" as "m"; "Server NOX" must not become "ServeMOX".
+    profile = terms.parse({"term": [{"match": "NOX", "fuzzy": "off"}]})
+    for line in ("Server NOX neu gestartet", "SERVER NOX"):
+        assert [h.text for h in _doc([line]).find(profile)] == ["NOX"]
+
+
+def test_a_stamp_read_twice_is_one_hit():
+    main = Line(text="Projekt Adler", box=Box(100, 300, 400, 330), confidence=0.9, angle=0.0)
+    stamp = Line(text="PROJEKT ADLER", box=Box(104, 297, 396, 333), confidence=0.9, angle=0.0)
+    page = Page(
+        index=0,
+        width=1654,
+        height=2338,
+        rotation=0.0,
+        origin="image",
+        blocks=(
+            Block(kind="paragraph", box=main.box, lines=(main,)),
+            Block(kind="stamp", box=stamp.box, lines=(stamp,)),
+        ),
+        elapsed_ms=0.0,
+    )
+    hits = Document(source="t", pages=(page,), elapsed_ms=0.0).find(PROFILE)
+    assert [h.term for h in hits] == ["Projekt Adler", "Adler"]
+
+
+def _two_columns(rows: list[tuple[str, str]], y0: int = 300) -> Page:
+    """A page whose layout took two columns' lines for one, as a scan of a
+    newsletter often does: each line is a left and a right piece."""
+    lines = []
+    for n, (left, right) in enumerate(rows):
+        y = y0 + 40 * n
+        pieces = []
+        if left:
+            pieces.append(Segment(left, Box(100, y, 100 + 12 * len(left), y + 30), 0.98))
+        if right:
+            pieces.append(Segment(right, Box(850, y, 850 + 12 * len(right), y + 30), 0.98))
+        text = " ".join(p.text for p in pieces)
+        box = Box(pieces[0].box.x0, y, pieces[-1].box.x1, y + 30)
+        segments = tuple(pieces) if len(pieces) > 1 else ()
+        lines.append(Line(text=text, box=box, confidence=0.98, angle=0.0, segments=segments))
+    block = Block(kind="paragraph", box=lines[0].box, lines=tuple(lines))
+    return Page(
+        index=0,
+        width=1654,
+        height=2338,
+        rotation=0.0,
+        origin="image",
+        blocks=(block,),
+        elapsed_ms=0.0,
+    )
+
+
+def test_a_phrase_broken_over_two_columns_is_found():
+    page = _two_columns(
+        [
+            ("Die Kollegen beginnen", "Adler wird bis zum Sommer"),
+            ("im Mai mit dem Projekt", "alle Tore erneuern."),
+        ]
+    )
+    # Read a row at a time, "Projekt" ends the left column and "Adler" heads
+    # the right one; read column by column, they meet.
+    hits = Document(source="t", pages=(page,), elapsed_ms=0.0).find(PROFILE)
+    assert [(h.term, h.text, h.how) for h in hits if h.term == "Projekt Adler"] == [
+        ("Projekt Adler", "Projekt\nAdler", ("split",))
+    ]
+
+
+def test_a_cell_that_wraps_is_read_down_the_column():
+    page = _two_columns([("Geheimhaltungs", "offen"), ("vereinbarung", "")])
+    hits = Document(source="t", pages=(page,), elapsed_ms=0.0).find(PROFILE)
+    assert [h.text for h in hits if h.term == "Vereinbarung"] == ["Geheimhaltungs\nvereinbarung"]
+
+
 def test_every_hit_has_a_box_per_line():
     found = _doc(["Unterlagen zum Projekt", "Adler anbei."]).find(PROFILE)
     (hit,) = [h for h in found if h.term == "Projekt Adler"]
@@ -150,6 +263,10 @@ def test_every_hit_has_a_box_per_line():
 
 
 # ------------------------------------------------------------------ profiles
+
+
+def test_a_term_with_only_a_name_is_looked_for_by_its_name():
+    assert terms.parse({"term": [{"name": "ORKA"}]}).terms[0].match == ("ORKA",)
 
 
 def test_profiles_load_from_toml_json_text_and_lists(tmp_path):
@@ -175,7 +292,7 @@ def test_profiles_load_from_toml_json_text_and_lists(tmp_path):
         ({"term": [{"match": "x", "sevrity": "high"}]}, "unknown .*sevrity"),
         ({"term": [{"match": "x", "severity": "urgent"}]}, "severity 'urgent'"),
         ({"term": [{"regex": "KD-(\\d"}]}, "regex"),
-        ({"term": [{"name": "x"}]}, "needs `match`"),
+        ({"term": [{"category": "x"}]}, "needs `match`"),
         ({"term": [{"match": "x", "fuzzy": 7}]}, "fuzzy 7"),
         ({"term": [{"match": "x", "zones": ["margin"]}]}, "zone 'margin'"),
         ({"term": [{"match": "a"}, {"match": "a"}]}, "two terms are named"),

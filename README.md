@@ -175,6 +175,38 @@ Need a searchable PDF from images instead? That builds a new document:
 ocrust pdf photo.jpg -o photo.pdf
 ```
 
+## Finding anything, however the scan broke it
+
+`ocrust find` looks for whatever a search profile names — code names, people,
+compound words, part and customer numbers — and finds it the way scans really
+read: letter-spaced, hyphenated at a line end, over two lines, two table cells
+or two columns, glued, split by a stray space, misread (`0` for `O`, `rn` for
+`m`), with `ae` for `ä`.
+
+```toml
+[[term]]
+name = "Projekt Adler"
+match = ["Projekt Adler", "Operation Adler"]
+severity = "high"
+
+[[term]]
+name = "Kundennummer"
+regex = 'KD-\d{6}'
+```
+
+```text
+$ ocrust find akten/ --terms profil.toml
+6 hits           akten/brief.pdf  Jürgen Weißmüller (p. 1, spelling) · Geheimhaltungsvereinbarung (p. 1) · Projekt Adler ×3 (p. 1, glued, spaced, split) · Kundennummer (p. 1, regex)
+-                akten/rechnung.png
+```
+
+`Adler` is not found in `Radler`; every hit says how it was broken and how sure
+it is. On 84 files written independently of the matcher — 411 hits to find, 62
+decoys not to — the first, blind run had 98.7 % precision and 95.4 % recall;
+after the fixes it prompted, 99.8 % and 99.8 %. Large jobs run in parallel on every core, split between machines with
+`--shard K/N`, and continue after an interruption with `--resume`. See
+[Search profiles](wiki/Search-profiles.md).
+
 ## Finding classified documents
 
 `ocrust vs` says which files are marked VS-NUR FÜR DEN DIENSTGEBRAUCH,
@@ -216,11 +248,12 @@ ones; the cases it got wrong are listed, and fixed, on the page about it. See
 
 ## Documentation
 
-The full documentation is 17 pages under [`wiki/`](wiki/Home.md) — installation,
-quickstart, Python API, CLI, PDF workflows, classification markings, network
-shares, languages, models, performance, accuracy, architecture, evaluation,
-troubleshooting, contributing and the roadmap. It reads as a wiki in the
-repository and can be pushed into the GitHub wiki verbatim (`wiki/_publish.md`).
+The full documentation is 18 pages under [`wiki/`](wiki/Home.md) — installation,
+quickstart, Python API, CLI, PDF workflows, search profiles, classification
+markings, network shares, languages, models, performance, accuracy,
+architecture, evaluation, troubleshooting, contributing and the roadmap. It
+reads as a wiki in the repository and can be pushed into the GitHub wiki
+verbatim (`wiki/_publish.md`).
 
 ## Try it in a browser
 
@@ -358,6 +391,7 @@ ocrust pdf photo.jpg -o photo.pdf            # searchable PDF from an image
 ocrust pdf archive/ -o archive.pdf           # a folder of mixed formats, one PDF
 ocrust tiff scan.pdf --gray --sidecar text   # archive TIFF plus text
 ocrust vs archive/ --fail-on vs-nfd          # which files are classified
+ocrust find archive/ --terms profil.toml     # every term of a search profile
 ocrust languages                             # model coverage
 ocrust models                                # which files are in use
 ocrust install-models                        # fetch them from GitHub

@@ -132,6 +132,9 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32) -> Vec<Found> 
 
     let mut found = Vec::new();
     let mut at = 0usize;
+    // One past the last row a table already took: a header row above a run
+    // may be adopted only if no table owns it yet.
+    let mut taken = 0usize;
     while at < rows.len() {
         if rows[at].len() < MIN_COLUMNS {
             at += 1;
@@ -154,7 +157,7 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32) -> Vec<Found> 
                 // not begin on it. The columns, now known, say where its titles
                 // are. One row only: a table has one header, and everything
                 // above it is the page.
-                let adopted = at > 0 && adopts(&rows[at - 1], &columns, gutter);
+                let adopted = at > taken && adopts(&rows[at - 1], &columns, gutter);
                 let start = if adopted { at - 1 } else { at };
                 found.push(Found {
                     start,
@@ -162,6 +165,7 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32) -> Vec<Found> 
                     table: grid(&rows[start..end], &columns, gutter, adopted),
                 });
                 at = end;
+                taken = end;
                 continue;
             }
         }
@@ -691,6 +695,74 @@ mod tests {
     /// Every table in `lines`, with the gutter measured from them.
     fn find_here(lines: &[Line]) -> Vec<Found> {
         find(lines, TEXT_HEIGHT, gutter_width(lines, TEXT_HEIGHT))
+    }
+
+    #[test]
+    fn a_header_row_is_never_taken_from_the_table_above() {
+        // Rows of a two-column newsletter as the recognizer read them: the
+        // first run of rows has two columns, the next one six, and the last
+        // row of the first run fits the second's columns well enough to pass
+        // for its header. Taking it made the runs overlap, and splitting the
+        // lines by index panicked ("split index (is 5) should be <= len (is 4)").
+        let cells: [&[(&str, f32, f32)]; 8] = [
+            &[
+                ("Messe", 156.0, 259.0),
+                ("Logistik aus Bremen.", 860.0, 1134.0),
+            ],
+            &[
+                ("Auf der Hannover Messe", 149.0, 791.0),
+                ("Kantine", 870.0, 1006.0),
+            ],
+            &[
+                ("erstmals die Funktion", 149.0, 792.0),
+                ("Anmeldungen nimmt", 860.0, 1503.0),
+            ],
+            &[
+                ("Messdatenplattform;", 154.0, 415.0),
+                ("im", 472.0, 490.0),
+                ("Tarnkappenmodus", 560.0, 797.0),
+                ("Monatsende entgegen.", 865.0, 1503.0),
+            ],
+            &[
+                ("bleiben die Namen", 149.0, 791.0),
+                ("Ausstellung", 860.0, 1004.0),
+                ("Fotos", 1063.0, 1123.0),
+                ("aus", 1182.0, 1217.0),
+                ("hundert", 1279.0, 1373.0),
+                ("Jahren", 1428.0, 1503.0),
+            ],
+            &[
+                ("Sommerfest findet", 149.0, 792.0),
+                ("Werksgeschichte.", 867.0, 1084.0),
+                ("Neue", 1152.0, 1209.0),
+                ("Ladesäulen", 1276.0, 1411.0),
+                ("für", 1477.0, 1512.0),
+            ],
+            &[
+                ("Samstag im Juli", 149.0, 797.0),
+                ("Elektroautos stehen", 860.0, 1509.0),
+            ],
+            &[
+                ("gratulieren allen", 149.0, 791.0),
+                ("bereit.", 858.0, 939.0),
+            ],
+        ];
+        let lines: Vec<Line> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, row_cells)| row(100.0 + i as f32 * TEXT_HEIGHT * 1.3, row_cells))
+            .collect();
+        let found = find_here(&lines);
+        let mut reach = 0;
+        for table in &found {
+            assert!(
+                table.start >= reach,
+                "overlap at {}..{}",
+                table.start,
+                table.end
+            );
+            reach = table.end;
+        }
     }
 
     /// The one table in `lines`, when there is exactly one.

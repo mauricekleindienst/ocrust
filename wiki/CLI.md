@@ -316,6 +316,21 @@ Exit status 3 means a file is marked at or above `--fail-on` (default
 what counts as a marking, the grade scale, the report formats — is on
 [Classification markings](Classification-markings.md).
 
+## `ocrust find`
+
+Finds the terms of a search profile — names, code words, numbers, anything —
+however broken up the scan reads them.
+
+```bash
+ocrust find akten/ --terms profil.toml                 # one line per file, hits and how
+ocrust find akten/ --term "Projekt Adler" --fail-on any
+ocrust find /mnt/share --terms profil.toml --shard 1/4 -f jsonl -o hits-1.jsonl
+```
+
+Exit status 3 means a file has a hit at or above `--fail-on` (default: any hit).
+The profile format, how broken a word may be, and splitting large jobs between
+machines are on [Search profiles](Search-profiles.md).
+
 ## Exit codes
 
 | Code | Meaning |
@@ -323,7 +338,7 @@ what counts as a marking, the grade scale, the report formats — is on
 | 0 | everything worked |
 | 1 | a file failed to scan, or the engine could not be built |
 | 2 | bad arguments: an input that does not exist, or `-o file.json` with several inputs |
-| 3 | `ocrust vs` only: a file is marked at or above `--fail-on` |
+| 3 | `ocrust vs` and `ocrust find`: a file is marked, or has a hit, at or above `--fail-on` |
 
 A batch keeps going after a failure and reports it on stderr, so one corrupt
 scan in a thousand does not abort the run — the exit code still says 1.

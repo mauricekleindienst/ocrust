@@ -636,6 +636,19 @@ pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
 
     let mut blocks: Vec<Block> = Vec::new();
     let mut lines = lines;
+    // The detector promises runs in order that never overlap; a run that
+    // breaks the promise is left as text rather than trusted with indices.
+    let mut reach = 0usize;
+    let tables: Vec<_> = tables
+        .into_iter()
+        .filter(|t| {
+            let sound = t.start >= reach && t.start < t.end && t.end <= lines.len();
+            if sound {
+                reach = t.end;
+            }
+            sound
+        })
+        .collect();
     // From the back, so the indices the detector reported still hold.
     let mut tail = lines.len();
     for found in tables.into_iter().rev() {
