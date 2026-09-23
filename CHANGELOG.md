@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.2.4 — 2026-09-23
+
+Six bugs, two of which lost data without saying so. All six were reproduced
+before they were fixed, and each has a test that fails against 0.2.3.
+Recognition is untouched: accuracy over the corpus is identical to the digit.
+
+222 Rust unit tests, 10 Rust end-to-end tests, 129 Python tests.
+
+### Fixed
+
+- **A folder scan overwrote its own output.** Output files were named after the
+  input's file name alone, and a folder is walked recursively, so
+  `archive/2024/rechnung.pdf` and `archive/2025/rechnung.pdf` both became
+  `out/rechnung.txt`. The second replaced the first while the summary reported
+  "done: 2 files". A walked folder is now mirrored — `out/2024/rechnung.txt`,
+  `out/2025/rechnung.txt` — and files at the top of the folder or named on the
+  command line stay flat as before. What mirroring cannot separate,
+  `rechnung.pdf` beside `rechnung.png`, is refused by name before anything is
+  read; the rest of the batch still runs, and the exit status is 1. `--watch`
+  applies the same rule to everything in the watched folders, not only to what
+  is new.
+
+- **`--skip-existing` skipped documents that were never read.** With the
+  collision above, the 2025 invoice was reported as "already written" and never
+  scanned. And because outputs were written straight onto the target, an
+  interrupted run left a truncated file that `--skip-existing` then treated as
+  finished on every run after. Outputs are now written to a hidden temporary
+  file and moved into place in one step: a file that exists is complete.
+
+- **`ocrust ocr` on a password-protected PDF reported success.** It exited 0,
+  printed "0 of 0 pages layered", and wrote a byte-for-byte copy of the input.
+  lopdf does not refuse a document it cannot decrypt — it returns it still
+  encrypted, every page unreadable — and zero pages took the path meant for a
+  document whose pages all have text already. A locked PDF is now an error that
+  says what to do, on every command, and a PDF with no readable page is never a
+  pass-through.
+
+- **A 9 KB file could take 1.8 GB of memory.** A mostly blank 12000 × 12000 CCITT
+  TIFF did exactly that in 40 seconds, and the TIFF decoder's own limit let one
+  fourteen times larger through. PDF pages were capped at 4000 pixels a side;
+  image files had no cap at all. Images are now refused on the size they
+  declare, before any of it is decoded — in 0.4 seconds rather than 40 — above a
+  `max_pixels` limit that defaults to Pillow's decompression-bomb threshold
+  (178 956 970) and so still admits an A0 sheet at 300 dpi.
+
+- **A damaged PDF crashed the documented batch loop.** The error contract says
+  an unreadable file raises `IOError` or `ValueError`, so
+  `except (IOError, ValueError)` skips it; a PDF with a valid header and nothing
+  after it raised a bare `RuntimeError` instead. Damaged, empty and locked PDFs
+  are now `ValueError` from `scan` and `read`, like every other unreadable file.
+  `ocr_pdf` still reports every failure as `OcrustError`, as it always has.
+
+- **Search missed a decomposed query.** `search("Grüße")` found nothing when the
+  query arrived with `ü` as `u` plus a combining diaeresis, as it does from
+  macOS input and some PDF copy-paste. The query is normalized to composed
+  Unicode first; recognized text already is.
+
+### Added
+
+- **`--password` and `password=`** for PDFs that need one to open, on `scan`,
+  `pdf`, `ocr` and `tiff`. The `OCRUST_PASSWORD` environment variable does the
+  same without leaving the password in shell history or the process list. A PDF
+  protected by an owner password alone — the usual bank statement — opens
+  without one, as it did. A text layer added to a locked PDF is written without
+  the password, and `ocrust ocr` says so. The password never appears in a
+  configuration's debug output.
+
+- **`--max-pixels` and `max_pixels=`**, the limit above; `0` removes it.
+
 ## 0.2.3 — 2026-09-20
 
 A converter, and the format work that made it worth having: a bilevel TIFF — the
