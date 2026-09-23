@@ -214,6 +214,62 @@ def test_ordinary_words_are_not_grades_at_all(sentence):
     assert _report([*BODY, (sentence, 900)]).findings == ()
 
 
+def test_a_wrapped_sentence_does_not_leave_a_grade_standing_alone():
+    # A brochure bullet wrapped after "und": the second line is short and
+    # all grade, and still part of the sentence.
+    doc = Document(
+        source="t",
+        pages=(
+            Page(
+                index=0,
+                width=1654,
+                height=HEIGHT,
+                rotation=0.0,
+                origin="image",
+                blocks=(
+                    Block(
+                        kind="paragraph",
+                        box=Box(100, 900, 1500, 1000),
+                        lines=(
+                            _line("– BSI-Zulassung für VS-NfD, NATO RESTRICTED und", 900),
+                            _line("RESTREINT UE/EU RESTRICTED", 950),
+                        ),
+                    ),
+                    Block(
+                        kind="paragraph",
+                        box=Box(100, 1100, 1500, 1200),
+                        lines=(
+                            _line("Informationen der Stufen SECRET UE und RESTREINT", 1100),
+                            _line("UE/EU RESTRICTED.", 1150),
+                        ),
+                    ),
+                ),
+                elapsed_ms=0.0,
+            ),
+        ),
+        elapsed_ms=0.0,
+    )
+    report = doc.markings()
+    assert report.level == 0, report.markings
+
+
+def test_a_heading_about_the_grade_is_not_marked_with_it():
+    report = _report([("VS-NUR FÜR DEN DIENSTGEBRAUCH (VS-NfD-Merkblatt)", 300), *BODY])
+    assert report.level == 0
+
+
+def test_a_company_stamp_counts_in_ordinary_case_when_it_stands_alone():
+    assert _marked("Geschäftsgeheimnis").company == "GESCHÄFTSGEHEIMNIS"
+    assert _marked("Vertraulich").company == "VERTRAULICH"
+    # A state grade is printed in capitals; "Geheim" alone is a heading.
+    assert _marked("Geheim").findings == ()
+
+
+def test_a_misread_eu_marking_is_not_also_a_company_one():
+    report = _marked("CONFIDENTIEI. UE/EU CONFIDENTIAL")
+    assert (report.level, report.company) == (2, None)
+
+
 def test_a_word_built_on_a_grade_is_a_mention():
     report = _marked("Leitfaden zur VS-NfD-Zulassung")
     assert report.level == 0
@@ -331,10 +387,19 @@ def test_the_classification_term_line_marks_a_document():
 
 @pytest.mark.parametrize(
     "line",
-    ["Betreff: VS-NfD – Beschaffung von Führungsschienen", "VS-NfD: Beschaffung der Liegenschaft"],
+    [
+        "Betreff: VS-NfD – Beschaffung von Führungsschienen",
+        "AW: WG: VS-NfD Beschaffung der Liegenschaft",
+        "Subject: NATO RESTRICTED - exercise planning timeline for the partners",
+    ],
 )
 def test_a_grade_before_the_subject_is_a_marking(line):
-    assert _report([*BODY, (line, 900)]).level == 1
+    assert _report([*BODY, (line, 900)]).level >= 1
+
+
+def test_a_sentence_opening_with_a_grade_is_not_a_subject_line():
+    line = "CONFIDENTIEL UE/EU CONFIDENTIAL and above are registered."
+    assert _report([*BODY, (line, 900)]).level == 0
 
 
 def test_offen_and_unclassified_are_markings_that_classify_nothing():
@@ -585,6 +650,41 @@ def test_vs_an_unreadable_file_is_not_a_clean_one(engine, vs_files, tmp_path, ca
     assert "unreadable" in capsys.readouterr().out
     # A marked file still decides the verdict: that is the finding that matters.
     assert main(["vs", str(broken), str(vs_files / "a_marked.pdf"), "-q"]) == 3
+
+
+def test_a_red_stamp_across_the_text_is_read_from_its_colour(tmp_path):
+    import math
+
+    import ocrust
+    from conftest import _pdf_from_stream, _winansi_literal
+
+    body = ["BT", "0 g"]
+    for i, line in enumerate(
+        [
+            "Die Zutrittskontrollanlage am Tor 2 entspricht nicht mehr dem Stand",
+            "der Technik. Ausweise aelterer Bauart lassen sich ohne Aufwand kopieren.",
+            "Die Wachanweisung ist entsprechend zu aendern und neu zu verteilen.",
+            "Es wird vorgeschlagen, die Leseeinheiten gegen neue Geraete zu tauschen.",
+        ]
+    ):
+        body.append(f"/F1 12 Tf 1 0 0 1 60 {520 - 18 * i} Tm ({_winansi_literal(line)}) Tj")
+    # The stamp: red, 40 pt, turned 20 degrees, printed over the paragraph.
+    # Read as one page, it is lost among the lines it crosses — and garbles
+    # them; read from its colour, it is a clean "VS-NfD".
+    c, s_ = math.cos(math.radians(20)), math.sin(math.radians(20))
+    body.append(
+        f"0.8 0.08 0.08 rg /F1 40 Tf {c:.4f} {s_:.4f} {-s_:.4f} {c:.4f} 200 440 Tm (VS-NfD) Tj"
+    )
+    body.append("ET")
+    pdf = tmp_path / "stamped.pdf"
+    pdf.write_bytes(_pdf_from_stream("\n".join(body)))
+
+    try:
+        engine = ocrust.Ocr(read_stamps=True)
+    except ocrust.OcrustError as exc:
+        pytest.skip(f"no OCR models available: {exc}")
+    report = engine.scan(pdf).markings()
+    assert report.level == 1, report.findings
 
 
 def test_vs_rejects_an_unknown_grade(capsys):

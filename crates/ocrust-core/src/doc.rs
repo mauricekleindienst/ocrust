@@ -19,6 +19,10 @@ pub enum BlockKind {
     ListItem,
     /// Rows of cells that line up into columns. See [`Block::table`].
     Table,
+    /// Coloured ink the page's own reading missed — a stamp across the text —
+    /// read on its own. Only with
+    /// [`EngineConfig::read_stamps`](crate::EngineConfig::read_stamps).
+    Stamp,
 }
 
 /// Where a page's pixels came from.

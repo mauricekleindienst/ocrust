@@ -266,6 +266,12 @@ class Ocr:
             ``render("markdown")``). Set it to False to keep every block as
             running text.
         drop_score: Minimum mean confidence for a line to be kept.
+        read_stamps: Read coloured ink — a red or blue stamp across the text —
+            a second time on its own; lines found only that way arrive as
+            blocks of kind ``"stamp"``. A stamp over black text is otherwise
+            lost among the lines it crosses. Pages without coloured ink cost
+            nothing. ``ocrust vs`` turns it on; it is off by default because
+            it is for finding stamps, not for reading text.
         lang: Languages the documents are in (``"de"``, ``["de", "fr"]``,
             ``"de,fr"``). Building the engine fails when the recognition model
             cannot spell one of them, because a model that silently drops ``ö``
@@ -302,6 +308,7 @@ class Ocr:
         keep_page_images: bool = False,
         tables: bool = True,
         lang: str | Sequence[str] | None = None,
+        read_stamps: bool = False,
     ) -> None:
         if isinstance(lang, str):
             languages = [part.strip() for part in lang.replace(",", " ").split() if part.strip()]
@@ -340,6 +347,7 @@ class Ocr:
             "fix_orientation": fix_orientation,
             "tables": tables,
             "languages": languages,
+            "read_stamps": read_stamps,
         }
         self._keeps_images = keep_page_images
         self._pdf_engine_cache: Any = None

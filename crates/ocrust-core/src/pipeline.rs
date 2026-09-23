@@ -7,9 +7,9 @@ use rayon::prelude::*;
 
 use crate::classify::{OrientationClassifier, OrientationConfig};
 use crate::detect::{DetectorConfig, TextDetector};
-use crate::doc::{Document, Line, Page};
+use crate::doc::{Block, BlockKind, Document, Line, Page};
 use crate::error::{Error, Result};
-use crate::geom::crop_quad;
+use crate::geom::{crop_quad, Rect};
 use crate::ingest::{self, IngestConfig, RawPage, Source};
 use crate::lang::{self, Coverage, Language};
 use crate::layout::{self, LayoutConfig};
@@ -45,6 +45,16 @@ pub struct EngineConfig {
     /// Keep the preprocessed page image on each [`Page`], which
     /// [`crate::export::pdf`] needs to write a searchable PDF.
     pub keep_page_images: bool,
+    /// Read what is printed in coloured ink a second time, on its own.
+    ///
+    /// A red or blue stamp across the body text, or over a bold letterhead, is
+    /// lost among the black lines it crosses: the detector sees one tangle of
+    /// strokes. Separated by colour it reads cleanly — which is how a person
+    /// reads it too. Lines found only this way arrive as blocks of kind
+    /// [`BlockKind::Stamp`](crate::doc::BlockKind::Stamp). Pages without
+    /// coloured ink cost nothing; off by default, because it is for finding
+    /// stamps rather than for reading text.
+    pub read_stamps: bool,
     /// Detect pages that are rotated by a quarter turn and straighten them.
     ///
     /// Sideways scans are common — a viewer applies `/Rotate`, a feeder pulled
@@ -397,6 +407,7 @@ impl Engine {
                 max_pixels: 0,
                 ..self.config.preprocess.clone()
             },
+            read_stamps: self.config.read_stamps,
         };
         crate::export::overlay::add_text_layer(pdf, options, |index, image| {
             let raw = RawPage {
@@ -646,8 +657,16 @@ impl Engine {
                 height_ratio: line.bbox.height() / height.max(1) as f32,
             })
             .collect();
+        let quality = crate::quality::page_quality(&signals);
+        let mut blocks = blocks;
+        if options.read_stamps {
+            // After the quality estimate: it describes the page as read, and
+            // a stamp read twice would count twice.
+            let stamps = self.stamp_blocks(&image, &blocks)?;
+            blocks.extend(stamps);
+        }
         Ok(Page {
-            quality: crate::quality::page_quality(&signals),
+            quality,
             index: raw.index,
             width,
             height,
@@ -658,6 +677,122 @@ impl Engine {
             image: options.keep_image.then(|| std::sync::Arc::new(image)),
         })
     }
+
+    /// Lines in coloured ink that the page's own reading missed.
+    fn stamp_blocks(&self, image: &RgbImage, read: &[Block]) -> Result<Vec<Block>> {
+        let Some(ink) = coloured_ink(image) else {
+            return Ok(Vec::new());
+        };
+        let detections = self.detector.detect(&ink)?;
+        let mut crops: Vec<RgbImage> = Vec::with_capacity(detections.len());
+        let mut kept: Vec<usize> = Vec::with_capacity(detections.len());
+        for (i, det) in detections.iter().enumerate() {
+            if let Some(crop) = crop_quad(&ink, &det.quad) {
+                crops.push(crop);
+                kept.push(i);
+            }
+        }
+        if crops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let angles = match &self.orientation {
+            Some(classifier) => classifier.correct(&mut crops)?,
+            None => vec![0.0; crops.len()],
+        };
+        let recognitions = self.recognizer.recognize(&crops)?;
+        let drop_score = self.config.recognizer.drop_score;
+        let mut stamps = Vec::new();
+        for ((rec, &det_idx), flip) in recognitions.iter().zip(&kept).zip(&angles) {
+            let text = rec.text.trim();
+            if text.is_empty() || rec.confidence < drop_score {
+                continue;
+            }
+            let det = &detections[det_idx];
+            let quad = det.quad.ordered();
+            let bbox = quad.bounds();
+            if already_read(read, text, &bbox) {
+                continue;
+            }
+            let words = if !self.config.word_boxes {
+                Vec::new()
+            } else if flip.abs() >= 90.0 {
+                layout::words_from_chars(&quad, &mirrored_chars(&rec.chars))
+            } else {
+                layout::words_from_chars(&quad, &rec.chars)
+            };
+            let line = Line {
+                text: text.to_string(),
+                confidence: rec.confidence,
+                margin: rec.margin,
+                bbox,
+                angle: quad.angle_deg() + *flip,
+                quad,
+                det_score: det.score,
+                words,
+                segments: Vec::new(),
+            };
+            stamps.push(Block {
+                kind: BlockKind::Stamp,
+                bbox,
+                lines: vec![line],
+                table: None,
+            });
+        }
+        Ok(stamps)
+    }
+}
+
+/// How far a pixel's channels must spread to count as coloured ink: red
+/// stamp ink spreads 150 and more, faded red about 80, grey and black toner
+/// under 20.
+const INK_SPREAD: u8 = 60;
+/// Coloured ink needed before a page is read a second time: a small stamp
+/// covers some 0.2 % of an A4 page, a coloured logo or a highlighted word
+/// less than this.
+const INK_SHARE: f64 = 0.0002;
+
+/// The page's coloured ink alone, dark on white, or `None` when there is too
+/// little of it to hold a line of text.
+///
+/// Black text crossing a stamp drops out, leaving small gaps in the stamp's
+/// strokes, which the recognizer reads through far better than it reads
+/// through the black text itself.
+fn coloured_ink(image: &RgbImage) -> Option<RgbImage> {
+    let spread = |p: &image::Rgb<u8>| {
+        let [r, g, b] = p.0;
+        r.max(g).max(b) - r.min(g).min(b)
+    };
+    let coloured = image.pixels().filter(|p| spread(p) >= INK_SPREAD).count();
+    let total = image.width() as usize * image.height() as usize;
+    if coloured < 400 || (coloured as f64) < total as f64 * INK_SHARE {
+        return None;
+    }
+    let mut ink = RgbImage::from_pixel(image.width(), image.height(), image::Rgb([255; 3]));
+    for (out, p) in ink.pixels_mut().zip(image.pixels()) {
+        let s = spread(p);
+        if s >= INK_SPREAD {
+            let v = 255u8.saturating_sub(s.saturating_mul(2));
+            *out = image::Rgb([v, v, v]);
+        }
+    }
+    Some(ink)
+}
+
+/// Whether the page's own reading already has this line: the same text in
+/// much the same place. A red heading is read by both passes.
+fn already_read(blocks: &[Block], text: &str, bbox: &Rect) -> bool {
+    let key = |t: &str| -> String {
+        t.chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let wanted = key(text);
+    blocks.iter().flat_map(|b| &b.lines).any(|line| {
+        let overlap = bbox.horizontal_overlap(&line.bbox) * bbox.vertical_overlap(&line.bbox);
+        let union = bbox.area() + line.bbox.area() - overlap;
+        union > 0.0 && overlap / union > 0.5 && key(&line.text) == wanted
+    })
 }
 
 /// Per-call overrides for one page.
@@ -670,6 +805,7 @@ struct PageOptions {
     keep_image: bool,
     auto_page_orientation: bool,
     preprocess: PreprocessConfig,
+    read_stamps: bool,
 }
 
 impl PageOptions {
@@ -678,6 +814,7 @@ impl PageOptions {
             keep_image: config.keep_page_images,
             auto_page_orientation: config.auto_page_orientation,
             preprocess: config.preprocess.clone(),
+            read_stamps: config.read_stamps,
         }
     }
 }
@@ -833,6 +970,73 @@ mod tests {
         assert_eq!(
             (back.x0, back.y0, back.x1, back.y1),
             (100.0, 50.0, 400.0, 80.0)
+        );
+    }
+
+    /// A white page with black "text" bars and, optionally, a red block.
+    fn inked_page(red: bool) -> RgbImage {
+        let mut img = RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        for y in (20..280).step_by(20) {
+            for x in 20..380 {
+                for dy in 0..6 {
+                    img.put_pixel(x, y + dy, image::Rgb([15, 15, 15]));
+                }
+            }
+        }
+        if red {
+            for y in 100..160 {
+                for x in 100..300 {
+                    if img.get_pixel(x, y).0 == [255, 255, 255] {
+                        img.put_pixel(x, y, image::Rgb([200, 20, 20]));
+                    }
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn a_black_and_white_page_has_no_coloured_ink() {
+        assert!(coloured_ink(&inked_page(false)).is_none());
+    }
+
+    #[test]
+    fn coloured_ink_is_kept_and_black_text_dropped() {
+        let ink = coloured_ink(&inked_page(true)).expect("a red block is ink");
+        // The red stays, dark; the black bars crossing it and the paper go white.
+        assert!(ink.get_pixel(150, 110).0[0] < 60, "red ink kept dark");
+        assert_eq!(
+            ink.get_pixel(150, 120).0,
+            [255, 255, 255],
+            "black text dropped"
+        );
+        assert_eq!(
+            ink.get_pixel(10, 10).0,
+            [255, 255, 255],
+            "paper stays white"
+        );
+    }
+
+    #[test]
+    fn a_line_both_passes_read_is_kept_once() {
+        let line = Line {
+            text: "VS-NfD".into(),
+            bbox: Rect::new(100.0, 100.0, 200.0, 130.0),
+            ..Default::default()
+        };
+        let blocks = vec![Block {
+            kind: BlockKind::Paragraph,
+            bbox: line.bbox,
+            lines: vec![line],
+            table: None,
+        }];
+        let near = Rect::new(102.0, 101.0, 203.0, 131.0);
+        assert!(already_read(&blocks, "VS - NFD", &near));
+        assert!(!already_read(&blocks, "GEHEIM", &near), "other text is new");
+        let far = Rect::new(500.0, 500.0, 600.0, 530.0);
+        assert!(
+            !already_read(&blocks, "VS-NfD", &far),
+            "same text elsewhere is new"
         );
     }
 }

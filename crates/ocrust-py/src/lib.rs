@@ -76,6 +76,7 @@ impl PyEngine {
         fix_orientation = true,
         tables = true,
         languages = None,
+        read_stamps = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -106,6 +107,7 @@ impl PyEngine {
         fix_orientation: bool,
         tables: bool,
         languages: Option<Vec<String>>,
+        read_stamps: bool,
     ) -> PyResult<Self> {
         let mut config = EngineConfig::new();
         config.models.directory = models_dir;
@@ -117,6 +119,7 @@ impl PyEngine {
         config.keep_page_images = keep_page_images;
         config.fix_orientation = fix_orientation;
         config.layout.detect_tables = tables;
+        config.read_stamps = read_stamps;
 
         if let Some(d) = device {
             config.session.device = Device::parse(d).map_err(to_py_err)?;

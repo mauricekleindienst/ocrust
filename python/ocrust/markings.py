@@ -599,11 +599,17 @@ def _closest(word: str) -> str | None:
     for target in _VOCABULARY:
         if word.startswith(target) and word[len(target) :] in _INFLECTIONS:
             return None
+    best: tuple[int, str] | None = None
     for target in _VOCABULARY:
         budget = 1 if len(target) < 10 else 2
-        if abs(len(target) - len(word)) <= budget and _distance(word, target, budget) <= budget:
-            return target
-    return None
+        if abs(len(target) - len(word)) > budget:
+            continue
+        distance = _distance(word, target, budget)
+        # The nearest word, not the first one in reach: CONFIDENTIEI is one
+        # edit from CONFIDENTIEL and two from CONFIDENTIAL.
+        if distance <= budget and (best is None or distance < best[0]):
+            best = (distance, target)
+    return best[1] if best else None
 
 
 def _distance(a: str, b: str, budget: int) -> int:
@@ -759,7 +765,7 @@ def _verdict(hit: _Hit, ctx: _Context, zone: str, line_text: str) -> str | None:
     # exclamation mark still counts.
     exclaimed = line_text[hit.orig_end :].lstrip().startswith("!") and ctx.words == 0
     if not hit.term.distinctive and not capitals and not exclaimed:
-        return None
+        return "quiet: standalone" if ctx.words == 0 and not hit.view.fuzzy else None
     if _compound(hit.view, hit):
         return "mention: compound word"
     if ctx.negated:
@@ -780,14 +786,46 @@ def _verdict(hit: _Hit, ctx: _Context, zone: str, line_text: str) -> str | None:
     return "mention: running text"
 
 
-_LEADERS = re.compile(r"^\s*(?:(?:BETREFF|SUBJECT|OBJET|OGGETTO|AW|WG|RE|FW|FWD)\s*:\s*)*$")
+#: Words that make a line about grades rather than marked with one.
+_ABOUT = re.compile(
+    r"\b(?:MERKBLATT|RICHTLINIE|ANWEISUNG|HANDBUCH|SCHULUNG|LEITFADEN|HINWEISE?|"
+    r"VERWALTUNGSVORSCHRIFT|ZULASSUNG|ZUGELASSEN|GEEIGNET|HANDHABUNG|UMGANG|"
+    r"GUIDE|GUIDANCE|POLICY|TRAINING|HANDLING|APPROVED|APPROVAL|ACCREDITED|CERTIFIED)\b"
+)
+#: How a line ends when the sentence goes on in the next one.
+_CARRIES_ON = re.compile(
+    r"(?:,|\b(?:und|oder|sowie|bzw|and|or|et|ou|für|for|des|der|den|die|als|zu|mit|bis|"
+    r"von|of|at|the|to|in|im|am|auf|nach|incl|inkl))\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _continues(before: str, text: str) -> bool:
+    """Whether `text` carries on the sentence of the line before it.
+
+    "… NATO RESTRICTED und" / "RESTREINT UE/EU RESTRICTED": the second line
+    stands alone only because the first one wrapped. The same holds when a
+    grade itself is broken over the lines, "… and RESTREINT" / "UE/EU
+    RESTRICTED.", which is found by reading the break as a space.
+    """
+    if _CARRIES_ON.search(before):
+        return True
+    tail = before.split()[-1] if before.split() else ""
+    joined = f"{tail} {text}"
+    return any(h.orig_start < len(tail) < h.orig_end for h in _hits(joined, "body"))
+
+
+_LEADERS = re.compile(r"^\s*(?:(?:BETREFF|SUBJECT|OBJET|OGGETTO|AW|WG|RE|FW|FWD)\s*:\s*)+$")
 
 
 def _leads(line_text: str, hit: _Hit) -> bool:
-    """Whether the grade opens the line and a separator follows it."""
-    before = _folded(line_text[: hit.orig_start]).text
-    after = line_text[hit.orig_end :].lstrip()
-    return bool(_LEADERS.match(before)) and after[:1] in (":", "-", "–", "—", "|", "/")
+    """Whether the grade opens an e-mail's subject: ``Betreff: VS-NfD – …``.
+
+    Only after the subject's own label. A line that merely starts with a
+    grade — "CONFIDENTIEL UE/EU CONFIDENTIAL and above are registered." — is
+    as likely a sentence about it.
+    """
+    return bool(_LEADERS.match(_folded(line_text[: hit.orig_start]).text))
 
 
 def _cues(document: Document) -> set[str]:
@@ -937,7 +975,7 @@ def _grade_lists(findings: list[Finding], specimens: set[int]) -> list[Finding]:
     """
     families: dict[tuple[int, str], list[int]] = {}
     for i, f in enumerate(findings):
-        if f.kind != "marking" or f.reason not in ("standalone", "short line"):
+        if f.kind != "marking" or f.reason not in ("standalone", "short line", "coloured stamp"):
             continue
         if f.scheme == "company":
             continue
@@ -1027,13 +1065,19 @@ def inspect(document: Document, *, file: str | os.PathLike[str] | None = None) -
         number = page.index + 1
         numbers.append(number)
         in_table: list[bool] = []
+        stamped: list[bool] = []
+        continued: list[bool] = []
         pieces: list[Line] = []
         for block in page.blocks:
+            before: str | None = None
             for whole in block.lines:
                 for piece in _pieces(whole):
                     pieces.append(piece)
                     in_table.append(block.table is not None)
-        for line, tabular in zip(pieces, in_table):
+                    stamped.append(block.kind == "stamp")
+                    continued.append(before is not None and _continues(before, piece.text))
+                    before = piece.text
+        for line, tabular, stamp, carried in zip(pieces, in_table, stamped, continued):
             text = line.text
             if not text.strip():
                 continue
@@ -1042,6 +1086,15 @@ def inspect(document: Document, *, file: str | os.PathLike[str] | None = None) -
                 specimens.add(number)
             hits = _hits(text, zone)
             ctx = _context(text, hits)
+            # A line in the body that talks about a grade — a heading "VS-NfD
+            # (Merkblatt)", "zugelassen für VS-NfD" — or that goes on from the
+            # line before it is running text, however short it is.
+            about = zone == "body" and (
+                carried
+                or bool(_ABOUT.search(_folded(text).text))
+                or any(_compound(h.view, h) for h in hits)
+            )
+            first_on_line = len(findings)
             if ctx.cancelled and ctx.lowercase <= 1 and ctx.words <= 6:
                 # A stamp ("Approved For Release 2005/01/12", "VS-NfD
                 # aufgehoben"), not a sentence about lifting grades.
@@ -1051,17 +1104,27 @@ def inspect(document: Document, *, file: str | os.PathLike[str] | None = None) -
                 if verdict is None:
                     continue
                 kind, reason = verdict.split(": ", 1)
+                if kind == "quiet":
+                    kind = "marking"  # decided below, once the scheme is known
+                elif kind == "marking" and about and not hit.term.anchored:
+                    kind, reason = "mention", "running text"
                 if kind != "marking" and (hit.view.fuzzy or hit.term.marking_only):
                     # A repaired word, or an abbreviation in a sentence, is far
                     # likelier to be something else than a grade being discussed.
                     continue
                 if kind == "marking" and tabular and zone == "body":
                     kind, reason = "mention", "table"
+                if kind == "marking" and stamp and reason in ("standalone", "short line"):
+                    reason = "coloured stamp"  # read from its ink alone
                 matched = hit.view.text[hit.start : hit.end]
                 resolved = _resolve(hit.term.key, cues, matched)
                 if resolved is None:
                     continue
                 scheme, level, label = resolved
+                if verdict.startswith("quiet") and (scheme != "company" or about):
+                    # Lowercase, alone on its line: "Vertraulich" stamped by a
+                    # company is its marking; "Geheim" is a heading, not a grade.
+                    continue
                 confidence = float(line.confidence) * (0.85 if hit.view.fuzzy else 1.0)
                 previous = findings[-1] if findings else None
                 if (
@@ -1104,6 +1167,13 @@ def inspect(document: Document, *, file: str | os.PathLike[str] | None = None) -
                 )
                 if ctx.cancelled:
                     cancelled = True
+            graded = any(f.kind == "marking" and f.level >= 1 for f in findings[first_on_line:])
+            if graded:
+                # CONFIDENTIEL UE/EU CONFIDENTIAL is one marking; its words are
+                # not also a company's.
+                findings[first_on_line:] = [
+                    f for f in findings[first_on_line:] if f.scheme != "company"
+                ]
         page_levels.append(0)
 
     findings = _grade_lists(findings, specimens)

@@ -97,7 +97,7 @@ pub fn to_markdown(doc: &Document) -> String {
                         let _ = writeln!(out, "{body}\n");
                     }
                 },
-                BlockKind::Paragraph => {
+                BlockKind::Paragraph | BlockKind::Stamp => {
                     let _ = writeln!(out, "{body}\n");
                 }
             }

@@ -671,6 +671,7 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
         drop_score=getattr(args, "min_confidence", None),
         lang=getattr(args, "lang", None),
         io_retries=getattr(args, "io_retries", None),
+        read_stamps=getattr(args, "_read_stamps", False),
     )
 
 
@@ -1638,6 +1639,9 @@ def _cmd_vs(args: argparse.Namespace) -> int:
         return 2
 
     args._resolved_workers = _workers_for(args, len(inputs))
+    # A stamp over the text is only readable by its colour; this is the
+    # command that looks for stamps.
+    args._read_stamps = True
     engine = _engine_from_args(args)
     chunk = max(8, 4 * (args._resolved_workers or 1))
 
