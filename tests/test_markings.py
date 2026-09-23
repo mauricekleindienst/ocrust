@@ -270,6 +270,116 @@ def test_a_misread_eu_marking_is_not_also_a_company_one():
     assert (report.level, report.company) == (2, None)
 
 
+def _tick(ticked: bool, x: float, y: float) -> Block:
+    box = Box(x, y, x + 28, y + 28)
+    mark = Line(text="☒" if ticked else "☐", box=box, confidence=1.0, angle=0.0)
+    return Block(kind="tick_box", box=box, lines=(mark,))
+
+
+def test_the_ticked_box_on_a_form_decides_the_grade():
+    # "Geheimhaltungsgrad ☐ offen ☒ VS-NfD ☐ VS-VERTRAULICH ☐ GEHEIM": three
+    # grades on one row would be a list; the boxes say which one applies.
+    options = [
+        (False, 100, "offen"),
+        (True, 300, "VS-NfD"),
+        (False, 520, "VS-VERTRAULICH"),
+        (False, 900, "GEHEIM"),
+    ]
+    blocks = [
+        Block(
+            kind="paragraph", box=Box(100, 780, 400, 810), lines=(_line("Geheimhaltungsgrad", 780),)
+        )
+    ]
+    for ticked, x, word in options:
+        blocks.append(_tick(ticked, x, 832))
+        blocks.append(
+            Block(
+                kind="paragraph",
+                box=Box(x + 40, 830, x + 300, 862),
+                lines=(_line(word, 830, x=x + 40),),
+            )
+        )
+    page = Page(
+        index=0,
+        width=1654,
+        height=HEIGHT,
+        rotation=0.0,
+        origin="image",
+        blocks=tuple(blocks),
+        elapsed_ms=0.0,
+    )
+    report = Document(source="t", pages=(page,), elapsed_ms=0.0).markings()
+    assert (report.level, report.label) == (1, "VS-NfD")
+    assert {f.label: f.reason for f in report.findings} == {
+        "VS-NfD": "ticked box",
+        "VS-VERTRAULICH": "unticked box",
+        "GEHEIM": "unticked box",
+    }
+
+
+def test_a_form_with_every_box_empty_is_not_marked():
+    blocks = []
+    for x, word in ((300, "VS-NfD"), (520, "VS-VERTRAULICH"), (900, "GEHEIM")):
+        blocks.append(_tick(False, x, 832))
+        blocks.append(
+            Block(
+                kind="paragraph",
+                box=Box(x + 40, 830, x + 300, 862),
+                lines=(_line(word, 830, x=x + 40),),
+            )
+        )
+    page = Page(
+        index=0,
+        width=1654,
+        height=HEIGHT,
+        rotation=0.0,
+        origin="image",
+        blocks=tuple(blocks),
+        elapsed_ms=0.0,
+    )
+    assert Document(source="t", pages=(page,), elapsed_ms=0.0).markings().level == 0
+
+
+def test_a_film_title_is_not_top_secret():
+    assert _report([*BODY, ("Top Secret!", 900)]).level == 0
+
+
+def test_a_slide_comparing_grades_is_about_them():
+    report = _report([("NATO RESTRICTED entspricht VS-NfD", 150), *BODY])
+    assert report.level == 0
+
+
+def test_a_bilingual_nato_marking_is_one_grade():
+    report = _marked("NATO RESTRICTED / OTAN DIFFUSION RESTREINTE")
+    assert (report.level, report.label) == (1, "NATO RESTRICTED")
+    assert len(report.markings) == 1
+
+
+def test_a_newsletter_called_haus_intern_is_not_an_internal_marking():
+    report = _report([("HAUS INTERN", HEADER), *BODY, ("HAUS INTERN 3/2026 · Seite 1", FOOTER)])
+    assert report.company is None
+
+
+def test_the_subject_label_may_stand_in_its_own_column():
+    # A printed e-mail: "Betreff:" in the label column, the subject beside it.
+    parts = (
+        Segment("Betreff:", Box(100, 350, 190, 380), 0.99),
+        Segment("VS-NfD – Belegungsplanung Liegenschaft Nordheide", Box(260, 350, 1200, 380), 0.98),
+    )
+    line = Line(
+        text=" ".join(p.text for p in parts),
+        box=Box(100, 350, 1200, 380),
+        confidence=0.98,
+        angle=0.0,
+        segments=parts,
+    )
+    assert _report([line, *BODY]).level == 1
+
+
+def test_fuer_read_as_for_is_still_the_grade():
+    assert _marked("VS-NUR FOR DEN DIENSTGEBRAUCK").level == 1
+
+
 def test_a_word_built_on_a_grade_is_a_mention():
     report = _marked("Leitfaden zur VS-NfD-Zulassung")
     assert report.level == 0
@@ -685,6 +795,31 @@ def test_a_red_stamp_across_the_text_is_read_from_its_colour(tmp_path):
         pytest.skip(f"no OCR models available: {exc}")
     report = engine.scan(pdf).markings()
     assert report.level == 1, report.findings
+
+
+def test_a_ticked_box_drawn_in_a_pdf_is_found(tmp_path):
+    import ocrust
+    from conftest import _pdf_from_stream, _winansi_literal
+
+    parts = ["0 G 1.2 w"]
+    text = ["BT", "/F1 12 Tf 1 0 0 1 60 640 Tm (Geheimhaltungsgrad) Tj"]
+    for x, word, ticked in ((60, "offen", False), (160, "VS-NfD", True), (280, "GEHEIM", False)):
+        parts.append(f"{x} 600 12 12 re S")
+        if ticked:
+            parts.append(f"{x + 2} 602 m {x + 10} 610 l S {x + 2} 610 m {x + 10} 602 l S")
+        text.append(f"/F1 12 Tf 1 0 0 1 {x + 18} 601 Tm ({_winansi_literal(word)}) Tj")
+    text.append("ET")
+    pdf = tmp_path / "form.pdf"
+    pdf.write_bytes(_pdf_from_stream("\n".join(parts + text)))
+    try:
+        engine = ocrust.Ocr(tick_boxes=True)
+    except ocrust.OcrustError as exc:
+        pytest.skip(f"no OCR models available: {exc}")
+    doc = engine.scan(pdf)
+    marks = [b.lines[0].text for b in doc.pages[0].blocks if b.kind == "tick_box"]
+    assert sorted(marks) == ["☐", "☐", "☒"], marks
+    report = doc.markings()
+    assert (report.level, report.label) == (1, "VS-NfD"), report.findings
 
 
 def test_vs_rejects_an_unknown_grade(capsys):

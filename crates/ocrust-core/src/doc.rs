@@ -23,6 +23,9 @@ pub enum BlockKind {
     /// read on its own. Only with
     /// [`EngineConfig::read_stamps`](crate::EngineConfig::read_stamps).
     Stamp,
+    /// A tick box on a form, as one line reading `☒` (ticked) or `☐` (empty).
+    /// Only with [`EngineConfig::tick_boxes`](crate::EngineConfig::tick_boxes).
+    TickBox,
 }
 
 /// Where a page's pixels came from.

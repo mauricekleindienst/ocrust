@@ -100,6 +100,9 @@ pub fn to_markdown(doc: &Document) -> String {
                 BlockKind::Paragraph | BlockKind::Stamp => {
                     let _ = writeln!(out, "{body}\n");
                 }
+                // A box on its own says nothing in running text; the words
+                // beside it are already there.
+                BlockKind::TickBox => {}
             }
         }
     }

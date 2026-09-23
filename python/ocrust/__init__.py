@@ -269,9 +269,14 @@ class Ocr:
         read_stamps: Read coloured ink — a red or blue stamp across the text —
             a second time on its own; lines found only that way arrive as
             blocks of kind ``"stamp"``. A stamp over black text is otherwise
-            lost among the lines it crosses. Pages without coloured ink cost
-            nothing. ``ocrust vs`` turns it on; it is off by default because
-            it is for finding stamps, not for reading text.
+            lost among the lines it crosses. A page without coloured ink
+            costs about 1 % more, a page with a stamp about 13 %.
+            ``ocrust vs`` turns it on; it is off by default because it is for
+            finding stamps, not for reading text.
+        tick_boxes: Find the tick boxes on forms and whether each is ticked;
+            each arrives as a block of kind ``"tick_box"`` reading ``☒`` or
+            ``☐``. The recognizer reads the words beside a box but hardly
+            ever the box, so "☐ offen ☒ VS-NfD" otherwise loses the choice.
         lang: Languages the documents are in (``"de"``, ``["de", "fr"]``,
             ``"de,fr"``). Building the engine fails when the recognition model
             cannot spell one of them, because a model that silently drops ``ö``
@@ -309,6 +314,7 @@ class Ocr:
         tables: bool = True,
         lang: str | Sequence[str] | None = None,
         read_stamps: bool = False,
+        tick_boxes: bool = False,
     ) -> None:
         if isinstance(lang, str):
             languages = [part.strip() for part in lang.replace(",", " ").split() if part.strip()]
@@ -348,6 +354,7 @@ class Ocr:
             "tables": tables,
             "languages": languages,
             "read_stamps": read_stamps,
+            "tick_boxes": tick_boxes,
         }
         self._keeps_images = keep_page_images
         self._pdf_engine_cache: Any = None

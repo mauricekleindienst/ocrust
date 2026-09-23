@@ -77,6 +77,7 @@ impl PyEngine {
         tables = true,
         languages = None,
         read_stamps = false,
+        tick_boxes = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -108,6 +109,7 @@ impl PyEngine {
         tables: bool,
         languages: Option<Vec<String>>,
         read_stamps: bool,
+        tick_boxes: bool,
     ) -> PyResult<Self> {
         let mut config = EngineConfig::new();
         config.models.directory = models_dir;
@@ -120,6 +122,7 @@ impl PyEngine {
         config.fix_orientation = fix_orientation;
         config.layout.detect_tables = tables;
         config.read_stamps = read_stamps;
+        config.tick_boxes = tick_boxes;
 
         if let Some(d) = device {
             config.session.device = Device::parse(d).map_err(to_py_err)?;

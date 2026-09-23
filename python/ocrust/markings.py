@@ -314,7 +314,9 @@ def _t(
 # stamps are read with their spaces removed.
 _S = r"\s*"
 _NFD = r"N\s*\.?\s*F\s*\.?\s*D\b\.?"
-_NUR_FUER_DEN_DIENSTGEBRAUCH = rf"NUR{_S}FUE?R{_S}DEN{_S}DIENST{_S}-?{_S}GEBRAUCH"
+# FOR: the recognizer reads a small Ü as O often enough, and the phrase is
+# unambiguous either way.
+_NUR_FUER_DEN_DIENSTGEBRAUCH = rf"NUR{_S}F[UO]E?R{_S}DEN{_S}DIENST{_S}-?{_S}GEBRAUCH"
 
 _TERMS: tuple[_Term, ...] = (
     # --- Germany (VSA 2023) and its predecessors
@@ -373,6 +375,12 @@ _TERMS: tuple[_Term, ...] = (
     _t(rf"\bNATO{_S}CONFIDENTIAL\b", "nato:2"),
     _t(rf"\bNATO{_S}SECRET\b", "nato:3"),
     _t(rf"\bCOSMIC{_S}TOP{_S}SECRET\b", "nato:4"),
+    # The French forms NATO prints beside the English ones.
+    _t(rf"\bOTAN{_S}NON{_S}CLASSIFIE\b", "nato:0"),
+    _t(rf"\bOTAN{_S}DIFFUSION{_S}RESTREINTE\b", "nato:1"),
+    _t(rf"\bOTAN{_S}CONFIDENTIEL\b", "nato:2"),
+    _t(rf"\bOTAN{_S}SECRET\b", "nato:3"),
+    _t(rf"\bCOSMIC{_S}TRES{_S}SECRET\b", "nato:4"),
     # --- EU (Council Decision 2013/488/EU): French and English forms
     _t(rf"\bRESTREINT{_S}UE\b|\bEU{_S}RESTRICTED\b", "eu:1"),
     _t(rf"\bCONFIDENTIEL{_S}UE\b|\bEU{_S}CONFIDENTIAL\b", "eu:2"),
@@ -747,8 +755,12 @@ def _context(line_text: str, hits: Sequence[_Hit]) -> _Context:
     )
 
 
-def _verdict(hit: _Hit, ctx: _Context, zone: str, line_text: str) -> str | None:
-    """``"marking: <reason>"``, ``"mention: <reason>"``, or ``None`` to drop it."""
+def _verdict(hit: _Hit, ctx: _Context, zone: str, line_text: str, before: str = "") -> str | None:
+    """``"marking: <reason>"``, ``"mention: <reason>"``, or ``None`` to drop it.
+
+    `before` is what stands left of this piece when the layout merged it into
+    one line with others — "Betreff:" in the label column of a printed e-mail.
+    """
     original = line_text[hit.orig_start : hit.orig_end]
     if hit.view.fuzzy:
         # A lowercase l inside capitals is the I that OCR misread (GEHElM).
@@ -763,7 +775,11 @@ def _verdict(hit: _Hit, ctx: _Context, zone: str, line_text: str) -> str | None:
     # "die Wahl ist geheim", "vertraulich behandeln": the word, not a grade.
     # An old stamp reads "Geheim!", which is why a lone word with an
     # exclamation mark still counts.
-    exclaimed = line_text[hit.orig_end :].lstrip().startswith("!") and ctx.words == 0
+    exclaimed = (
+        line_text[hit.orig_end :].lstrip().startswith("!")
+        and ctx.words == 0
+        and not hit.term.key.endswith(":en")  # "Top Secret!" is a film title
+    )
     if not hit.term.distinctive and not capitals and not exclaimed:
         return "quiet: standalone" if ctx.words == 0 and not hit.view.fuzzy else None
     if _compound(hit.view, hit):
@@ -772,19 +788,26 @@ def _verdict(hit: _Hit, ctx: _Context, zone: str, line_text: str) -> str | None:
         return "mention: negated"
     if ctx.words == 0:
         return f"marking: {zone if zone != 'body' else 'standalone'}"
-    if hit.term.distinctive and _leads(line_text, hit):
+    if hit.term.distinctive and _leads(line_text, hit, before):
         # "Betreff: VS-NfD – Beschaffung …": the VSA puts the grade before an
         # e-mail's subject, and a grade opening a line reads the same way.
         return "marking: subject line"
     if zone != "body":
         if hit.term.distinctive and ctx.lowercase <= 1 and ctx.words <= 6:
             return f"marking: {zone}"
+        if hit.term.key in _NAMES_TOO:
+            # "HAUS INTERN" is a staff newsletter, "INTERN AKTUELL" a column:
+            # beside other words, INTERN is more often a name than a marking.
+            return "mention: running text"
         if ctx.lowercase == 0 and ctx.words <= 3:
             return f"marking: {zone}"
     elif hit.term.distinctive and ctx.lowercase == 0 and ctx.words <= 2:
         return "marking: short line"
     return "mention: running text"
 
+
+#: Markings that are also the stuff of names, and count only standing alone.
+_NAMES_TOO = frozenset({"ctx:intern", "company:INTERNAL"})
 
 #: Words that make a line about grades rather than marked with one.
 _ABOUT = re.compile(
@@ -818,14 +841,39 @@ def _continues(before: str, text: str) -> bool:
 _LEADERS = re.compile(r"^\s*(?:(?:BETREFF|SUBJECT|OBJET|OGGETTO|AW|WG|RE|FW|FWD)\s*:\s*)+$")
 
 
-def _leads(line_text: str, hit: _Hit) -> bool:
+def _leads(line_text: str, hit: _Hit, before: str = "") -> bool:
     """Whether the grade opens an e-mail's subject: ``Betreff: VS-NfD – …``.
 
     Only after the subject's own label. A line that merely starts with a
     grade — "CONFIDENTIEL UE/EU CONFIDENTIAL and above are registered." — is
     as likely a sentence about it.
     """
-    return bool(_LEADERS.match(_folded(line_text[: hit.orig_start]).text))
+    return bool(_LEADERS.match(_folded(f"{before} {line_text[: hit.orig_start]}").text))
+
+
+def _tick_beside(box: Box, ticks: Sequence[tuple[Box, bool]]) -> bool | None:
+    """Whether the tick box just left of `box` is ticked, or ``None`` if there
+    is none: a form's option reads "☒ VS-NfD", box first."""
+    height = box.y1 - box.y0
+    nearest: tuple[float, bool] | None = None
+    for tick, ticked in ticks:
+        overlap = min(box.y1, tick.y1) - max(box.y0, tick.y0)
+        if overlap < 0.5 * min(height, tick.y1 - tick.y0):
+            continue
+        gap = box.x0 - tick.x1
+        if -0.5 * height <= gap <= 2.5 * height and (nearest is None or gap < nearest[0]):
+            nearest = (gap, ticked)
+    return None if nearest is None else nearest[1]
+
+
+def _grades_named(hits: Sequence[_Hit], cues: set[str]) -> set[str]:
+    """The distinct government grades a line's hits name."""
+    named = set()
+    for hit in hits:
+        resolved = _resolve(hit.term.key, cues, hit.view.text[hit.start : hit.end])
+        if resolved is not None and resolved[1] >= 1:
+            named.add(resolved[2])
+    return named
 
 
 def _cues(document: Document) -> set[str]:
@@ -1067,17 +1115,30 @@ def inspect(document: Document, *, file: str | os.PathLike[str] | None = None) -
         in_table: list[bool] = []
         stamped: list[bool] = []
         continued: list[bool] = []
+        lefts: list[str] = []
         pieces: list[Line] = []
+        ticks = [
+            (line.box, line.text == "☒")
+            for block in page.blocks
+            if block.kind == "tick_box"
+            for line in block.lines
+        ]
         for block in page.blocks:
+            if block.kind == "tick_box":
+                continue
             before: str | None = None
             for whole in block.lines:
+                left: list[str] = []
                 for piece in _pieces(whole):
                     pieces.append(piece)
                     in_table.append(block.table is not None)
                     stamped.append(block.kind == "stamp")
                     continued.append(before is not None and _continues(before, piece.text))
+                    lefts.append(" ".join(left))
+                    left.append(piece.text)
                     before = piece.text
-        for line, tabular, stamp, carried in zip(pieces, in_table, stamped, continued):
+        rows = zip(pieces, in_table, stamped, continued, lefts)
+        for line, tabular, stamp, carried, left_of in rows:
             text = line.text
             if not text.strip():
                 continue
@@ -1094,17 +1155,30 @@ def inspect(document: Document, *, file: str | os.PathLike[str] | None = None) -
                 or bool(_ABOUT.search(_folded(text).text))
                 or any(_compound(h.view, h) for h in hits)
             )
+            # "NATO RESTRICTED entspricht VS-NfD": two grades joined by a word
+            # compare them, in a header band as much as anywhere. Joined by a
+            # separator — "NATO RESTRICTED / OTAN DIFFUSION RESTREINTE" — they
+            # are one marking in two languages.
+            if ctx.lowercase and len(_grades_named(hits, cues)) >= 2:
+                about = True
             first_on_line = len(findings)
             if ctx.cancelled and ctx.lowercase <= 1 and ctx.words <= 6:
                 # A stamp ("Approved For Release 2005/01/12", "VS-NfD
                 # aufgehoben"), not a sentence about lifting grades.
                 cancelled = True
             for hit in hits:
-                verdict = _verdict(hit, ctx, zone, text)
+                verdict = _verdict(hit, ctx, zone, text, left_of)
                 if verdict is None:
                     continue
                 kind, reason = verdict.split(": ", 1)
-                if kind == "quiet":
+                box = _box_for_span(line, hit.orig_start, hit.orig_end)
+                ticked = _tick_beside(box, ticks) if ctx.words <= 3 else None
+                if ticked is not None and kind in ("marking", "mention"):
+                    # An option on a form: the box decides, not the layout.
+                    kind, reason = ("marking", "ticked box")
+                    if not ticked:
+                        kind, reason = ("mention", "unticked box")
+                elif kind == "quiet":
                     kind = "marking"  # decided below, once the scheme is known
                 elif kind == "marking" and about and not hit.term.anchored:
                     kind, reason = "mention", "running text"
@@ -1112,7 +1186,10 @@ def inspect(document: Document, *, file: str | os.PathLike[str] | None = None) -
                     # A repaired word, or an abbreviation in a sentence, is far
                     # likelier to be something else than a grade being discussed.
                     continue
-                if kind == "marking" and tabular and zone == "body":
+                chosen = reason in ("subject line", "ticked box")
+                if kind == "marking" and tabular and zone == "body" and not chosen:
+                    # A register listing grades; but a printed e-mail's header
+                    # block is laid out as a table too, subject included.
                     kind, reason = "mention", "table"
                 if kind == "marking" and stamp and reason in ("standalone", "short line"):
                     reason = "coloured stamp"  # read from its ink alone
@@ -1157,7 +1234,7 @@ def inspect(document: Document, *, file: str | os.PathLike[str] | None = None) -
                         text=text,
                         match=text[hit.orig_start : hit.orig_end],
                         page=number,
-                        box=_box_for_span(line, hit.orig_start, hit.orig_end),
+                        box=box,
                         confidence=confidence,
                         fuzzy=hit.view.fuzzy,
                         reason=reason,

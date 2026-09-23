@@ -673,6 +673,7 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
         lang=getattr(args, "lang", None),
         io_retries=getattr(args, "io_retries", None),
         read_stamps=getattr(args, "_read_stamps", False),
+        tick_boxes=getattr(args, "_read_stamps", False),
     )
 
 
@@ -1641,8 +1642,8 @@ def _cmd_vs(args: argparse.Namespace) -> int:
         return 2
 
     args._resolved_workers = _workers_for(args, len(inputs))
-    # A stamp over the text is only readable by its colour; this is the
-    # command that looks for stamps.
+    # A stamp over the text is only readable by its colour, and a grade ticked
+    # on a form only by its box; this is the command that looks for both.
     args._read_stamps = True
     engine = _engine_from_args(args)
     chunk = max(8, 4 * (args._resolved_workers or 1))

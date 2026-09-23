@@ -51,10 +51,20 @@ pub struct EngineConfig {
     /// lost among the black lines it crosses: the detector sees one tangle of
     /// strokes. Separated by colour it reads cleanly — which is how a person
     /// reads it too. Lines found only this way arrive as blocks of kind
-    /// [`BlockKind::Stamp`](crate::doc::BlockKind::Stamp). Pages without
-    /// coloured ink cost nothing; off by default, because it is for finding
-    /// stamps rather than for reading text.
+    /// [`BlockKind::Stamp`](crate::doc::BlockKind::Stamp). A page without
+    /// coloured ink costs one look at its pixels (12 ms on an A4 page at
+    /// 200 dpi, about 1 %), a page with a stamp a second, smaller reading
+    /// (about 13 %). Off by default, because it is for finding stamps rather
+    /// than for reading text.
     pub read_stamps: bool,
+    /// Find the tick boxes on a page and whether each is ticked.
+    ///
+    /// The recognizer reads the words beside a tick box and hardly ever the
+    /// box, so "☐ offen ☒ VS-NfD" arrives as "offen VS-NfD" and the choice is
+    /// lost. Each box found in the pixels arrives as a block of kind
+    /// [`BlockKind::TickBox`](crate::doc::BlockKind::TickBox) reading `☒` or
+    /// `☐`, placed where it is printed. Off by default.
+    pub tick_boxes: bool,
     /// Detect pages that are rotated by a quarter turn and straighten them.
     ///
     /// Sideways scans are common — a viewer applies `/Rotate`, a feeder pulled
@@ -408,6 +418,7 @@ impl Engine {
                 ..self.config.preprocess.clone()
             },
             read_stamps: self.config.read_stamps,
+            tick_boxes: self.config.tick_boxes,
         };
         crate::export::overlay::add_text_layer(pdf, options, |index, image| {
             let raw = RawPage {
@@ -665,6 +676,23 @@ impl Engine {
             let stamps = self.stamp_blocks(&image, &blocks)?;
             blocks.extend(stamps);
         }
+        if options.tick_boxes {
+            blocks.extend(crate::tickbox::find(&image).into_iter().map(|tick| {
+                let line = Line {
+                    text: if tick.ticked { "☒" } else { "☐" }.to_string(),
+                    confidence: 1.0,
+                    bbox: tick.bbox,
+                    quad: crate::geom::Quad::from_rect(tick.bbox),
+                    ..Default::default()
+                };
+                Block {
+                    kind: BlockKind::TickBox,
+                    bbox: tick.bbox,
+                    lines: vec![line],
+                    table: None,
+                }
+            }));
+        }
         Ok(Page {
             quality,
             index: raw.index,
@@ -806,6 +834,7 @@ struct PageOptions {
     auto_page_orientation: bool,
     preprocess: PreprocessConfig,
     read_stamps: bool,
+    tick_boxes: bool,
 }
 
 impl PageOptions {
@@ -815,6 +844,7 @@ impl PageOptions {
             auto_page_orientation: config.auto_page_orientation,
             preprocess: config.preprocess.clone(),
             read_stamps: config.read_stamps,
+            tick_boxes: config.tick_boxes,
         }
     }
 }

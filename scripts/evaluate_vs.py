@@ -76,9 +76,11 @@ def make_engine(ocrust: ModuleType, workers: int | None) -> Any:
             if name in parameters:
                 kwargs[name] = workers
                 break
-    if "read_stamps" in parameters:
-        # A stamp across the text is read from its colour; the command does it.
-        kwargs["read_stamps"] = True
+    # A stamp across the text is read from its colour and a grade ticked on a
+    # form from its box; the command does both.
+    for name in ("read_stamps", "tick_boxes"):
+        if name in parameters:
+            kwargs[name] = True
     return ocrust.Ocr(**kwargs)
 
 

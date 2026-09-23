@@ -51,6 +51,7 @@ mod quality;
 pub mod recognize;
 pub mod runtime;
 mod table;
+pub mod tickbox;
 
 pub use classify::OrientationConfig;
 pub use detect::{DetectorConfig, LimitType};
