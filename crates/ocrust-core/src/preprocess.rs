@@ -20,6 +20,10 @@ pub struct PreprocessConfig {
     pub auto_contrast: bool,
     /// Remove salt-and-pepper noise with a 3x3 median filter.
     pub denoise: bool,
+    /// Remove lone specks on pages that are covered in them (fax lines, dirty
+    /// scanner glass). Only pixels with no like-coloured neighbour change, so a
+    /// stroke is never thinned, and clean pages are not touched at all.
+    pub despeckle: bool,
     /// Upscale images whose longest side is below this, up to 2x.
     pub upscale_below: u32,
     /// Downscale anything above this pixel count (width * height).
@@ -34,6 +38,7 @@ impl Default for PreprocessConfig {
             max_skew_deg: 12.0,
             auto_contrast: false,
             denoise: false,
+            despeckle: true,
             upscale_below: 800,
             max_pixels: 40_000_000,
         }
@@ -49,6 +54,7 @@ impl PreprocessConfig {
             max_skew_deg: 0.0,
             auto_contrast: false,
             denoise: false,
+            despeckle: false,
             upscale_below: 0,
             max_pixels: 0,
         }
@@ -82,6 +88,12 @@ pub fn prepare(mut image: RgbImage, cfg: &PreprocessConfig) -> Prepared {
             image = resize_by(&image, factor, image::imageops::FilterType::Triangle);
             scale *= factor;
         }
+    }
+
+    // Before upscaling: a lone speck is one pixel only at the scanned
+    // resolution, and resampling would smear it into a blob.
+    if cfg.despeckle {
+        despeckle(&mut image);
     }
 
     if cfg.upscale_below > 0 {
@@ -129,6 +141,65 @@ pub fn prepare(mut image: RgbImage, cfg: &PreprocessConfig) -> Prepared {
         scale,
         inverted,
     }
+}
+
+/// Share of pixels that must be lone specks before a page counts as speckled.
+///
+/// Measured over the test corpus: fax pages carry 2.5 %, every other page at
+/// most 0.012 %. A tenth of a percent sits far from both.
+const SPECKLED_SHARE: f64 = 0.001;
+
+/// Removes pixels whose eight neighbours are all of the other colour, when a
+/// page has enough of them to be speckled; returns whether it did.
+///
+/// At fax resolution (100 dpi) a heading is 14 px tall, and specks at 2 % of
+/// the page were enough to make the detector miss whole lines, among them the
+/// classification marking in the header. A median filter restores them, but
+/// it also erodes one-pixel strokes, which that resolution is full of; a lone
+/// pixel is never part of a stroke.
+fn despeckle(img: &mut RgbImage) -> bool {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if w < 3 || h < 3 {
+        return false;
+    }
+    let dark: Vec<bool> = img
+        .pixels()
+        .map(|p| luma(p.0[0], p.0[1], p.0[2]) < 128)
+        .collect();
+    // A pixel is lone when all eight neighbours disagree with it.
+    let lone = |x: usize, y: usize| {
+        let me = dark[y * w + x];
+        (y - 1..=y + 1)
+            .all(|ny| (x - 1..=x + 1).all(|nx| (nx == x && ny == y) || dark[ny * w + nx] != me))
+    };
+    let mut specks = Vec::new();
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            if lone(x, y) {
+                specks.push((x as u32, y as u32));
+            }
+        }
+    }
+    if (specks.len() as f64) < (w * h) as f64 * SPECKLED_SHARE {
+        return false;
+    }
+    // Every neighbour is of the surrounding colour, so their mean is the
+    // local background (or ink) tone, paper texture included.
+    let source = img.clone();
+    for (x, y) in specks {
+        let mut sum = [0u32; 3];
+        for ny in y - 1..=y + 1 {
+            for nx in x - 1..=x + 1 {
+                if nx != x || ny != y {
+                    for (acc, &v) in sum.iter_mut().zip(&source.get_pixel(nx, ny).0) {
+                        *acc += v as u32;
+                    }
+                }
+            }
+        }
+        img.put_pixel(x, y, image::Rgb(sum.map(|v| (v / 8) as u8)));
+    }
+    true
 }
 
 fn resize_by(img: &RgbImage, factor: f32, filter: image::imageops::FilterType) -> RgbImage {
@@ -456,6 +527,84 @@ mod tests {
         let lo = img.pixels().map(|p| p.0[0]).min().unwrap();
         let hi = img.pixels().map(|p| p.0[0]).max().unwrap();
         assert!(hi - lo > 100, "range {lo}..{hi}");
+    }
+
+    /// A page of one-pixel strokes, the thinnest text a fax carries.
+    fn hairline_page() -> RgbImage {
+        let mut img = RgbImage::from_pixel(300, 200, image::Rgb([255, 255, 255]));
+        for y in (20..180).step_by(10) {
+            for x in 20..280 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0])); // horizontal hairline
+            }
+        }
+        for x in (25..280).step_by(15) {
+            for y in 20..180 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0])); // vertical hairline
+            }
+        }
+        img
+    }
+
+    /// Scatters lone black specks over white paper, `n` of them.
+    fn sprinkle(img: &mut RgbImage, n: u32) -> Vec<(u32, u32)> {
+        let mut seed = 0x9e37_79b9u32;
+        let mut placed = Vec::new();
+        while (placed.len() as u32) < n {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let (x, y) = (
+                1 + seed % (img.width() - 2),
+                1 + (seed / 7) % (img.height() - 2),
+            );
+            let clear = (y - 1..=y + 1)
+                .all(|ny| (x - 1..=x + 1).all(|nx| img.get_pixel(nx, ny).0[0] == 255));
+            if clear {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+                placed.push((x, y));
+            }
+        }
+        placed
+    }
+
+    #[test]
+    fn a_speckled_page_loses_its_specks_and_keeps_its_strokes() {
+        let clean = hairline_page();
+        let mut noisy = clean.clone();
+        let specks = sprinkle(&mut noisy, 600); // 1 % of the page
+        assert!(despeckle(&mut noisy));
+        for (x, y) in specks {
+            assert_eq!(noisy.get_pixel(x, y).0, [255, 255, 255], "speck at {x},{y}");
+        }
+        assert_eq!(noisy, clean, "a one-pixel stroke was touched");
+    }
+
+    #[test]
+    fn a_clean_page_is_not_despeckled() {
+        // A handful of specks is dust, not a speckled page: the threshold keeps
+        // clean scans byte-identical rather than "fixing" the odd full stop.
+        let mut img = hairline_page();
+        sprinkle(&mut img, 20);
+        let before = img.clone();
+        assert!(!despeckle(&mut img));
+        assert_eq!(img, before);
+    }
+
+    #[test]
+    fn holes_in_ink_are_filled_on_an_inverted_page_too() {
+        // Light-on-dark pages are inverted after this step, so the rule has to
+        // hold both ways round.
+        let mut img = RgbImage::from_pixel(100, 100, image::Rgb([0, 0, 0]));
+        let mut holes = Vec::new();
+        for i in 0..20u32 {
+            let (x, y) = (5 + (i % 5) * 20, 5 + (i / 5) * 20);
+            img.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            holes.push((x, y));
+        }
+        assert!(despeckle(&mut img));
+        for (x, y) in holes {
+            assert_eq!(img.get_pixel(x, y).0, [0, 0, 0]);
+        }
     }
 
     #[test]
