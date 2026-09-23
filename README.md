@@ -175,13 +175,52 @@ Need a searchable PDF from images instead? That builds a new document:
 ocrust pdf photo.jpg -o photo.pdf
 ```
 
+## Finding classified documents
+
+`ocrust vs` says which files are marked VS-NUR FÜR DEN DIENSTGEBRAUCH,
+VS-VERTRAULICH, GEHEIM or STRENG GEHEIM — or NATO, EU, Austrian, Swiss, US, UK
+or French equivalents, TLP or company markings — and tells a grade stamped on a
+page from a sentence that merely mentions one.
+
+```text
+$ ocrust vs akten/
+VS-NfD           akten/2026/beschaffung.pdf  pp. 1, 2, 4 · header, footer · unmarked: p. 3
+GEHEIM           akten/2026/lage.tif  pp. 1-3 · header, footer
+unreadable       akten/2026/scan_0815.pdf  unsupported input: could not parse PDF: Invalid
+VS-NfD           akten/2026/vermerk.png  p. 1 · coloured stamp
+TLP:AMBER        akten/cert/advisory.png  p. 1 · header
+-                akten/merkblatt.png  5 mentions
+done: 6 files, 4 marked (2 VS-NfD, 1 GEHEIM, 1 TLP:AMBER), 1 clean, 1 unreadable, 10 pages, 19.9 s
+```
+
+- Every spelling and OCR reading of a grade — `VS – NUR FÜR DEN
+  DIENSTGEBRAUCH`, `Verschlußsache`, `G E H E I M`, `V5-NFD`, `GEHElM` — on one
+  1–4 scale shared with NATO and the EU.
+- A red stamp across the text is read **by its colour**, and a grade ticked on
+  a form **by its box** — neither survives ordinary OCR.
+- Pages of a marked document that carry no grade are named; the VSA wants it on
+  every page.
+- Exit status 3 when a file is marked at or above `--fail-on`, so it gates a
+  CI job or an upload path; reports as text, JSON Lines or CSV with every
+  finding's page, box and reason.
+
+```python
+report = ocrust.scan("akte.pdf").markings()
+report.label, report.level, report.unmarked_pages   # ('VS-NfD', 1, (3,))
+```
+
+On 109 documents written independently of the detector, the first run found
+the grade of 46 of 50 classified files and raised a grade on 2 of 48 unmarked
+ones; the cases it got wrong are listed, and fixed, on the page about it. See
+[Classification markings](wiki/Classification-markings.md).
+
 ## Documentation
 
-The full documentation is 18 pages under [`wiki/`](wiki/Home.md) — installation,
-quickstart, Python API, CLI, PDF workflows, network shares, languages, models,
-performance, accuracy, architecture, evaluation, troubleshooting, contributing
-and the roadmap. It reads as a wiki in the repository and can be pushed into the
-GitHub wiki verbatim (`wiki/_publish.md`).
+The full documentation is 17 pages under [`wiki/`](wiki/Home.md) — installation,
+quickstart, Python API, CLI, PDF workflows, classification markings, network
+shares, languages, models, performance, accuracy, architecture, evaluation,
+troubleshooting, contributing and the roadmap. It reads as a wiki in the
+repository and can be pushed into the GitHub wiki verbatim (`wiki/_publish.md`).
 
 ## Try it in a browser
 
@@ -318,6 +357,7 @@ ocrust ocr scan.pdf -o scan.ocr.pdf          # add a text layer
 ocrust pdf photo.jpg -o photo.pdf            # searchable PDF from an image
 ocrust pdf archive/ -o archive.pdf           # a folder of mixed formats, one PDF
 ocrust tiff scan.pdf --gray --sidecar text   # archive TIFF plus text
+ocrust vs archive/ --fail-on vs-nfd          # which files are classified
 ocrust languages                             # model coverage
 ocrust models                                # which files are in use
 ocrust install-models                        # fetch them from GitHub

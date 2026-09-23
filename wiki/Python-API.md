@@ -43,6 +43,8 @@ ocr = ocrust.Ocr(
     drop_score=None,      # minimum mean line confidence, default 0.5
     lang=None,            # "de", "de,fr" or ["de", "fr"] -> checked, not a hint
     keep_page_images=False,
+    read_stamps=False,    # read coloured ink (stamps) a second time on its own
+    tick_boxes=False,     # find tick boxes on forms, ticked or not
     # model overrides
     detection_model=None, recognition_model=None, orientation_model=None, dictionary=None,
     # tuning
@@ -68,6 +70,8 @@ the GIL for the whole scan, so a thread pool in Python parallelizes properly.
 | `password` | A PDF that needs a password to open. Protection by an owner password alone — the usual bank statement — needs none. A text layer added with `ocr_pdf` is written without the password. |
 | `max_pixels` | An image is refused on the size it declares, before any of it is decoded. The default is Pillow's threshold (178 956 970), which admits an A0 sheet at 300 dpi; lower it for a service that accepts uploads, `0` removes it. |
 | `io_retries` | Reading off a network share. Two retries by default; raise it for a share that drops, set `0` to fail fast. See [Network shares](Network-shares.md). |
+| `read_stamps` | Finding stamps. A red or blue stamp printed across the text is lost among the lines it crosses; this reads the page's coloured ink again on its own and adds what it finds as blocks of kind `"stamp"`. A page without coloured ink costs about 1 % more, a page with a stamp about 13 %. `ocrust vs` turns it on. |
+| `tick_boxes` | Forms. The recognizer reads the words beside a tick box but hardly ever the box; this finds the boxes in the pixels and adds each as a block of kind `"tick_box"` reading `☒` or `☐`, where it is printed. About 40 ms a page. `ocrust vs` turns it on. |
 | `rec_space_gap` | Almost never. `0` disables space restoration, which you want only if a swallowed space is preferable to a wrongly inserted one. |
 
 ### Methods
@@ -255,6 +259,19 @@ rows = list(csv.reader(io.StringIO(doc.tables[0].to_csv())))
 behind this and no ruling lines are read — see
 [Accuracy](Accuracy.md#tables) for how the columns are found, what the guardrails
 are, and what it cannot see.
+
+### Classification markings
+
+```python
+report = ocrust.scan("akte.pdf").markings()
+report.label, report.level, report.unmarked_pages   # ('VS-NfD', 1, (5,))
+```
+
+`Document.markings()` returns a `MarkingReport`: the highest grade on a common
+1–4 scale, TLP and company markings beside it, and every finding with its page,
+box and the reason it was judged a marking rather than a mention.
+`ocrust.markings.inspect(doc, file=path)` also reads the file's sensitivity
+label. See [Classification markings](Classification-markings.md).
 
 ## Errors
 

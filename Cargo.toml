@@ -3,7 +3,7 @@ members = ["crates/ocrust-core", "crates/ocrust-py"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ homepage = "https://github.com/mauricekleindienst/ocrust"
 authors = ["ocrust contributors"]
 
 [workspace.dependencies]
-ocrust-core = { version = "0.2.4", path = "crates/ocrust-core", default-features = false }
+ocrust-core = { version = "0.2.5", path = "crates/ocrust-core", default-features = false }
 
 hayro = "0.7"
 image = "0.25"

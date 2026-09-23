@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.2.5 — 2026-09-23
+
+Finding classified documents: `ocrust vs` and `Document.markings()` say which
+files are marked VS-NUR FÜR DEN DIENSTGEBRAUCH, VS-VERTRAULICH, GEHEIM or STRENG
+GEHEIM — or carry a NATO, EU, national, TLP or company marking — and tell a
+grade stamped on a page from a sentence that mentions one. Two changes to
+reading came out of it: speckled fax pages are cleaned, and a coloured stamp
+across the text can be read by its colour.
+
+231 Rust unit tests, 10 Rust end-to-end tests, 250 Python tests.
+
+### Added
+
+- **`ocrust vs`** scans files in parallel and reports per file the grade, the
+  pages it is on, where on them (header, footer, stamp, form field, e-mail
+  subject), anything else marked, and the pages of a marked document that
+  carry no grade. Exit status 3 when a file is marked at or above `--fail-on`
+  (default `vs-nfd`), else 1 when a file could not be read — its grade is
+  unknown — else 0. Reports as text, JSON, JSON Lines or CSV, every finding
+  with its page, box, confidence and the reason it was judged a marking.
+- **`Document.markings()`** and `ocrust.markings.inspect(doc, file=path)`,
+  the same in Python: a `MarkingReport` with the highest grade on a common 1–4
+  scale, TLP and company markings beside it, and every finding as evidence.
+  What it covers: the German grades in every spelling and OCR reading
+  (`VS – NUR FÜR DEN DIENSTGEBRAUCH`, `Verschlußsache`, `G E H E I M`,
+  `V5-NFD`, `GEHElM`); NATO, EU, Austria, Switzerland (in German, French and
+  Italian), the US with its banner caveats, the UK, France and Italy; DDR and
+  older German grades; TLP 1.0 and 2.0; company markings; "amtlich
+  geheimgehalten", the classification-term line and the US classification
+  block as lower bounds; explicit OFFEN and UNCLASSIFIED. Checked against VSA
+  2023 Anlage IV, InfoSiG, ISG/ISV, IGI 1300, the EU and NATO policies and TLP
+  2.0.
+- **A marking is told from a mention.** A marking stands alone, in the header
+  or footer band, or beside a page number, copy number or field label; a
+  mention sits among a sentence's lowercase words, is negated, is part of a
+  word ("VS-NfD-Zulassung"), sits in a table, continues a wrapped line, or is
+  on a page listing three or more grades or stamped MUSTER. Ordinary words
+  (GEHEIM, VERTRAULICH, INTERN) count only in capitals; VERTRAULICH and INTERN
+  are resolved by the document's country.
+- **The file's own label**: a Microsoft Information Protection sensitivity
+  label in a file's metadata counts as a marking; a grade in the file name,
+  which the VSA asks for, is reported as a hint.
+- **`read_stamps=True`** reads a page's coloured ink a second time on its own.
+  A red stamp across a paragraph was not read at all — the detector saw one
+  tangle of strokes, and the lines it crossed came out garbled — and is now a
+  block of kind `"stamp"`. A page without coloured ink costs about 1 % more (12
+  ms), a page with a stamp about 13 %; `ocrust vs`
+  turns it on.
+- **`tick_boxes=True`** finds the tick boxes on a page and whether each is
+  ticked, as blocks of kind `"tick_box"` reading `☒` or `☐`. The recognizer
+  reads the words beside a box and hardly ever the box, so "☐ offen ☒ VS-NfD
+  ☐ VS-VERTRAULICH" lost the choice; the grade beside the ticked box is now the
+  marking and the others are options. About 40 ms a page; `ocrust vs` turns it
+  on.
+- `scripts/make_vs_corpus.py` and `scripts/evaluate_vs.py`: 186 generated
+  files with ground truth, and the measurement below; `scripts/make_vs_holdout.py`,
+  109 more, written independently of the detector to measure it honestly.
+
+### Improved
+
+- **Speckled pages are cleaned before detection.** At fax resolution a heading
+  is 14 px tall, and specks on 2–4 % of a page made the detector drop whole
+  lines, a probe page's header and footer marking among them. Only pixels whose
+  eight neighbours are all of the other colour are replaced, and only on pages
+  where they cover at least 0.1 %, so strokes are never thinned and clean pages
+  stay byte-identical. Fax: CER 0.014 → **0.008**, word recall 0.867 →
+  **0.939**; no other category moved. Over the 118 corpus files in a language
+  the bundle can write: mean CER **0.026** (unchanged), WER 0.083 → 0.081, word
+  recall 0.927 → **0.929**.
+
+### Measured
+
+Two generated test sets, measured with `scripts/evaluate_vs.py`:
+
+| set | documents | precision | recall | documents entirely right |
+|---|---:|---:|---:|---:|
+| development corpus (the rules were written on it) | 186 | 100 % | 100 % | 186 |
+| independent set, **before** the fixes it prompted | 109 | 95.8 % | 92.0 % | 101 |
+| independent set, after them | 109 | 100 % | 100 % | 108 |
+
+The independent set was written by someone who had not seen the detector —
+new templates, new wording, printed e-mails, forms, slides, TV listings — to
+measure it on documents it was not tuned for. Its first result is the honest
+figure; the second is no longer blind. The one document still counted wrong
+names its UNCLASSIFIED banner, which the set expected to go unnamed. After the
+fixes every grade level on both sets is right and none of the 110 files without
+a marking raises a grade; the detector adds under 10 ms a page to the OCR.
+
 ## 0.2.4 — 2026-09-23
 
 Six bugs, two of which lost data without saying so. All six were reproduced

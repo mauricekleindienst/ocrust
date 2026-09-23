@@ -37,8 +37,8 @@ roughly one typo every four lines.
 | multi-page PDF (47 pages) | 0.004 | 0.957 | 681 |
 | aged, stained, bled-through | 0.006 | 0.937 | 714 |
 | 60 dpi thumbnail | 0.006 | 0.889 | 433 |
+| 1-bit fax with dropout | 0.008 | 0.939 | 576 |
 | unruled full-page price list | 0.013 | 0.977 | 506 |
-| 1-bit fax with dropout | 0.014 | 0.867 | 576 |
 | image-only PDF, clean render | 0.042 | 0.792 | 693 |
 | rotated PDFs (/Rotate 90/180/270) | 0.054 | 0.884 | 919 |
 | ruled forms / tables | 0.063 | 0.744 | 648 |
@@ -173,6 +173,21 @@ bilevel files in `formats/`, and the reader unpacks 1-, 2- and 4-bit grey
 honouring `PhotometricInterpretation` — a fax is usually WhiteIsZero, and
 reading that tag wrong inverts the page. The size difference is the reason the
 format exists: the same page is 6 KB bilevel against 11.6 MB as RGB.
+
+### Specks on a fax
+
+At fax resolution (100 dpi) a heading is 14 pixels tall, and a page covered in
+lone black specks — dirty glass, a noisy line — made the detector drop whole
+lines. On a probe page with 4 % of its pixels flipped, both the header and the
+footer line went missing, together with half the body text. A 3×3 median filter
+brings them back, and also erodes the one-pixel strokes that resolution is made
+of.
+
+What runs now touches only pixels whose eight neighbours are all of the other
+colour, and only on a page where such pixels make up at least 0.1 %: fax pages
+carry 2.5 %, every other page in the corpus at most 0.012 %, so everything else
+stays byte-identical. The fax category went from CER 0.014 to **0.008** and word
+recall from 0.867 to **0.939**; no other category moved.
 
 ### One line, turned over on its own
 

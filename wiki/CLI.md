@@ -299,6 +299,23 @@ renders ANSI. Long messages fold to the terminal width instead of running off
 the edge, and `--progress` rewrites one line on a terminal but prints a line per
 page into a log, where a carriage return would run the whole run together.
 
+## `ocrust vs`
+
+Finds classification markings — VS-NfD, VS-VERTRAULICH, GEHEIM, STRENG
+GEHEIM, their NATO, EU and national equivalents, TLP and company markings —
+and tells a marking stamped on a page from a sentence that mentions one.
+
+```bash
+ocrust vs archive/                      # one line per file: grade, pages, where
+ocrust vs upload/ --fail-on geheim -q   # a gate: exit 3 from GEHEIM up
+ocrust vs share/ -f csv -o audit.csv    # every finding with page, box and reason
+```
+
+Exit status 3 means a file is marked at or above `--fail-on` (default
+`vs-nfd`); 1 means none is, but some file could not be read. The whole story —
+what counts as a marking, the grade scale, the report formats — is on
+[Classification markings](Classification-markings.md).
+
 ## Exit codes
 
 | Code | Meaning |
@@ -306,6 +323,7 @@ page into a log, where a carriage return would run the whole run together.
 | 0 | everything worked |
 | 1 | a file failed to scan, or the engine could not be built |
 | 2 | bad arguments: an input that does not exist, or `-o file.json` with several inputs |
+| 3 | `ocrust vs` only: a file is marked at or above `--fail-on` |
 
 A batch keeps going after a failure and reports it on stderr, so one corrupt
 scan in a thousand does not abort the run — the exit code still says 1.

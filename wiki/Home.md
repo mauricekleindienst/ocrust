@@ -28,7 +28,8 @@ Français: déjà payé
 | **[Installation](Installation.md)** | `pip install`, offline installs, GPU builds, what needs no admin rights |
 | **[Quickstart](Quickstart.md)** | The five calls that cover most work |
 | **[Python API](Python-API.md)** | `Ocr`, `Document`, every keyword argument, result objects |
-| **[CLI](CLI.md)** | `scan`, `ocr`, `pdf`, `tiff`, `languages`, `models`, `doctor` |
+| **[CLI](CLI.md)** | `scan`, `ocr`, `pdf`, `tiff`, `vs`, `languages`, `models`, `doctor` |
+| **[Classification markings](Classification-markings.md)** | `ocrust vs`: which files are VS-NfD, GEHEIM, NATO, EU, TLP — marking told apart from mention |
 | **[PDF workflows](PDF-workflows.md)** | Adding a text layer to existing PDFs, and converting anything readable into one |
 | **[Network shares](Network-shares.md)** | UNC paths, mapped drives, retries on a share that drops |
 | **[Languages](Languages.md)** | The 26 covered languages, and why declaring one is a check |
