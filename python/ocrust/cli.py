@@ -1495,7 +1495,9 @@ def _trips(report: markings.MarkingReport, gate: int | None) -> bool:
     if gate is None:
         return False
     if gate == 0:
-        return bool(report.markings)
+        # Anything that restricts who may read it. OFFEN, UNCLASSIFIED and
+        # TLP:CLEAR are markings too, but they say the opposite.
+        return report.level >= 1 or report.tlp not in (None, "CLEAR") or bool(report.company)
     return report.level >= gate
 
 
@@ -1566,7 +1568,9 @@ def _vs_line(path: Path, report: markings.MarkingReport, show_mentions: bool, ou
     details: list[str] = []
     if marked:
         top = [f for f in marked if f.label == head or f"TLP:{f.label}" == head] or list(marked)
-        details.append(_page_ranges([f.page for f in top]))
+        on_pages = [f.page for f in top if f.page > 0]
+        if on_pages:
+            details.append(_page_ranges(on_pages))
         where = sorted({f.reason for f in top}, key=["header", "footer"].__contains__, reverse=True)
         details.append(", ".join(where))
         if all(f.fuzzy for f in top):
@@ -1581,14 +1585,20 @@ def _vs_line(path: Path, report: markings.MarkingReport, show_mentions: bool, ou
         if report.cancelled:
             details.append("a grade is marked as lifted or lowered")
     elif report.mentions:
-        details.append(_count(len(report.mentions), "mention"))
+        named = [f for f in report.mentions if f.reason == "file name"]
+        if named:
+            details.append(f"file name says {named[0].label}")
+        others = len(report.mentions) - len(named)
+        if others:
+            details.append(_count(others, "mention"))
     style = ("red", "bold") if report.level >= 1 else ("amber",) if marked else ("dim",)
     line = f"{_paint(f'{head:<16}', *style, stream=out)} {path}"
     if details:
         line += "  " + _paint(" · ".join(details), "dim", stream=out)
     if show_mentions:
         for f in report.mentions:
-            line += f'\n{"":<17}p. {f.page}: {f.label} in "{f.text}"'
+            place = f"p. {f.page}" if f.page else f.reason
+            line += f'\n{"":<17}{place}: {f.label} in "{f.text}"'
     return line
 
 
@@ -1652,7 +1662,7 @@ def _cmd_vs(args: argparse.Namespace) -> int:
             elif writer is not None:
                 writer.writerow({"source": str(path), "status": "error", "text": result})
         else:
-            report = markings.inspect(result)
+            report = markings.inspect(result, file=None if str(path) == STDIN else path)
             page_total += len(result.pages)
             if _trips(report, gate):
                 tripped += 1

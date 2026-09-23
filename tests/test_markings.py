@@ -299,6 +299,159 @@ def test_tlp_is_reported_beside_the_grades(text, colour):
     assert report.level == 0 and not report.classified
 
 
+# ------------------------------------------------------------------ what the VSA prescribes
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "amtlich geheimgehalten",
+        "AMTLICH GEHEIM GEHALTEN",
+        "auf amtliche Veranlassung geheimgehalten",
+    ],
+)
+def test_amtlich_geheimgehalten_means_at_least_vs_vertraulich(line):
+    # VSA 2023 Anlage IV puts it beside VS-VERTRAULICH, GEHEIM and STRENG
+    # GEHEIM, so on its own it is a lower bound, not a grade.
+    report = _marked(line)
+    assert (report.level, report.label) == (2, "VS (amtlich geheimgehalten)")
+
+
+def test_a_named_grade_beats_the_lower_bound_beside_it():
+    report = _report([("VS-VERTRAULICH", HEADER), ("amtlich geheimgehalten", 150), *BODY])
+    assert (report.level, report.label) == (2, "VS-VERTRAULICH")
+
+
+def test_the_classification_term_line_marks_a_document():
+    report = _report([*BODY, ("Die VS-Einstufung endet mit Ablauf des Jahres 2055.", 900)])
+    assert (report.level, report.label) == (1, "VS")
+    policy = "Auf Seite 1 steht, dass die VS-Einstufung endet mit Ablauf des Jahres."
+    assert _report([*BODY, (policy, 900)]).level == 0
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["Betreff: VS-NfD – Beschaffung von Führungsschienen", "VS-NfD: Beschaffung der Liegenschaft"],
+)
+def test_a_grade_before_the_subject_is_a_marking(line):
+    assert _report([*BODY, (line, 900)]).level == 1
+
+
+def test_offen_and_unclassified_are_markings_that_classify_nothing():
+    report = _marked("OFFEN")
+    assert (report.level, report.label, report.classified) == (0, "OFFEN", False)
+    assert _marked("UNCLASSIFIED").label == "UNCLASSIFIED"
+
+
+def test_an_old_geheim_stamp_with_its_exclamation_mark():
+    assert _marked("Geheim!").level == 3
+    assert _marked("Geheime Kommandosache!").label == "GEHEIME KOMMANDOSACHE"
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "GEHEIME WAHL",
+        "EINGESCHRÄNKTE HAFTUNG",
+        "VERTRAULICHE MITTEILUNG",
+        "PERSONNEL ET CONFIDENTIEL",
+    ],
+)
+def test_an_inflected_word_is_not_repaired_into_a_grade(heading):
+    # The OCR repair used to read GEHEIME as GEHEIM one edit away.
+    report = _marked(heading)
+    assert report.level == 0
+    assert not any(f.fuzzy for f in report.findings)
+
+
+def test_official_sensitive_is_found_without_its_hyphen():
+    assert _marked("OFFICIAL SENSITIVE").label == "UK OFFICIAL-SENSITIVE"
+
+
+@pytest.mark.parametrize(
+    ("line", "label"),
+    [
+        ("INTERNE", "CH INTERN"),
+        ("AD USO INTERNO", "CH INTERN"),
+        ("CONFIDENZIALE", "CH VERTRAULICH"),
+    ],
+)
+def test_the_swiss_grades_in_french_and_italian(line, label):
+    report = _report(
+        [(line, HEADER), ("Confédération suisse, Schweizerische Eidgenossenschaft", 300)]
+    )
+    assert report.label == label
+
+
+def test_the_tlp_explainer_is_not_tlp_red():
+    # The BSI's own explainer is TLP:CLEAR and then lists every colour.
+    report = _report(
+        [
+            ("TLP:CLEAR", HEADER),
+            ("TLP:RED", 500),
+            ("TLP:AMBER+STRICT", 600),
+            ("TLP:AMBER", 700),
+            ("TLP:GREEN", 800),
+        ]
+    )
+    assert report.tlp == "CLEAR"
+
+
+def test_a_specimen_page_shows_markings_without_carrying_them():
+    report = _report([("GEHEIM", HEADER), ("MUSTER", 1000), *BODY, ("GEHEIM", FOOTER)])
+    assert report.level == 0
+    assert {f.reason for f in report.mentions} == {"specimen"}
+
+
+def test_a_release_stamp_flags_the_grade_as_lifted():
+    report = _report([("SECRET", HEADER), ("Approved For Release 2005/01/12", 150), *BODY])
+    assert report.cancelled
+
+
+def test_a_unicode_nfd_heading_is_not_vs_nfd():
+    assert _marked("NFD").findings == ()
+    assert _marked("NfD").level == 1
+
+
+# ------------------------------------------------------------------ the file itself
+
+
+def test_a_sensitivity_label_in_the_metadata_is_a_marking(tmp_path):
+    # How Acrobat and the MIP SDK leave it in XMP; the page shows nothing.
+    guid = "1b2c3d4e-0000-4000-8000-00000000abcd"
+    pdf = tmp_path / "bericht.pdf"
+    pdf.write_bytes(
+        b"%PDF-1.7\n<x:xmpmeta><rdf:Description "
+        + f'pdfx:MSIP_Label_{guid}_Enabled="true" pdfx:MSIP_Label_{guid}_Name="VS-NfD"'.encode()
+        + b"/></x:xmpmeta>\n%%EOF\n"
+    )
+    report = markings.inspect(_doc(BODY), file=pdf)
+    assert (report.level, report.label) == (1, "VS-NfD")
+    (label,) = report.markings
+    assert (label.page, label.reason) == (0, "sensitivity label")
+    assert report.pages == (0,), "evidence from the file belongs to no page"
+
+
+def test_a_label_that_names_no_grade_is_still_reported(tmp_path):
+    guid = "1b2c3d4e-0000-4000-8000-00000000abcd"
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(f"/MSIP_Label_{guid}_Name (Highly Confidential)".encode())
+    assert markings.inspect(_doc(BODY), file=pdf).company == "CONFIDENTIAL"
+    pdf.write_bytes(f"/MSIP_Label_{guid}_Name (Public)".encode())
+    report = markings.inspect(_doc(BODY), file=pdf)
+    assert (report.level, report.label) == (0, "Public")
+
+
+def test_a_grade_in_the_file_name_is_a_hint_not_a_marking(tmp_path):
+    named = tmp_path / "Merkblatt_VS-NfD.pdf"
+    named.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    report = markings.inspect(_doc(BODY), file=named)
+    assert report.level == 0
+    assert [(f.kind, f.reason, f.label) for f in report.findings] == [
+        ("mention", "file name", "VS-NfD")
+    ]
+
+
 # ------------------------------------------------------------------ the document
 
 

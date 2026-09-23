@@ -32,10 +32,12 @@ company markings are reported beside that scale, not on it.
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ._types import Box, Document, Line, Page, _box_for_span
@@ -83,11 +85,21 @@ _TLP_ORDER = ("CLEAR", "GREEN", "AMBER", "AMBER+STRICT", "RED")
 _COMPANY_ORDER = {
     "INTERNAL": 1,
     "INTERN": 1,
+    "RESTRICTED": 2,
     "CONFIDENTIAL": 2,
     "VERTRAULICH": 2,
     "GESCHÄFTSGEHEIMNIS": 3,
     "STRENG VERTRAULICH": 3,
 }
+
+
+#: Labels that say a document is classified without naming the grade.
+_LOWER_BOUNDS = frozenset({"VS", "VS (amtlich geheimgehalten)", "US CLASSIFIED"})
+
+
+def label_names_grade(label: str) -> int:
+    """1 when `label` names a grade, 0 when it only bounds one from below."""
+    return int(label not in _LOWER_BOUNDS)
 
 
 def level_for(name: str) -> int:
@@ -121,7 +133,8 @@ class Finding:
     text: str
     #: The part of the line that matched.
     match: str
-    #: 1-based page number.
+    #: 1-based page number; 0 for evidence from the file itself (its
+    #: sensitivity label, its name) rather than from a page.
     page: int
     box: Box
     confidence: float
@@ -186,16 +199,18 @@ class MarkingReport:
         """Canonical name of the highest grade, or ``None`` when unmarked.
 
         When several names share the top level (``GEHEIM`` in the header,
-        ``NATO SECRET`` in a stamp), the one read most often wins, and a clean
-        read beats one that needed an OCR confusion undone.
+        ``NATO SECRET`` in a stamp), a name beats a lower bound ("amtlich
+        geheimgehalten" says VS-VERTRAULICH or above), a clean read beats one
+        that needed an OCR confusion undone, and then the one read most often
+        wins.
         """
         top = [f for f in self._graded() if f.level == self.level]
         if not top:
             return None
-        tally: dict[str, tuple[int, int]] = {}
+        tally: dict[str, tuple[int, int, int]] = {}
         for f in top:
-            clean, seen = tally.get(f.label, (0, 0))
-            tally[f.label] = (clean + (not f.fuzzy), seen + 1)
+            named, clean, seen = tally.get(f.label, (0, 0, 0))
+            tally[f.label] = (label_names_grade(f.label), clean + (not f.fuzzy), seen + 1)
         return max(tally, key=lambda label: tally[label])
 
     @property
@@ -277,6 +292,10 @@ class _Term:
     #: An abbreviation (NFD, GVS, CUI) means something else in running text
     #: far more often than it names a grade, so it is reported only as a marking.
     marking_only: bool = False
+    #: A line only a classified document carries, recognised by how it starts
+    #: ("Die VS-Einstufung endet mit Ablauf des Jahres 2055", "Classified By:"):
+    #: a marking whatever follows it.
+    anchored: bool = False
 
 
 def _t(
@@ -285,8 +304,9 @@ def _t(
     distinctive: bool = True,
     fuzzy_only: bool = False,
     marking_only: bool = False,
+    anchored: bool = False,
 ) -> _Term:
-    return _Term(re.compile(regex), key, distinctive, fuzzy_only, marking_only)
+    return _Term(re.compile(regex), key, distinctive, fuzzy_only, marking_only, anchored)
 
 
 # Written against the folded text: capitals, no diacritics, every dash a
@@ -305,7 +325,22 @@ _TERMS: tuple[_Term, ...] = (
     _t(rf"\bVS{_S}-?{_S}{_NFD}", "de:1"),
     _t(r"\bVS\s*[-.]?\s*N\s*\.?\s*[FTIL]\s*\.?\s*[DO]\b", "de:1", fuzzy_only=True),
     _t(rf"\bVS{_S}-{_S}VERTRAULICH\b|\bVS{_S}VERTRAULICH\b", "de:2"),
-    _t(rf"\bAMTLICH{_S}GEHEIM{_S}GEHALTEN\b", "de:3:historic"),
+    _t(r"\bVS\s*-\s*VERTR\.", "de:2"),
+    _t(r"(?<![A-Z])VS\s*-\s*V(?![A-Z-])", "de:2", False, marking_only=True),
+    # Not a grade of its own: VSA 2023 puts it beside VS-VERTRAULICH and above,
+    # so on its own it says "at least VS-VERTRAULICH".
+    _t(
+        rf"\b(?:AMTLICH|AUF{_S}AMTLICHE{_S}VERANLASSUNG){_S}GEHEIM{_S}GEHALTEN\b",
+        "de:2:amtlich",
+    ),
+    _t(
+        r"^\s*DIE\s+VS\s*-?\s*EINSTUFUNG\s+ENDET\s+MIT\s+ABLAUF\s+DES\s+JAHRES\s+\d{4}",
+        "de:vs:term",
+        anchored=True,
+    ),
+    _t(rf"\bGEHEIME{_S}KOMMANDOSACHE\b", "de:4:gkdos"),
+    _t(r"(?<![A-Z])G\.?\s?KDOS\.?(?![A-Z])", "de:4:gkdos", False, marking_only=True),
+    _t(rf"\bGEHEIME{_S}REICHSSACHE\b", "de:4:grs"),
     _t(rf"\bSTRENG{_S}GEHEIM\b", "ctx:4", distinctive=False),
     _t(r"(?<![A-Z])GEHEIM(?![A-Z])", "ctx:3", distinctive=False),
     _t(r"\bVERSCHLUS{2,3}ACHE\b", "de:vs"),
@@ -319,7 +354,19 @@ _TERMS: tuple[_Term, ...] = (
     # --- Austria and Switzerland (grades shared with Germany resolve by context)
     _t(r"(?<![A-Z])EINGESCHRANKT(?![A-Z])", "at:1", distinctive=False),
     _t(r"(?<![A-Z])VERTRAULICH(?![A-Z])", "ctx:vertraulich", distinctive=False),
-    _t(r"(?<![A-Z])INTERN(?![A-Z])", "ctx:intern", distinctive=False),
+    _t(r"(?<![A-Z])INTERNE?(?![A-Z])", "ctx:intern", distinctive=False),
+    _t(rf"\bAD{_S}USO{_S}INTERNO\b", "ctx:intern"),
+    _t(r"(?<![A-Z])CONFIDENZIALE(?![A-Z])", "ctx:confidenziale", distinctive=False),
+    _t(r"(?<![A-Z])CONFIDENTIEL(?![A-Z])", "ctx:confidenziale", distinctive=False),
+    _t(r"(?<![A-Z])SEGRETO(?![A-Z])", "ctx:segreto", distinctive=False),
+    # --- Italy
+    _t(r"(?<![A-Z])RISERVATO(?![A-Z])", "it:1", distinctive=False),
+    _t(r"(?<![A-Z])RISERVATISSIMO(?![A-Z])", "it:2", distinctive=False),
+    _t(r"(?<![A-Z])SEGRETISSIMO(?![A-Z])", "it:4", distinctive=False),
+    # --- Explicitly unclassified: a marking, at level 0
+    _t(r"(?<![A-Z])OFFEN(?![A-Z])", "open:de:OFFEN", False, marking_only=True),
+    _t(r"(?<![A-Z])UNCLASSIFIED(?![A-Z])", "open:intl:UNCLASSIFIED", False, marking_only=True),
+    _t(rf"\bNOT{_S}PROTECTIVELY{_S}MARKED\b", "open:uk:NOT PROTECTIVELY MARKED"),
     # --- NATO
     _t(rf"\bNATO{_S}UNCLASSIFIED\b", "nato:0"),
     _t(rf"\bNATO{_S}RESTRICTED\b", "nato:1"),
@@ -338,7 +385,13 @@ _TERMS: tuple[_Term, ...] = (
     _t(rf"\bTRES{_S}SECRET{_S}DEFENSE\b", "fr:4"),
     _t(rf"(?<![A-Z])TRES{_S}SECRET(?![A-Z])", "fr:4:bare", distinctive=False),
     # --- United Kingdom and United States
-    _t(rf"\bOFFICIAL{_S}-{_S}SENSITIVE\b", "uk:1"),
+    _t(rf"\bOFFICIAL{_S}-?{_S}SENSITIVE\b", "uk:1"),
+    _t(r"(?<![A-Z])RESTRICTED(?![A-Z])", "ctx:restricted", distinctive=False),
+    _t(
+        r"^\s*(?:CLASSIFIED\s+BY|DECLASSIFY\s+ON|DERIVED\s+FROM)\s*:",
+        "us:2:block",
+        anchored=True,
+    ),
     _t(rf"\bFOR{_S}OFFICIAL{_S}USE{_S}ONLY\b", "us:1:fouo"),
     _t(rf"\bCONTROLLED{_S}UNCLASSIFIED{_S}INFORMATION\b", "us:1:cui"),
     _t(r"(?<![A-Z])CUI(?![A-Z])", "us:1:cui", False, marking_only=True),
@@ -346,7 +399,7 @@ _TERMS: tuple[_Term, ...] = (
     _t(r"(?<![A-Z])SECRET(?![A-Z])", "ctx:3:en", distinctive=False),
     _t(r"(?<![A-Z])CONFIDENTIAL(?![A-Z])", "ctx:confidential", distinctive=False),
     # --- Traffic Light Protocol (FIRST, 2.0; WHITE is 1.0's CLEAR)
-    _t(r"\bTLP\s*[:.]?\s*(?:RED|AMBER\s*\+\s*STRICT|AMBER|GREEN|CLEAR|WHITE)\b", "tlp"),
+    _t(r"\bTLP\s*[:.;,-]?\s*(?:RED|AMBER\s*\+\s*STRICT|AMBER|GREEN|CLEAR|WHITE)\b", "tlp"),
     # --- Company markings
     _t(rf"\bSTRENG{_S}VERTRAULICH\b|\bSTRICTLY{_S}CONFIDENTIAL\b", "company:STRENG VERTRAULICH"),
     _t(rf"\bNUR{_S}FUE?R{_S}DEN{_S}INTERNEN{_S}GEBRAUCH\b", "company:INTERN"),
@@ -390,11 +443,13 @@ _ACCESSORIES = re.compile(
 )
 
 _CANCELLATION = re.compile(
-    r"\b(?:AUFGEHOBEN|HERABGESTUFT|ENTSTUFT|DECLASSIFIED|DOWNGRADED|DECLASSIFIE)\b"
+    r"\b(?:AUFGEHOBEN|HERABGESTUFT|ENTSTUFT|DECLASSIFIED|DOWNGRADED|DECLASSIFIE|SANITIZED|"
+    r"PUBLICLY\s+DISCLOSED|MISE?\s+EN\s+LECTURE\s+PUBLIQUE|APPROVED\s+FOR\s+RELEASE)\b"
 )
 _CAVEATS = re.compile(
     r"\b(?:NOFORN|ORCON|PROPIN|RELIDO|IMCON|FVEY|ATOMAL|CRYPTO|BOHEMIA|BALK|EXDIS|LIMDIS|"
-    r"SPERRVERMERK|NUR\s+FUE?R\s+DEUTSCHE|NICHT\s+FUE?R\s+AUSLANDER)\b"
+    r"SPERRVERMERK|CHEFSACHE|UK\s+EYES\s+ONLY|RECIPIENTS\s+ONLY|HMG\s+USE\s+ONLY|"
+    r"SPECIAL\s+FRANCE|PERSONLICH|NUR\s+FUE?R\s+DEN\s+EMPFANGER)\b"
     r"|\bREL(?:EASABLE)?\s+TO\s+[A-Z]{2,}(?:\s*,\s*[A-Z]{2,})*"
 )
 _NEGATION = re.compile(r"\b(?:NICHT|KEIN|KEINE|KEINER|NOT|NON|NIE|NEVER|OHNE)\b")
@@ -408,8 +463,8 @@ _CUES = {
         r"GZ\s*[:.]?\s*\d|LANDESVERTEIDIGUNG|BUNDESKANZLERAMT\s+OSTERREICH)\b"
     ),
     "ch": re.compile(
-        r"\b(?:SCHWEIZ\w*|EIDGENOSSI\w*|CONFEDERATION|BERN|VBS|ISCHV|ISV|INFOSIV|"
-        r"BUNDESKANZLEI|KANTON\w*|ARMEE\s+SUISSE|FEDPOL|NDB)\b"
+        r"\b(?:SCHWEIZ\w*|EIDGENOSSI\w*|CONFEDERATION\s+SUISSE|CONFEDERAZIONE\s+SVIZZERA|"
+        r"VBS|DDPS|ISCHV|ISV|BUNDESKANZLEI|KANTON\w*|ARMEE\s+SUISSE|FEDPOL|NDB)\b"
     ),
     "us": re.compile(
         r"\b(?:CLASSIFIED\s+BY|DECLASSIFY\s+ON|DERIVED\s+FROM|DEPARTMENT\s+OF|UNITED\s+STATES|"
@@ -429,9 +484,14 @@ _BAND = 0.12
 # ------------------------------------------------------------------ folding
 
 
+_INVISIBLE = set("\u00ad\u200b\u200c\u200d\u2060\ufeff")
+
+
 def _fold_char(ch: str) -> str:
     if ch in _DASHES:
         return "-"
+    if ch in _INVISIBLE:
+        return ""  # a soft hyphen or zero-width space splits a word only on screen
     decomposed = unicodedata.normalize("NFKD", ch)
     plain = "".join(c for c in decomposed if not unicodedata.combining(c)).upper()
     return plain.replace("ẞ", "SS")
@@ -515,7 +575,30 @@ def _repaired(view: _View, original: str) -> _View:
     return _View("".join(out), out_origin, fuzzy=True)
 
 
+#: Real words one edit from a grade word; OCR did not damage them.
+_NOT_REPAIRED = frozenset(
+    {
+        "CONFIDENTIEL",
+        "DECLASSIFIED",
+        "STRONG",
+        "GEHEIME",
+        "VERTRAULICHE",
+        "EINGESCHRANKTE",
+        "RESTRICTEDLY",
+        "CONFIDENTIALLY",
+    }
+)
+#: Endings that turn a grade word into an ordinary one: GEHEIME WAHL,
+#: EINGESCHRÄNKTE HAFTUNG, VERTRAULICHE MITTEILUNG.
+_INFLECTIONS = ("E", "EN", "ER", "ES", "EM", "S", "N", "LY")
+
+
 def _closest(word: str) -> str | None:
+    if word in _VOCABULARY or word in _NOT_REPAIRED:
+        return None
+    for target in _VOCABULARY:
+        if word.startswith(target) and word[len(target) :] in _INFLECTIONS:
+            return None
     for target in _VOCABULARY:
         budget = 1 if len(target) < 10 else 2
         if abs(len(target) - len(word)) <= budget and _distance(word, target, budget) <= budget:
@@ -635,7 +718,7 @@ def _context(line_text: str, hits: Sequence[_Hit]) -> _Context:
         caveats.append(" ".join(m.group().split()))
         for i in range(s, e):
             covered[i] = True
-    for m in _ACCESSORIES.finditer(folded.text):
+    for m in (*_ACCESSORIES.finditer(folded.text), *_CANCELLATION.finditer(folded.text)):
         if m.end() > m.start():
             s, e = folded.span(m.start(), m.end())
             for i in range(s, e):
@@ -665,8 +748,17 @@ def _verdict(hit: _Hit, ctx: _Context, zone: str, line_text: str) -> str | None:
         # A lowercase l inside capitals is the I that OCR misread (GEHElM).
         original = original.replace("l", "I")
     capitals = not any(c.islower() for c in original)
-    if not hit.term.distinctive and not capitals:
-        # "die Wahl ist geheim", "vertraulich behandeln": the word, not a grade.
+    if hit.term.key.endswith(":nfd"):
+        if "f" not in original:
+            return None  # the grade is abbreviated NfD; NFD is a Unicode normal form
+        capitals = True  # and that lowercase f is how it is written
+    if hit.term.anchored:
+        return "marking: " + ("classification block" if "block" in hit.term.key else "VS term")
+    # "die Wahl ist geheim", "vertraulich behandeln": the word, not a grade.
+    # An old stamp reads "Geheim!", which is why a lone word with an
+    # exclamation mark still counts.
+    exclaimed = line_text[hit.orig_end :].lstrip().startswith("!") and ctx.words == 0
+    if not hit.term.distinctive and not capitals and not exclaimed:
         return None
     if _compound(hit.view, hit):
         return "mention: compound word"
@@ -674,6 +766,10 @@ def _verdict(hit: _Hit, ctx: _Context, zone: str, line_text: str) -> str | None:
         return "mention: negated"
     if ctx.words == 0:
         return f"marking: {zone if zone != 'body' else 'standalone'}"
+    if hit.term.distinctive and _leads(line_text, hit):
+        # "Betreff: VS-NfD – Beschaffung …": the VSA puts the grade before an
+        # e-mail's subject, and a grade opening a line reads the same way.
+        return "marking: subject line"
     if zone != "body":
         if hit.term.distinctive and ctx.lowercase <= 1 and ctx.words <= 6:
             return f"marking: {zone}"
@@ -682,6 +778,16 @@ def _verdict(hit: _Hit, ctx: _Context, zone: str, line_text: str) -> str | None:
     elif hit.term.distinctive and ctx.lowercase == 0 and ctx.words <= 2:
         return "marking: short line"
     return "mention: running text"
+
+
+_LEADERS = re.compile(r"^\s*(?:(?:BETREFF|SUBJECT|OBJET|OGGETTO|AW|WG|RE|FW|FWD)\s*:\s*)*$")
+
+
+def _leads(line_text: str, hit: _Hit) -> bool:
+    """Whether the grade opens the line and a separator follows it."""
+    before = _folded(line_text[: hit.orig_start]).text
+    after = line_text[hit.orig_end :].lstrip()
+    return bool(_LEADERS.match(before)) and after[:1] in (":", "-", "–", "—", "|", "/")
 
 
 def _cues(document: Document) -> set[str]:
@@ -697,8 +803,15 @@ def _resolve(key: str, cues: set[str], matched: str) -> tuple[str, int, str] | N
     english = "us" if "us" in cues else "uk" if "uk" in cues else "fr" if "fr" in cues else None
     if head == "de":
         if parts[1] == "vs":
-            return "de", 1, "VS"
+            return "de", 1, "VS"  # a VS whose grade the line does not name
         level = int(parts[1])
+        special = parts[2] if len(parts) > 2 else ""
+        if special == "amtlich":
+            return "de", 2, "VS (amtlich geheimgehalten)"
+        if special == "gkdos":
+            return "de", 4, "GEHEIME KOMMANDOSACHE"
+        if special == "grs":
+            return "de", 4, "GEHEIME REICHSSACHE"
         label = LEVELS[level]
         if country == "at" and level in (3, 4):
             return "at", level, f"AT {label}"
@@ -708,6 +821,19 @@ def _resolve(key: str, cues: set[str], matched: str) -> tuple[str, int, str] | N
         return "ddr", level, {1: "VD", 2: "VVS", 3: "GVS"}[level]
     if head == "at":
         return "at", 1, "AT EINGESCHRÄNKT"
+    if head == "it":
+        level = int(parts[1])
+        return (
+            "it",
+            level,
+            {
+                1: "IT RISERVATO",
+                2: "IT RISERVATISSIMO",
+                4: "IT SEGRETISSIMO",
+            }[level],
+        )
+    if head == "open":
+        return parts[1], 0, parts[2]
     if head == "nato":
         level = int(parts[1])
         return (
@@ -748,9 +874,11 @@ def _resolve(key: str, cues: set[str], matched: str) -> tuple[str, int, str] | N
     if head == "uk":
         return "uk", 1, "UK OFFICIAL-SENSITIVE"
     if head == "us":
+        if parts[2] == "block":
+            return "us", 2, "US CLASSIFIED"  # a grade is certain, which one is not
         return "us", 1, "US CUI" if parts[2] == "cui" else "US FOUO"
     if head == "tlp":
-        colour = re.sub(r"\s+", "", matched.split("TLP", 1)[1].lstrip(" :."))
+        colour = re.sub(r"[\s:.;,-]+", "", matched.split("TLP", 1)[1])
         colour = "CLEAR" if colour == "WHITE" else colour
         return "tlp", 0, f"TLP:{colour}"
     if head == "company":
@@ -770,41 +898,66 @@ def _resolve(key: str, cues: set[str], matched: str) -> tuple[str, int, str] | N
         if country == "ch":
             return "ch", 1, "CH INTERN"
         return "company", 0, "INTERN"
+    if what == "confidenziale":  # Swiss French and Italian VERTRAULICH
+        if country == "ch":
+            return "ch", 2, "CH VERTRAULICH"
+        return "company", 0, "CONFIDENTIAL"
+    if what == "segreto":
+        if country == "ch":
+            return "ch", 3, "CH GEHEIM"
+        return "it", 3, "IT SEGRETO"
     if what == "confidential":
         if english in ("us", "uk"):
             return english, 2, f"{english.upper()} CONFIDENTIAL"
         return "company", 0, "CONFIDENTIAL"
+    if what == "restricted":
+        if english in ("us", "uk"):
+            return english, 1, f"{english.upper()} RESTRICTED"
+        return "company", 0, "RESTRICTED"
     if what in ("3", "4"):  # SECRET, TOP SECRET
         level = int(what)
         name = "TOP SECRET" if level == 4 else "SECRET"
+        if country == "ch" and level == 3:
+            return "ch", 3, "CH GEHEIM"  # the French form of the Swiss grade
         if english:
             return english, level, f"{english.upper()} {name}"
         return "intl", level, name
     return None
 
 
-def _grade_lists(findings: list[Finding]) -> list[Finding]:
-    """Demotes a page that lists the grades — a directive, a training slide —
-    from markings to mentions.
+def _grade_lists(findings: list[Finding], specimens: set[int]) -> list[Finding]:
+    """Demotes what only looks like marking to mentions.
 
-    Such a page shows three or more different grades standing alone in its
-    body, and no grade in its header or footer, which a marked page would have.
+    A page that lists the grades — a directive, a training slide, the TLP
+    explainer that is itself TLP:CLEAR — shows three or more different grades
+    of one kind standing alone in its body. Whether its own header carries a
+    grade does not matter: a VS-NfD training handout lists STRENG GEHEIM
+    without being STRENG GEHEIM. A page stamped MUSTER or SPECIMEN shows
+    markings as examples, and every marking on it is one.
     """
-    by_page: dict[int, list[int]] = {}
+    families: dict[tuple[int, str], list[int]] = {}
     for i, f in enumerate(findings):
-        if f.kind == "marking" and f.scheme not in ("tlp", "company"):
-            by_page.setdefault(f.page, []).append(i)
-    demote: set[int] = set()
-    for idxs in by_page.values():
-        body = [i for i in idxs if findings[i].reason in ("standalone", "short line")]
-        banded = [i for i in idxs if findings[i].reason in ("header", "footer")]
-        if not banded and len({findings[i].level for i in body}) >= 3:
-            demote.update(body)
+        if f.kind != "marking" or f.reason not in ("standalone", "short line"):
+            continue
+        if f.scheme == "company":
+            continue
+        family = "tlp" if f.scheme == "tlp" else "grade"
+        families.setdefault((f.page, family), []).append(i)
+    demote: dict[int, str] = {}
+    for (_, family), idxs in families.items():
+        distinct = {findings[i].label if family == "tlp" else findings[i].level for i in idxs}
+        if len(distinct) >= 3:
+            demote.update(dict.fromkeys(idxs, "list of grades"))
+    for i, f in enumerate(findings):
+        if f.kind == "marking" and f.page in specimens:
+            demote[i] = "specimen"
     out = list(findings)
-    for i in demote:
-        f = out[i]
-        out[i] = Finding(**{**f.__dict__, "kind": "mention", "reason": "list of grades"})
+    for i, reason in demote.items():
+        out[i] = Finding(**{**out[i].__dict__, "kind": "mention", "reason": reason})
     return out
+
+
+_SPECIMEN = re.compile(r"^\W*(?:MUSTER|SPECIMEN|EXEMPLE|ESEMPIO|SAMPLE)\W*$")
 
 
 def _pieces(line: Line) -> tuple[Line, ...]:
@@ -841,14 +994,24 @@ def _pieces(line: Line) -> tuple[Line, ...]:
     return tuple(built)
 
 
-def inspect(document: Document) -> MarkingReport:
+def inspect(document: Document, *, file: str | os.PathLike[str] | None = None) -> MarkingReport:
     """Finds the classification markings in a scanned document.
 
     Works on what the scan read, so it sees what a person sees on the page —
     stamps, headers, footers — whatever the file format.
+
+    Args:
+        document: A scan result.
+        file: The file it was read from. When given, the file's own evidence
+            is added: a sensitivity label an Office or MIP tool stored in its
+            metadata counts as a marking; a grade in the file name, which the
+            VSA asks for, is reported as a mention — ``Merkblatt_VS-NfD.pdf``
+            names a grade without carrying one.
     """
     cues = _cues(document)
     findings: list[Finding] = []
+    if file is not None:
+        findings.extend(_file_evidence(Path(file), cues))
     page_levels: list[int] = []
     cancelled = False
     # The line the latest finding came from and where on it, for merging the
@@ -857,6 +1020,7 @@ def inspect(document: Document) -> MarkingReport:
     last_line: Line | None = None
     last_start = last_end = 0
     numbers: list[int] = []
+    specimens: set[int] = set()
     for page in document.pages:
         # The page's own number in the source, so a finding points at the
         # right page when only some of them were scanned.
@@ -874,9 +1038,13 @@ def inspect(document: Document) -> MarkingReport:
             if not text.strip():
                 continue
             zone = _zone(line, page)
+            if not any(c.islower() for c in text) and _SPECIMEN.match(_folded(text).text):
+                specimens.add(number)
             hits = _hits(text, zone)
             ctx = _context(text, hits)
-            if ctx.cancelled and ctx.words == 0:
+            if ctx.cancelled and ctx.lowercase <= 1 and ctx.words <= 6:
+                # A stamp ("Approved For Release 2005/01/12", "VS-NfD
+                # aufgehoben"), not a sentence about lifting grades.
                 cancelled = True
             for hit in hits:
                 verdict = _verdict(hit, ctx, zone, text)
@@ -938,9 +1106,11 @@ def inspect(document: Document) -> MarkingReport:
                     cancelled = True
         page_levels.append(0)
 
-    findings = _grade_lists(findings)
+    findings = _grade_lists(findings, specimens)
     position = {number: i for i, number in enumerate(numbers)}
     for f in findings:
+        if f.page == 0:
+            continue  # the file's own evidence belongs to no page
         if f.kind == "marking" and f.scheme not in ("tlp", "company"):
             i = position[f.page]
             page_levels[i] = max(page_levels[i], f.level)
@@ -950,6 +1120,76 @@ def inspect(document: Document) -> MarkingReport:
         pages=tuple(page_levels),
         cancelled=cancelled,
         page_numbers=tuple(numbers),
+    )
+
+
+#: A Microsoft Information Protection label's display name, as Office, Acrobat
+#: and the MIP SDK store it: an XMP element or attribute, or a PDF string.
+_MSIP_NAME = re.compile(
+    rb"MSIP_Label_[0-9A-Fa-f-]{36}_Name\s*(?:>|=\s*[\"']|\()\s*([^<\"')\r\n]{1,120})"
+)
+#: Enough of a large file to hold its metadata: XMP sits near the start of a
+#: PDF, the Info dictionary and an incremental update near the end.
+_METADATA_WINDOW = 8 << 20
+
+
+def _file_evidence(path: Path, cues: set[str]) -> list[Finding]:
+    """Sensitivity labels in the file's metadata, and a grade in its name."""
+    found: list[Finding] = []
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            head = fh.read(_METADATA_WINDOW)
+            tail = b""
+            if size > 2 * _METADATA_WINDOW:
+                fh.seek(size - _METADATA_WINDOW)
+                tail = fh.read()
+            elif size > _METADATA_WINDOW:
+                tail = fh.read()
+    except OSError:
+        head = tail = b""
+    names: dict[str, None] = {}
+    for m in _MSIP_NAME.finditer(head + tail):
+        names.setdefault(m.group(1).decode("utf-8", "replace").strip(), None)
+    for name in names:
+        # A label is a deliberate classification: read it as if stamped alone
+        # on a page, in capitals, whatever case the tenant spelled it in.
+        resolved = _resolve_alone(name.upper(), cues)
+        scheme, level, label = resolved or ("label", 0, name)
+        found.append(_evidence(name, scheme, level, label, "marking", "sensitivity label"))
+    stem = re.sub(r"[_.]+", " ", path.stem)
+    for hit in _hits(stem, "header"):
+        if not hit.term.distinctive:
+            continue  # "geheim" in a file name is a word, not a stamp
+        resolved = _resolve(hit.term.key, cues, hit.view.text[hit.start : hit.end])
+        if resolved is not None:
+            found.append(_evidence(path.name, *resolved, "mention", "file name"))
+    return found
+
+
+def _resolve_alone(text: str, cues: set[str]) -> tuple[str, int, str] | None:
+    """The grade `text` names when it stands alone, or ``None``."""
+    best: tuple[str, int, str] | None = None
+    for hit in _hits(text, "header"):
+        resolved = _resolve(hit.term.key, cues, hit.view.text[hit.start : hit.end])
+        if resolved is not None and (best is None or resolved[1] > best[1]):
+            best = resolved
+    return best
+
+
+def _evidence(text: str, scheme: str, level: int, label: str, kind: str, reason: str) -> Finding:
+    return Finding(
+        kind=kind,
+        scheme=scheme,
+        level=level,
+        label=label,
+        text=text,
+        match=text,
+        page=0,
+        box=Box(0.0, 0.0, 0.0, 0.0),
+        confidence=1.0,
+        fuzzy=False,
+        reason=reason,
     )
 
 
