@@ -166,18 +166,16 @@ impl Engine {
             // so this is a knob rather than a guess.
             config.page_workers = 1;
         }
-        config.page_workers = config.page_workers.clamp(1, cores.max(1) * 2);
         let mut session = config.session.clone();
-        // Split the cores between page workers rather than letting each worker
-        // ask for all of them: that oversubscription is what made naive
-        // page-level parallelism slower than a single worker.
-        if session.intra_threads == 0 && config.page_workers > 1 {
-            session.intra_threads = (cores / config.page_workers).max(1);
-        }
-        // Give each worker its own session so page-level parallelism is real.
-        if session.replicas <= 1 {
-            session.replicas = config.page_workers.clamp(1, 4);
-        }
+        let plan = plan_parallelism(
+            cores,
+            config.page_workers,
+            session.intra_threads,
+            session.replicas,
+        );
+        config.page_workers = plan.workers;
+        session.intra_threads = plan.intra_threads;
+        session.replicas = plan.replicas;
 
         let detector = TextDetector::new(&model_set.detection, config.detector.clone(), &session)?;
         let recognizer = TextRecognizer::new(
@@ -823,6 +821,53 @@ fn already_read(blocks: &[Block], text: &str, bbox: &Rect) -> bool {
     })
 }
 
+/// How a machine's cores are shared out between page workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Parallelism {
+    /// Pages in flight at once.
+    pub workers: usize,
+    /// Threads each inference may use; 0 leaves it to ONNX Runtime.
+    pub intra_threads: usize,
+    /// Sessions per model; a worker waits for one to be free.
+    pub replicas: usize,
+}
+
+/// Shares `cores` out between `workers`, unless threads or replicas were set.
+///
+/// Every worker gets a session of its own and the cores are divided between
+/// them, so that `workers × threads ≈ cores`: letting each worker ask for
+/// every core is the oversubscription that made naive page parallelism slower
+/// than a single worker. Sessions used to stop at four, which on a larger
+/// machine left workers queueing for a session while their share of the cores
+/// sat idle — sixteen workers on sixteen cores ran four inferences of one
+/// thread each.
+pub fn plan_parallelism(
+    cores: usize,
+    workers: usize,
+    intra_threads: usize,
+    replicas: usize,
+) -> Parallelism {
+    let cores = cores.max(1);
+    let workers = workers.clamp(1, cores * 2);
+    let replicas = if replicas <= 1 {
+        workers.min(cores)
+    } else {
+        replicas
+    };
+    // The inferences that can run at once are bounded by the sessions.
+    let running = workers.min(replicas).max(1);
+    let intra_threads = if intra_threads == 0 && workers > 1 {
+        (cores / running).max(1)
+    } else {
+        intra_threads
+    };
+    Parallelism {
+        workers,
+        intra_threads,
+        replicas,
+    }
+}
+
 /// Per-call overrides for one page.
 ///
 /// Reading a document and writing a text layer over it want different things:
@@ -1001,6 +1046,41 @@ mod tests {
             (back.x0, back.y0, back.x1, back.y1),
             (100.0, 50.0, 400.0, 80.0)
         );
+    }
+
+    #[test]
+    fn every_worker_gets_a_session_and_a_share_of_the_cores() {
+        // Sixteen workers on sixteen cores: sixteen sessions of one thread,
+        // not four sessions that the other twelve workers queue for.
+        let plan = plan_parallelism(16, 16, 0, 0);
+        assert_eq!(
+            (plan.workers, plan.replicas, plan.intra_threads),
+            (16, 16, 1)
+        );
+        // Four workers on sixteen cores: four threads each.
+        let plan = plan_parallelism(16, 4, 0, 0);
+        assert_eq!((plan.workers, plan.replicas, plan.intra_threads), (4, 4, 4));
+        // One worker leaves the threads to ONNX Runtime.
+        let plan = plan_parallelism(8, 1, 0, 0);
+        assert_eq!((plan.workers, plan.replicas, plan.intra_threads), (1, 1, 0));
+    }
+
+    #[test]
+    fn more_workers_than_cores_share_the_sessions() {
+        // Eight workers on four cores keep a page decoding while another is
+        // inferred, but there is no point in more sessions than cores.
+        let plan = plan_parallelism(4, 8, 0, 0);
+        assert_eq!((plan.workers, plan.replicas, plan.intra_threads), (8, 4, 1));
+        assert_eq!(plan_parallelism(4, 100, 0, 0).workers, 8);
+    }
+
+    #[test]
+    fn explicit_threads_and_replicas_are_kept() {
+        let plan = plan_parallelism(16, 8, 3, 2);
+        assert_eq!((plan.workers, plan.replicas, plan.intra_threads), (8, 2, 3));
+        // Two sessions for eight workers: the threads follow the sessions.
+        let plan = plan_parallelism(16, 8, 0, 2);
+        assert_eq!(plan.intra_threads, 8);
     }
 
     /// A white page with black "text" bars and, optionally, a red block.

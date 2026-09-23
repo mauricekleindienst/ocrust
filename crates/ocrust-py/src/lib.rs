@@ -27,6 +27,16 @@ type PagePlanTuple = (usize, f32, f32, i64, bool);
 /// A written text layer: the PDF plus the counts from the run.
 type TextLayerResult<'py> = (Bound<'py, PyBytes>, usize, usize, usize, usize, usize);
 
+/// Which Python exception an engine error becomes: "io", "value" or "runtime".
+fn error_kind(e: &ocrust_core::Error) -> &'static str {
+    use ocrust_core::Error as E;
+    match e {
+        E::Io { .. } | E::PlainIo(_) => "io",
+        E::Unsupported(_) | E::Config(_) | E::Dict(_) => "value",
+        _ => "runtime",
+    }
+}
+
 /// Maps engine errors onto the Python exception a caller would expect.
 fn to_py_err(e: ocrust_core::Error) -> PyErr {
     use ocrust_core::Error as E;
@@ -270,7 +280,10 @@ impl PyEngine {
                 Ok(doc) => {
                     serde_json::to_string(&doc).map_err(|e| PyRuntimeError::new_err(e.to_string()))
                 }
-                Err(e) => Ok(serde_json::json!({ "error": e.to_string() }).to_string()),
+                Err(e) => Ok(
+                    serde_json::json!({ "error": e.to_string(), "kind": error_kind(&e) })
+                        .to_string(),
+                ),
             })
             .collect()
     }

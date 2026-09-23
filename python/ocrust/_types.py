@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .markings import MarkingReport
+    from .terms import Profile, TermReport
 
 __all__ = ["Box", "Word", "Segment", "Cell", "Table", "Line", "Block", "Match", "Page", "Document"]
 
@@ -412,6 +413,22 @@ class Document:
         from .markings import inspect
 
         return inspect(self)
+
+    def find(self, profile: Profile | Any) -> TermReport:
+        """Every occurrence of a search profile's terms, however broken up.
+
+        `profile` is a :class:`ocrust.terms.Profile`, a path to a ``.toml``,
+        ``.json`` or one-phrase-per-line file, a phrase, or a list of phrases.
+        Letter-spaced, hyphenated, line-broken, glued and misread words are
+        found; see :mod:`ocrust.terms`.
+
+        >>> for hit in ocrust.scan("akte.pdf").find(["Projekt Adler"]):   # doctest: +SKIP
+        ...     print(hit.page, hit.text, hit.how)
+        2 Projekt Ad-\nler ('hyphenated',)
+        """
+        from .terms import find
+
+        return find(self, profile)
 
     def to_dict(self) -> dict[str, Any]:
         """The raw engine output, including every box and score."""

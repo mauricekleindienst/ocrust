@@ -40,11 +40,12 @@ from ._types import Block, Box, Cell, Document, Line, Match, Page, Segment, Tabl
 # the environment before it is imported.
 ensure_runtime()
 
-from . import _ocrust, markings  # noqa: E402  (import must follow ensure_runtime)
+from . import _ocrust, markings, terms  # noqa: E402  (import must follow ensure_runtime)
 
 __all__ = [
     "Ocr",
     "markings",
+    "terms",
     "Document",
     "Page",
     "Block",
@@ -185,6 +186,17 @@ def _glob(pattern: Path) -> list[Path]:
     except (OSError, ValueError):
         # An unreachable share, or a pattern the platform rejects.
         return []
+
+
+def _as_exception(payload: dict[str, Any]) -> Exception:
+    """The exception a failed file in a batch would have raised on its own."""
+    message = str(payload.get("error", "unknown error"))
+    kind = payload.get("kind")
+    if kind == "io":
+        return OSError(message)
+    if kind == "value":
+        return ValueError(message)
+    return OcrustError(message)
 
 
 def _expand_sources(sources: Iterable[Any]) -> list[Any]:
@@ -430,6 +442,58 @@ class Ocr:
         else:
             for item in items:
                 yield self.scan(item)
+
+    def scan_each(
+        self,
+        sources: Iterable[Any],
+        *,
+        pages: Sequence[int] | None = None,
+        chunk: int | None = None,
+    ) -> Iterator[tuple[Any, Document | Exception]]:
+        """Scans many inputs in parallel and yields each with its result, in order.
+
+        The batch loop for large jobs. Unlike :meth:`scan_many`, a file that
+        cannot be read does not end the batch: its entry carries the exception
+        (``OSError`` for a file that cannot be read, ``ValueError`` for one that
+        is not a document, :class:`OcrustError` otherwise) where the document
+        would be. Paths go to the engine a chunk at a time and the documents of
+        a chunk are scanned in parallel across the page workers, so results
+        arrive while a long batch is still running and memory is bounded by
+        the chunk, not the batch.
+
+        >>> ocr = ocrust.Ocr(page_workers=8)                   # doctest: +SKIP
+        >>> for path, result in ocr.scan_each(["archive/"]):   # doctest: +SKIP
+        ...     if isinstance(result, Exception):
+        ...         print(path, "unreadable:", result)
+        ...     else:
+        ...         print(path, len(result.pages), "pages")
+
+        Args:
+            sources: Paths, directories, glob patterns, bytes or images.
+            pages: Zero-based page indices to read from each source; with
+                this, sources are scanned one after the other.
+            chunk: Files handed to the engine at once; defaults to four per
+                page worker, at least eight.
+        """
+        items = _expand_sources(sources)
+        workers = self._kwargs.get("page_workers") or 1
+        size = max(1, chunk or max(8, 4 * workers))
+        batchable = pages is None and all(isinstance(s, (str, os.PathLike)) for s in items)
+        if batchable and len(items) > 1:
+            for start in range(0, len(items), size):
+                batch = items[start : start + size]
+                for item, raw in zip(batch, self._engine.scan_many([str(s) for s in batch])):
+                    payload = json.loads(raw)
+                    if "error" in payload and "pages" not in payload:
+                        yield item, _as_exception(payload)
+                    else:
+                        yield item, Document._from_json(payload)
+            return
+        for item in items:
+            try:
+                yield item, self.scan(item, pages=pages)
+            except (OcrustError, OSError, ValueError) as exc:
+                yield item, exc
 
     @property
     def languages(self) -> tuple[dict[str, str], ...]:

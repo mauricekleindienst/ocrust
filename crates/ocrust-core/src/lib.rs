@@ -63,7 +63,7 @@ pub use ingest::{IngestConfig, Source};
 pub use lang::{Coverage, Language, Script};
 pub use layout::LayoutConfig;
 pub use models::{ModelPaths, ModelSet};
-pub use pipeline::{scan_file, Engine, EngineConfig, Progress};
+pub use pipeline::{plan_parallelism, scan_file, Engine, EngineConfig, Parallelism, Progress};
 pub use preprocess::PreprocessConfig;
 pub use recognize::RecognizerConfig;
 pub use runtime::{runtime_version, Device, SessionOptions};
