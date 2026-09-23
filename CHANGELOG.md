@@ -7,7 +7,7 @@ people, companies, compound words, part and customer numbers — and finds it
 however the scan broke it up. Large jobs use every core, split between
 machines and survive an interruption.
 
-235 Rust unit tests, 10 Rust end-to-end tests, 297 Python tests.
+235 Rust unit tests, 10 Rust end-to-end tests, 300 Python tests.
 
 ### Added
 

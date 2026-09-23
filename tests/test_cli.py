@@ -263,16 +263,19 @@ def test_a_repeated_input_is_read_once(engine, invoice_pdf, capsys):
     assert capsys.readouterr().out.upper().count("INVOICE") == 1
 
 
-def test_worker_default_scales_with_the_batch():
+@pytest.mark.parametrize(("cores", "workers"), [(3, 3), (4, 4), (64, 16), (None, 4)])
+def test_worker_default_scales_with_the_batch(monkeypatch, cores, workers):
     from argparse import Namespace
 
-    from ocrust.cli import _workers_for
+    from ocrust import cli
 
-    # A single file keeps all cores on one page; a batch runs pages in parallel.
-    assert _workers_for(Namespace(workers=None), 1) is None
-    assert _workers_for(Namespace(workers=None), 5) == 4
+    monkeypatch.setattr(cli.os, "cpu_count", lambda: cores)
+    # A single file keeps all cores on one page; a batch runs one page per
+    # core, at most sixteen.
+    assert cli._workers_for(Namespace(workers=None), 1) is None
+    assert cli._workers_for(Namespace(workers=None), 5) == workers
     # An explicit choice always wins.
-    assert _workers_for(Namespace(workers=2), 9) == 2
+    assert cli._workers_for(Namespace(workers=2), 9) == 2
 
 
 def test_colour_is_off_for_a_pipe_and_can_be_forced(monkeypatch):
