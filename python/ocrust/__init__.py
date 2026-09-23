@@ -40,10 +40,11 @@ from ._types import Block, Box, Cell, Document, Line, Match, Page, Segment, Tabl
 # the environment before it is imported.
 ensure_runtime()
 
-from . import _ocrust  # noqa: E402  (import must follow ensure_runtime)
+from . import _ocrust, markings  # noqa: E402  (import must follow ensure_runtime)
 
 __all__ = [
     "Ocr",
+    "markings",
     "Document",
     "Page",
     "Block",

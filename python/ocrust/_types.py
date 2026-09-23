@@ -10,7 +10,10 @@ import re
 import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .markings import MarkingReport
 
 __all__ = ["Box", "Word", "Segment", "Cell", "Table", "Line", "Block", "Match", "Page", "Document"]
 
@@ -393,6 +396,22 @@ class Document:
                         )
                     )
         return tuple(found)
+
+    def markings(self) -> MarkingReport:
+        """The security-classification markings on these pages.
+
+        VS-NfD, VS-VERTRAULICH, GEHEIM and STRENG GEHEIM, their NATO, EU and
+        national equivalents, TLP and company markings — each with the page,
+        box and reason it was judged a marking rather than a mention. See
+        :mod:`ocrust.markings`.
+
+        >>> report = ocrust.scan("akte.pdf").markings()   # doctest: +SKIP
+        >>> report.label, report.unmarked_pages            # doctest: +SKIP
+        ('VS-NfD', (4,))
+        """
+        from .markings import inspect
+
+        return inspect(self)
 
     def to_dict(self) -> dict[str, Any]:
         """The raw engine output, including every box and score."""

@@ -30,6 +30,7 @@ from . import (
     OcrustError,
     __version__,
     _glob,
+    markings,
     runtime_info,
 )
 
@@ -203,6 +204,7 @@ _EXAMPLES = """examples:
   ocrust ocr scan.pdf                      the same PDF, now searchable
   ocrust pdf photo.jpg                     a photo, as a searchable PDF
   ocrust tiff scan.pdf --gray              an archive-ready TIFF
+  ocrust vs archive/                       which files are VS-NfD, GEHEIM, …
   ocrust doctor                            what is installed, what is missing
 """
 
@@ -359,7 +361,52 @@ def _build_parser() -> argparse.ArgumentParser:
     tiff.add_argument("--lang")
     tiff.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
-    for reader in (scan, pdf, ocr, tiff):
+    vs = sub.add_parser(
+        "vs",
+        help="find classification markings: VS-NfD, GEHEIM, NATO, EU, TLP, company",
+        description="Find security-classification markings in scanned documents: the "
+        "German grades (VS-NUR FÜR DEN DIENSTGEBRAUCH, VS-VERTRAULICH, GEHEIM, STRENG "
+        "GEHEIM), their NATO, EU, Austrian, Swiss, US, UK and French equivalents, TLP "
+        "and company markings. A marking stamped on a page is told apart from a "
+        "sentence that mentions one.\n\n"
+        "exit status: 3 when a file is marked at or above --fail-on, else 1 when a "
+        "file could not be read (its grade is unknown), else 0.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    vs.add_argument(
+        "inputs",
+        nargs="+",
+        type=Path,
+        help="files, directories (read recursively), glob patterns, or - for stdin",
+    )
+    vs.add_argument(
+        "--fail-on",
+        default="vs-nfd",
+        metavar="GRADE",
+        help="exit 3 when a file is marked at this grade or above: vs-nfd (default), "
+        "vs-v, geheim, streng-geheim; any (also TLP and company markings); none",
+    )
+    vs.add_argument(
+        "-f",
+        "--format",
+        default="text",
+        choices=("text", "json", "jsonl", "csv"),
+        help="report format (default: text); json and csv carry every finding with its box",
+    )
+    vs.add_argument("-o", "--output", type=Path, help="write the report here instead of stdout")
+    vs.add_argument(
+        "--mentions",
+        action="store_true",
+        help="also list sentences that mention a grade without being marked with it",
+    )
+    vs.add_argument("--pages", help="page selection for multi-page inputs, e.g. 1,3-5")
+    vs.add_argument("--workers", type=int, help="files scanned in parallel (default: 4)")
+    vs.add_argument("--dpi", type=float, help="PDF rasterization DPI (default 200)")
+    vs.add_argument("--models", type=Path, help="directory holding the ONNX models")
+    vs.add_argument("--device", help="cpu (default), auto, cuda[:n], coreml, directml")
+    vs.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
+
+    for reader in (scan, pdf, ocr, tiff, vs):
         reader.add_argument(
             "--password",
             help="password for encrypted PDFs; OCRUST_PASSWORD keeps it out of the shell history",
@@ -1427,6 +1474,265 @@ def _cmd_tiff(args: argparse.Namespace) -> int:
     return 0
 
 
+#: Exit status of `ocrust vs` when a file is marked at or above --fail-on.
+_MARKED = 3
+
+
+def _gate(spec: str) -> int | None:
+    """`--fail-on` as a level; 0 means any marking at all, `None` never."""
+    key = spec.strip().lower()
+    if key == "none":
+        return None
+    if key == "any":
+        return 0
+    try:
+        return markings.level_for(key)
+    except ValueError as exc:
+        raise _bad_argument(f"--fail-on: {exc}") from None
+
+
+def _trips(report: markings.MarkingReport, gate: int | None) -> bool:
+    if gate is None:
+        return False
+    if gate == 0:
+        return bool(report.markings)
+    return report.level >= gate
+
+
+def _scan_each(engine: Ocr, inputs: Sequence[Path], pages: Sequence[int] | None, chunk: int) -> Any:
+    """Yields `(path, document or error message)` for every input, in order.
+
+    Files are handed to the engine a chunk at a time, which scans the files of
+    a chunk in parallel; a chunk keeps memory bounded and lets results appear
+    while a long batch is still running. A file that fails is reported and the
+    batch goes on — an unreadable file is a finding in an audit, not a reason
+    to stop one.
+    """
+    plain = [p for p in inputs if str(p) != STDIN]
+    if pages is None and len(plain) == len(inputs) and len(inputs) > 1:
+        for start in range(0, len(inputs), chunk):
+            batch = list(inputs[start : start + chunk])
+            for path, raw in zip(batch, engine._engine.scan_many([str(p) for p in batch])):
+                payload = json.loads(raw)
+                if "error" in payload and "pages" not in payload:
+                    yield path, str(payload["error"])
+                else:
+                    from ._types import Document
+
+                    yield path, Document._from_json(payload)
+        return
+    for path in inputs:
+        try:
+            if str(path) == STDIN:
+                data = _read_stdin()
+                if not data:
+                    yield path, "nothing arrived on stdin"
+                    continue
+                yield path, engine.scan(data, pages=pages, name="stdin")
+            else:
+                yield path, engine.scan(path, pages=pages)
+        except (OcrustError, OSError, ValueError) as exc:
+            yield path, str(exc)
+
+
+def _page_ranges(numbers: Sequence[int]) -> str:
+    """`1-3, 5`: page numbers the way a person writes them."""
+    numbers = sorted(set(numbers))
+    runs: list[list[int]] = []
+    for n in numbers:
+        if runs and n == runs[-1][-1] + 1:
+            runs[-1].append(n)
+        else:
+            runs.append([n])
+    parts = [f"{r[0]}-{r[-1]}" if len(r) > 2 else ", ".join(map(str, r)) for r in runs]
+    return ("p. " if len(numbers) == 1 else "pp. ") + ", ".join(parts)
+
+
+def _headline(report: markings.MarkingReport) -> str:
+    """The one name a file is filed under: its grade, else TLP, else company."""
+    if report.label:
+        return report.label
+    if report.tlp:
+        return f"TLP:{report.tlp}"
+    if report.company:
+        return report.company
+    return "-"
+
+
+def _vs_line(path: Path, report: markings.MarkingReport, show_mentions: bool, out: Any) -> str:
+    """One file of the text report, with the evidence behind its grade."""
+    head = _headline(report)
+    marked = report.markings
+    details: list[str] = []
+    if marked:
+        top = [f for f in marked if f.label == head or f"TLP:{f.label}" == head] or list(marked)
+        details.append(_page_ranges([f.page for f in top]))
+        where = sorted({f.reason for f in top}, key=["header", "footer"].__contains__, reverse=True)
+        details.append(", ".join(where))
+        if all(f.fuzzy for f in top):
+            details.append("read through OCR errors, check by eye")
+        others = sorted({f.label for f in marked} - {head})
+        if others:
+            details.append("also " + ", ".join(others))
+        if report.unmarked_pages:
+            details.append(f"unmarked: {_page_ranges(report.unmarked_pages)}")
+        if report.caveats:
+            details.append(" ".join(report.caveats))
+        if report.cancelled:
+            details.append("a grade is marked as lifted or lowered")
+    elif report.mentions:
+        details.append(_count(len(report.mentions), "mention"))
+    style = ("red", "bold") if report.level >= 1 else ("amber",) if marked else ("dim",)
+    line = f"{_paint(f'{head:<16}', *style, stream=out)} {path}"
+    if details:
+        line += "  " + _paint(" · ".join(details), "dim", stream=out)
+    if show_mentions:
+        for f in report.mentions:
+            line += f'\n{"":<17}p. {f.page}: {f.label} in "{f.text}"'
+    return line
+
+
+_CSV_FIELDS = (
+    "source",
+    "status",
+    "page",
+    "kind",
+    "level",
+    "label",
+    "scheme",
+    "match",
+    "text",
+    "confidence",
+    "fuzzy",
+    "reason",
+    "x0",
+    "y0",
+    "x1",
+    "y1",
+)
+
+
+def _cmd_vs(args: argparse.Namespace) -> int:
+    import csv
+    import io
+
+    gate = _gate(args.fail_on)
+    pages = _parse_pages(args.pages)
+    inputs, missing = _expand_inputs(list(args.inputs))
+    if missing:
+        for path, reason in missing:
+            _fail(f"{path}: {reason}")
+        return 2
+    if not inputs:
+        _fail("nothing to read")
+        return 2
+
+    args._resolved_workers = _workers_for(args, len(inputs))
+    engine = _engine_from_args(args)
+    chunk = max(8, 4 * (args._resolved_workers or 1))
+
+    buffer = io.StringIO()
+    out: Any = buffer if args.output else sys.stdout
+    writer = csv.DictWriter(out, fieldnames=_CSV_FIELDS) if args.format == "csv" else None
+    if writer is not None:
+        writer.writeheader()
+    records: list[dict[str, Any]] = []
+    tally: dict[str, int] = {}
+    marked = unreadable = tripped = 0
+    started = time.monotonic()
+    page_total = 0
+
+    for path, result in _scan_each(engine, inputs, pages, chunk):
+        if isinstance(result, str):
+            unreadable += 1
+            record: dict[str, Any] = {"source": str(path), "status": "error", "error": result}
+            if args.format == "text":
+                label = _paint(f"{'unreadable':<16}", "red", stream=out)
+                print(f"{label} {path}  {result}", file=out)
+            elif writer is not None:
+                writer.writerow({"source": str(path), "status": "error", "text": result})
+        else:
+            report = markings.inspect(result)
+            page_total += len(result.pages)
+            if _trips(report, gate):
+                tripped += 1
+            if report.markings:
+                marked += 1
+                tally[_headline(report)] = tally.get(_headline(report), 0) + 1
+            record = {"source": str(path), "status": "ok", **report.to_dict()}
+            record["source"] = str(path)
+            if args.format == "text":
+                print(_vs_line(path, report, args.mentions, out), file=out)
+            elif writer is not None:
+                if not report.findings:
+                    writer.writerow({"source": str(path), "status": "ok"})
+                for f in report.findings:
+                    x0, y0, x1, y1 = f.box.as_tuple()
+                    writer.writerow(
+                        {
+                            "source": str(path),
+                            "status": "ok",
+                            "page": f.page,
+                            "kind": f.kind,
+                            "level": f.level,
+                            "label": f.label,
+                            "scheme": f.scheme,
+                            "match": f.match,
+                            "text": f.text,
+                            "confidence": round(f.confidence, 4),
+                            "fuzzy": f.fuzzy,
+                            "reason": f.reason,
+                            "x0": round(x0, 1),
+                            "y0": round(y0, 1),
+                            "x1": round(x1, 1),
+                            "y1": round(y1, 1),
+                        }
+                    )
+        if args.format == "jsonl":
+            print(json.dumps(record, ensure_ascii=False), file=out)
+        elif args.format == "json":
+            records.append(record)
+        if out is sys.stdout:
+            sys.stdout.flush()
+
+    clean = len(inputs) - marked - unreadable
+    if args.format == "json":
+        summary = {
+            "files": len(inputs),
+            "marked": marked,
+            "clean": clean,
+            "unreadable": unreadable,
+            "fail_on": args.fail_on,
+            "tripped": tripped,
+            "by_label": tally,
+        }
+        json.dump({"summary": summary, "files": records}, out, ensure_ascii=False, indent=2)
+        out.write("\n")
+    if args.output:
+        _write(args.output, buffer.getvalue(), retries=_io_retries(args))
+
+    if not args.quiet:
+        parts = [_count(len(inputs), "file")]
+        if tally:
+            listed = ", ".join(
+                f"{n} {label}" for label, n in sorted(tally.items(), key=lambda kv: -kv[1])
+            )
+            parts.append(_paint(f"{marked} marked ({listed})", "red", "bold"))
+        parts.append(f"{clean} clean")
+        if unreadable:
+            parts.append(_paint(f"{unreadable} unreadable", "red"))
+        parts.append(
+            f"{_count(page_total, 'page')}, {_duration((time.monotonic() - started) * 1000)}"
+        )
+        if args.output:
+            parts.append(f"report -> {args.output}")
+        print(_paint("done:", "rust", "bold") + " " + ", ".join(parts), file=sys.stderr)
+
+    if tripped:
+        return _MARKED
+    return 1 if unreadable else 0
+
+
 def _cmd_languages(args: argparse.Namespace) -> int:
     from . import known_languages
 
@@ -1603,6 +1909,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _cmd_ocr(args)
     if args.command == "tiff":
         return _cmd_tiff(args)
+    if args.command == "vs":
+        return _cmd_vs(args)
     if args.command == "languages":
         return _cmd_languages(args)
     if args.command == "install-models":
