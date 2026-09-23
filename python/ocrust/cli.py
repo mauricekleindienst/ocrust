@@ -364,12 +364,13 @@ def _build_parser() -> argparse.ArgumentParser:
     vs = sub.add_parser(
         "vs",
         help="find classification markings: VS-NfD, GEHEIM, NATO, EU, TLP, company",
-        description="Find security-classification markings in scanned documents: the "
-        "German grades (VS-NUR FÜR DEN DIENSTGEBRAUCH, VS-VERTRAULICH, GEHEIM, STRENG "
-        "GEHEIM), their NATO, EU, Austrian, Swiss, US, UK and French equivalents, TLP "
-        "and company markings. A marking stamped on a page is told apart from a "
-        "sentence that mentions one.\n\n"
-        "exit status: 3 when a file is marked at or above --fail-on, else 1 when a "
+        description="Find security-classification markings in scanned documents: the\n"
+        "German grades (VS-NUR FÜR DEN DIENSTGEBRAUCH, VS-VERTRAULICH, GEHEIM, STRENG\n"
+        "GEHEIM), their NATO, EU, Austrian, Swiss, US, UK and French equivalents, TLP\n"
+        "and company markings. A marking stamped on a page is told apart from a\n"
+        "sentence that mentions one; a coloured stamp across the text is read by its\n"
+        "colour.\n\n"
+        "exit status: 3 when a file is marked at or above --fail-on, else 1 when a\n"
         "file could not be read (its grade is unknown), else 0.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1572,7 +1573,8 @@ def _vs_line(path: Path, report: markings.MarkingReport, show_mentions: bool, ou
         on_pages = [f.page for f in top if f.page > 0]
         if on_pages:
             details.append(_page_ranges(on_pages))
-        where = sorted({f.reason for f in top}, key=["header", "footer"].__contains__, reverse=True)
+        order = {"header": 0, "footer": 1}
+        where = sorted({f.reason for f in top}, key=lambda r: (order.get(r, 2), r))
         details.append(", ".join(where))
         if all(f.fuzzy for f in top):
             details.append("read through OCR errors, check by eye")

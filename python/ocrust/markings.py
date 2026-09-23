@@ -158,7 +158,7 @@ class Finding:
             "text": self.text,
             "match": self.match,
             "page": self.page,
-            "box": list(self.box.as_tuple()),
+            "box": [round(v, 1) for v in self.box.as_tuple()],
             "confidence": round(self.confidence, 4),
             "fuzzy": self.fuzzy,
             "reason": self.reason,
