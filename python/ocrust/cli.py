@@ -21,6 +21,7 @@ import textwrap
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from . import (
     FORMATS,
@@ -358,6 +359,19 @@ def _build_parser() -> argparse.ArgumentParser:
     tiff.add_argument("--lang")
     tiff.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
+    for reader in (scan, pdf, ocr, tiff):
+        reader.add_argument(
+            "--password",
+            help="password for encrypted PDFs; OCRUST_PASSWORD keeps it out of the shell history",
+        )
+        reader.add_argument(
+            "--max-pixels",
+            type=int,
+            metavar="N",
+            help="refuse images larger than N pixels, a decompression-bomb guard "
+            "(default: about 179 million; 0 removes it)",
+        )
+
     languages = sub.add_parser("languages", help="list the languages the installed model covers")
     languages.add_argument("--models", type=Path)
     languages.add_argument("--all", action="store_true", help="list every known language")
@@ -442,24 +456,41 @@ _TRANSIENT_WRITE_ERRORS = (
 
 
 def _write(target: Path, data: bytes | str, *, retries: int = 2, delay: float = 0.15) -> None:
-    """Writes a file, retrying the failures a network share produces.
+    """Writes a file atomically, retrying the failures a network share produces.
 
-    The read side has the same policy in the engine; output deserves it too,
-    because `-o \\\\fileserver\\ocr` is exactly where a batch writes hundreds of
-    small files and one dropped SMB connection would otherwise end the run.
+    The bytes go to a hidden temporary file beside the target, which then
+    replaces it in one step. An interrupted run leaves the previous file or no
+    file — never a truncated one, which `--skip-existing` would otherwise take
+    for finished work and skip on every run after.
+
+    Retrying matters because `-o \\\\fileserver\\ocr` is exactly where a batch
+    writes hundreds of small files, and one dropped SMB connection would
+    otherwise end the run. Folders a mirrored batch needs are created here.
     """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f".{target.name}.{os.getpid()}.part")
     for attempt in range(retries + 1):
         try:
+            # Text keeps text mode, so line endings stay what they were.
             if isinstance(data, str):
-                target.write_text(data, encoding="utf-8")
+                with partial.open("w", encoding="utf-8") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
             else:
-                target.write_bytes(data)
+                with partial.open("wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            partial.replace(target)
             return
         except _TRANSIENT_WRITE_ERRORS:
+            _discard(partial)
             if attempt == retries:
                 raise
             time.sleep(delay * (2**attempt))
         except OSError as exc:
+            _discard(partial)
             # Windows reports a dropped share as a plain OSError carrying the
             # redirector's own code: network name deleted, unexpected network
             # error, no system resources.
@@ -467,6 +498,12 @@ def _write(target: Path, data: bytes | str, *, retries: int = 2, delay: float = 
             if attempt == retries or not transient:
                 raise
             time.sleep(delay * (2**attempt))
+
+
+def _discard(path: Path) -> None:
+    """Removes a temporary file if it is there; its absence is the goal."""
+    with contextlib.suppress(OSError):
+        path.unlink()
 
 
 def _io_retries(args: argparse.Namespace) -> int:
@@ -561,8 +598,20 @@ def _workers_for(args: argparse.Namespace, inputs: int) -> int | None:
     return 4 if inputs > 1 else None
 
 
+def _password(args: argparse.Namespace) -> str | None:
+    """The PDF password: the flag, else OCRUST_PASSWORD, which keeps it out of
+    shell history and out of the process list other users can read."""
+    return getattr(args, "password", None) or os.environ.get("OCRUST_PASSWORD") or None
+
+
+def _guards(args: argparse.Namespace) -> dict[str, Any]:
+    """The reading safeguards every command shares."""
+    return {"password": _password(args), "max_pixels": getattr(args, "max_pixels", None)}
+
+
 def _engine_from_args(args: argparse.Namespace) -> Ocr:
     return Ocr(
+        **_guards(args),
         models_dir=getattr(args, "models", None),
         device=getattr(args, "device", None),
         threads=getattr(args, "threads", None),
@@ -594,20 +643,42 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         _fail("nothing to read")
         return 2
 
-    args._resolved_workers = _workers_for(args, len(inputs))
-    engine = _engine_from_args(args)
-    destination = _destination(args, len(inputs))
+    destination = _destination(args, len(inputs), _walk_roots(requested))
     if destination is None:
         return 2
-    return _scan_batch(args, engine, inputs, pages, destination)
+    # Checked before a model is loaded or a page read: an input that shares its
+    # output with another is refused, not left to overwrite or be skipped.
+    blocked = _report_clashes(destination.clashes(inputs, args.format))
+    inputs = [path for path in inputs if path not in blocked]
+    if not inputs:
+        return 1
+
+    args._resolved_workers = _workers_for(args, len(inputs))
+    engine = _engine_from_args(args)
+    status = _scan_batch(args, engine, inputs, pages, destination)
+    return max(status, 1) if blocked else status
 
 
 class _Destination:
-    """Where a batch writes, resolved once so every file agrees on it."""
+    """Where a batch writes, resolved once so every file agrees on it.
 
-    def __init__(self, output: Path | None, as_directory: bool) -> None:
+    Outputs used to be named after the input's file name alone, and a folder
+    walk is recursive — so `archive/2024/rechnung.pdf` and
+    `archive/2025/rechnung.pdf` both became `out/rechnung.txt`, the second
+    silently replacing the first while the summary counted two files written.
+    With `--skip-existing` the second was never read at all.
+
+    A walked folder is now mirrored: `out/2024/rechnung.txt` and
+    `out/2025/rechnung.txt`. Files named on the command line, and the files at
+    the top of a walked folder, stay flat exactly as before. Whatever still
+    lands on one name — `rechnung.pdf` beside `rechnung.png`, or two named
+    files from different folders — is refused by `clashes` instead of guessed.
+    """
+
+    def __init__(self, output: Path | None, as_directory: bool, roots: Sequence[Path] = ()) -> None:
         self.output = output
         self.as_directory = as_directory
+        self.roots = list(roots)
 
     def target_for(self, source: Path, fmt: str) -> Path | None:
         """The file `source` will be written to, or `None` for stdout."""
@@ -615,11 +686,83 @@ class _Destination:
             return None
         if self.as_directory:
             stem = "stdin" if str(source) == STDIN else source.stem
-            return self.output / f"{stem}.{_EXTENSIONS[fmt]}"
+            return self.output / self._subfolder(source) / f"{stem}.{_EXTENSIONS[fmt]}"
         return self.output
 
+    def _subfolder(self, source: Path) -> Path:
+        """Where under the output a file found by walking a folder belongs."""
+        if str(source) == STDIN or not self.roots:
+            return Path()
+        try:
+            resolved = source.resolve()
+        except OSError:  # pragma: no cover - an unreachable share
+            return Path()
+        nearest: Path | None = None
+        for root in self.roots:
+            try:
+                relative = resolved.relative_to(root)
+            except ValueError:
+                continue
+            # The deepest folder asked for wins: the shortest path below it.
+            if nearest is None or len(relative.parts) < len(nearest.parts):
+                nearest = relative
+        return nearest.parent if nearest is not None else Path()
 
-def _destination(args: argparse.Namespace, inputs: int) -> _Destination | None:
+    def clashes(self, sources: Sequence[Path], fmt: str) -> dict[Path, list[Path]]:
+        """Outputs that more than one input would be written to."""
+        claimed: dict[Path, list[Path]] = {}
+        for source in sources:
+            target = self.target_for(source, fmt)
+            if target is not None:
+                claimed.setdefault(target, []).append(source)
+        return {target: found for target, found in claimed.items() if len(found) > 1}
+
+
+def _walk_roots(requested: Sequence[Path]) -> list[Path]:
+    """The folders a batch was asked to walk, which its output then mirrors.
+
+    A folder is its own root; a pattern walks from its literal leading part, so
+    `scans/**/*.tif` mirrors what it finds below `scans`.
+    """
+    roots: list[Path] = []
+    for path in requested:
+        if str(path) == STDIN:
+            continue
+        try:
+            if path.is_dir():
+                roots.append(path.resolve())
+                continue
+            if path.exists() or not any(ch in str(path) for ch in "*?["):
+                continue
+            literal: list[str] = []
+            for part in path.parts:
+                if any(ch in part for ch in "*?["):
+                    break
+                literal.append(part)
+            roots.append(Path(*literal).resolve() if literal else Path.cwd())
+        except OSError:  # pragma: no cover - an unreachable share
+            continue
+    return roots
+
+
+def _report_clashes(clashes: dict[Path, list[Path]]) -> set[Path]:
+    """Says which inputs share an output, and returns them so none is read."""
+    blocked: set[Path] = set()
+    for target, sources in clashes.items():
+        names = [str(s) for s in sources]
+        listed = ", ".join(names[:-1]) + f" and {names[-1]}"
+        quantity = "both" if len(names) == 2 else "all"
+        _fail(
+            f"{listed} would {quantity} be written to {target}; none of them was read — "
+            "rename one, or scan them into separate folders"
+        )
+        blocked.update(sources)
+    return blocked
+
+
+def _destination(
+    args: argparse.Namespace, inputs: int, roots: Sequence[Path] = ()
+) -> _Destination | None:
     """Resolves `--output` against the number of inputs, or reports why not."""
     many = inputs > 1 or bool(getattr(args, "watch", False))
     if many and args.output and args.output.suffix:
@@ -630,7 +773,7 @@ def _destination(args: argparse.Namespace, inputs: int) -> _Destination | None:
     as_directory = bool(args.output) and (many or args.output.is_dir() or not args.output.suffix)
     if as_directory and args.output is not None:
         args.output.mkdir(parents=True, exist_ok=True)
-    return _Destination(args.output, as_directory)
+    return _Destination(args.output, as_directory, roots)
 
 
 def _scan_batch(
@@ -767,11 +910,13 @@ def _scan_watching(
 
     args._resolved_workers = _workers_for(args, len(folders) + 1)
     engine = _engine_from_args(args)
-    destination = _destination(args, len(folders))
+    destination = _destination(args, len(folders), _walk_roots(folders))
     if destination is None:
         return 2
 
     done: set[Path] = set()
+    # Clashes already reported, so a watch does not repeat itself each round.
+    reported: set[frozenset[Path]] = set()
     sizes: dict[Path, int] = {}
     # Whether anything failed, which decides the exit status. A count would be
     # misleading: `_scan_batch` reports per round, not per file.
@@ -784,7 +929,21 @@ def _scan_watching(
     try:
         while True:
             found, _ = _expand_inputs(folders)
-            fresh = [f for f in found if f not in done]
+            # Judged against everything present, not only what is new: a file
+            # arriving beside one already written must not be skipped or
+            # written over because the two share an output name.
+            clashes = destination.clashes(found, args.format)
+            fresh_clashes = {
+                target: sources
+                for target, sources in clashes.items()
+                if frozenset(sources) not in reported
+            }
+            if fresh_clashes:
+                _report_clashes(fresh_clashes)
+                reported.update(frozenset(v) for v in fresh_clashes.values())
+                anything_failed = True
+            blocked = {source for sources in clashes.values() for source in sources}
+            fresh = [f for f in found if f not in done and f not in blocked]
             ready = []
             for path in fresh:
                 try:
@@ -1157,7 +1316,7 @@ def _cmd_pdf(args: argparse.Namespace) -> int:
         _fail(f"{len(inputs)} inputs become one PDF, so --output is needed")
         return 2
 
-    engine = Ocr(models_dir=args.models, device=args.device, keep_page_images=True)
+    engine = Ocr(models_dir=args.models, device=args.device, keep_page_images=True, **_guards(args))
     try:
         data, pages = engine.searchable_pdf_many(inputs, dpi=args.dpi, jpeg_quality=args.quality)
     except (OcrustError, OSError, ValueError) as exc:
@@ -1192,6 +1351,7 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
         pdf_dpi=args.dpi,
         lang=args.lang,
         keep_page_images=True,
+        **_guards(args),
     )
 
     if args.dry_run:
@@ -1229,6 +1389,12 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
         )
         if report["pages_skipped"] == report["pages"] and report["pages"]:
             _note("  every page already had text: --force writes a layer anyway")
+    if _password(args) and not args.quiet:
+        print(
+            "note: the output is written without password protection; "
+            "encrypt it again if it has to stay locked",
+            file=sys.stderr,
+        )
     if report["unmappable_chars"]:
         print(
             f"note: {report['unmappable_chars']} character(s) are outside WinAnsi and were "
@@ -1242,7 +1408,7 @@ def _cmd_tiff(args: argparse.Namespace) -> int:
     if not args.input.exists():
         _fail(f"no such file: {args.input}")
         return 2
-    engine = Ocr(models_dir=args.models, pdf_dpi=args.dpi, lang=args.lang)
+    engine = Ocr(models_dir=args.models, pdf_dpi=args.dpi, lang=args.lang, **_guards(args))
     try:
         data, doc = engine.to_tiff(args.input, gray=args.gray, compression=args.compression)
     except (OcrustError, OSError, ValueError) as exc:

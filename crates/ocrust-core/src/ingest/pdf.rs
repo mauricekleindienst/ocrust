@@ -11,7 +11,7 @@ use image::RgbImage;
 use crate::doc::PageOrigin;
 use crate::error::{Error, Result};
 
-use super::{IngestConfig, RawPage};
+use super::{IngestConfig, Password, RawPage};
 
 /// PDF user-space unit: 72 points per inch.
 const POINTS_PER_INCH: f32 = 72.0;
@@ -39,10 +39,9 @@ impl std::fmt::Debug for Renderer {
 impl Renderer {
     /// Parses `data`, which the renderer then shares rather than copies.
     pub fn new(data: Arc<Vec<u8>>, cfg: &IngestConfig) -> Result<Self> {
-        let pdf = hayro::hayro_syntax::Pdf::new(data)
-            .map_err(|e| Error::Pdf(format!("could not parse PDF: {e:?}")))?;
+        let pdf = open(data, cfg.pdf_password.as_ref())?;
         if pdf.pages().is_empty() {
-            return Err(Error::Pdf("document has no pages".into()));
+            return Err(Error::Unsupported("the PDF has no pages".into()));
         }
         Ok(Self {
             pdf,
@@ -149,10 +148,43 @@ pub fn load(data: &[u8], cfg: &IngestConfig) -> Result<Vec<RawPage>> {
 }
 
 /// Number of pages without rendering anything.
-pub fn page_count(data: &[u8]) -> Result<usize> {
-    let pdf = hayro::hayro_syntax::Pdf::new(Arc::new(data.to_vec()))
-        .map_err(|e| Error::Pdf(format!("could not parse PDF: {e:?}")))?;
-    Ok(pdf.pages().len())
+pub fn page_count(data: &[u8], password: Option<&Password>) -> Result<usize> {
+    Ok(open(Arc::new(data.to_vec()), password)?.pages().len())
+}
+
+/// Parses a PDF, with its password when it has one.
+///
+/// A locked document is an error that says what to do, not the parser's
+/// `Decryption(PasswordProtected)`: the person reading it has a password to
+/// find, not a parser to debug.
+fn open(data: Arc<Vec<u8>>, password: Option<&Password>) -> Result<hayro::hayro_syntax::Pdf> {
+    use hayro::hayro_syntax::{DecryptionError, LoadPdfError};
+    let key = password.map(|p| p.0.as_str()).unwrap_or("");
+    hayro::hayro_syntax::Pdf::new_with_password(data, key).map_err(|e| match e {
+        LoadPdfError::Decryption(DecryptionError::PasswordProtected) => {
+            password_error(password.is_some())
+        }
+        // A damaged file is an unreadable input like any other: `Unsupported`,
+        // which Python sees as the ValueError the documented batch loop
+        // `except (IOError, ValueError)` skips. It was a bare RuntimeError,
+        // which that loop let through to crash the batch.
+        other => Error::Unsupported(format!("could not parse PDF: {other:?}")),
+    })
+}
+
+/// The error for a PDF that its password (or the lack of one) does not open.
+///
+/// An unreadable input, not a refusal by the engine: Python sees a
+/// `ValueError`, which is what the documented batch loop
+/// `except (IOError, ValueError)` skips a broken file on.
+pub(crate) fn password_error(password_given: bool) -> Error {
+    Error::Unsupported(if password_given {
+        "the password given does not open this PDF".into()
+    } else {
+        "this PDF is protected by a password; pass it with `--password` \
+         (or the OCRUST_PASSWORD environment variable), or `password=` in Python"
+            .into()
+    })
 }
 
 /// DPI-based scale, capped so huge pages cannot exhaust memory.
@@ -238,7 +270,7 @@ mod tests {
 
     #[test]
     fn counts_pages_without_rendering() {
-        assert_eq!(page_count(&tiny_pdf()).unwrap(), 1);
+        assert_eq!(page_count(&tiny_pdf(), None).unwrap(), 1);
     }
 
     #[test]

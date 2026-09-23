@@ -71,37 +71,41 @@ def test_expand_inputs_keeps_unc_paths_intact():
 def test_write_retries_a_dropped_share(tmp_path, monkeypatch):
     target = tmp_path / "out.txt"
     attempts = {"n": 0}
-    real = Path.write_text
+    real = Path.replace
 
-    def flaky(self, data, **kwargs):
+    # The write is committed by one rename; that is where a dropped share hits.
+    def flaky(self, other):
         attempts["n"] += 1
         if attempts["n"] < 3:
             raise ConnectionResetError(104, "the network name is no longer available")
-        return real(self, data, **kwargs)
+        return real(self, other)
 
-    monkeypatch.setattr(Path, "write_text", flaky)
+    monkeypatch.setattr(Path, "replace", flaky)
     _write(target, "text", retries=2, delay=0)
     assert attempts["n"] == 3
     assert target.read_text() == "text"
+    assert not list(tmp_path.glob(".*.part"))
 
 
 def test_write_gives_up_and_reports(tmp_path, monkeypatch):
-    def always_fails(self, data, **kwargs):
+    def always_fails(self, other):
         raise ConnectionResetError(104, "gone")
 
-    monkeypatch.setattr(Path, "write_text", always_fails)
+    monkeypatch.setattr(Path, "replace", always_fails)
     with pytest.raises(ConnectionResetError):
         _write(tmp_path / "out.txt", "text", retries=1, delay=0)
+    assert not (tmp_path / "out.txt").exists()
+    assert not list(tmp_path.glob(".*.part")), "a failed write leaves nothing behind"
 
 
 def test_write_does_not_retry_a_real_error(tmp_path, monkeypatch):
     attempts = {"n": 0}
 
-    def denied(self, data, **kwargs):
+    def denied(self, other):
         attempts["n"] += 1
         raise PermissionError(13, "denied")
 
-    monkeypatch.setattr(Path, "write_text", denied)
+    monkeypatch.setattr(Path, "replace", denied)
     with pytest.raises(PermissionError):
         _write(tmp_path / "out.txt", "text", retries=3, delay=0)
     assert attempts["n"] == 1, "a permission error will not fix itself"
@@ -476,3 +480,88 @@ def test_pdf_of_several_inputs_needs_an_output_name(engine, tmp_path):
     for name in ("a.png", "b.png"):
         Image.new("RGB", (400, 300), "white").save(tmp_path / name)
     assert main(["pdf", str(tmp_path / "a.png"), str(tmp_path / "b.png"), "-q"]) == 2
+
+
+def _labelled_pdf(path: Path, text: str) -> None:
+    """A one-page PDF reading `text`, in a font the engine reads reliably."""
+    from conftest import _pdf_with_text
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_pdf_with_text([(text, 30)]))
+
+
+def test_a_folder_walk_mirrors_its_subfolders(engine, tmp_path):
+    """Two invoices with one file name in two month folders stay two invoices.
+
+    Outputs were named after the file alone, so the second silently replaced
+    the first while the summary counted both as written — and with
+    --skip-existing the second was never read at all.
+    """
+    archive = tmp_path / "archive"
+    _labelled_pdf(archive / "2024" / "rechnung.pdf", "RECHNUNG ZWEITAUSENDVIER")
+    _labelled_pdf(archive / "2025" / "rechnung.pdf", "RECHNUNG ZWEITAUSENDFUENF")
+    out = tmp_path / "out"
+
+    assert main(["scan", str(archive), "-o", str(out), "-q", "--skip-existing"]) == 0
+    first = (out / "2024" / "rechnung.txt").read_text(encoding="utf-8")
+    second = (out / "2025" / "rechnung.txt").read_text(encoding="utf-8")
+    assert "VIER" in first.upper(), first
+    assert "FUENF" in second.upper(), second
+    assert not (out / "rechnung.txt").exists()
+
+
+def test_inputs_that_would_share_an_output_are_refused(engine, tmp_path, capsys):
+    """What mirroring cannot separate is refused by name, and the rest is read."""
+    folder = tmp_path / "scans"
+    _labelled_pdf(folder / "rechnung.pdf", "ERSTE")
+    (folder / "rechnung.tiff").write_bytes(b"")  # the same stem, another format
+    _labelled_pdf(folder / "lieferschein.pdf", "ZWEITE")
+    out = tmp_path / "out"
+
+    assert main(["scan", str(folder), "-o", str(out), "-q"]) == 1
+    assert not (out / "rechnung.txt").exists(), "neither of the pair may be written"
+    assert (out / "lieferschein.txt").exists(), "everything else is still read"
+    message = " ".join(capsys.readouterr().err.split())
+    assert "rechnung.pdf" in message
+    assert "rechnung.tiff" in message
+    assert "would both be written" in message
+
+
+def test_a_failed_write_leaves_the_previous_file_intact(tmp_path, monkeypatch):
+    """Outputs replace the old file in one step, or not at all.
+
+    A truncated output used to be left behind by an interrupted run, and
+    --skip-existing then took it for finished work on every run after.
+    """
+    target = tmp_path / "page.txt"
+    target.write_text("the previous, complete output", encoding="utf-8")
+
+    def interrupted(self, other):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "replace", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _write(target, "the new output")
+    monkeypatch.undo()
+
+    assert target.read_text(encoding="utf-8") == "the previous, complete output"
+    _write(target, "the new output")
+    assert target.read_text(encoding="utf-8") == "the new output"
+    assert not list(tmp_path.glob(".*.part")), "no temporary file left behind"
+
+
+def test_ocr_of_a_locked_pdf_fails_instead_of_copying_it(engine, tmp_path, invoice_pdf):
+    """It used to exit 0, print "0 of 0 pages layered" and write a byte-for-byte
+    copy of the input — success, as far as any script could tell."""
+    pypdf = pytest.importorskip("pypdf")
+    writer = pypdf.PdfWriter(clone_from=pypdf.PdfReader(invoice_pdf))
+    writer.encrypt(user_password="geheim", owner_password="owner", algorithm="AES-256")
+    locked = tmp_path / "locked.pdf"
+    with locked.open("wb") as handle:
+        writer.write(handle)
+    out = tmp_path / "out.pdf"
+
+    assert main(["ocr", str(locked), "-o", str(out), "-q"]) == 1
+    assert not out.exists()
+    assert main(["ocr", str(locked), "-o", str(out), "-q", "--password", "geheim"]) == 0
+    assert out.read_bytes().startswith(b"%PDF")

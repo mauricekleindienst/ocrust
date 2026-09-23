@@ -39,6 +39,23 @@ print(pages, "pages")
 
 A folder or a glob can be passed instead of a list of files.
 
+## Password-protected PDFs
+
+```bash
+ocrust ocr statement.pdf --password geheim
+OCRUST_PASSWORD=geheim ocrust pdf statements/ -o all.pdf
+```
+
+A PDF protected by an owner password alone — printing or copying restricted, but
+readable by anyone — opens without one, and that covers most bank statements and
+e-invoices. A PDF that needs a password to *read* is an error that says so until
+the password is given, on every command.
+
+The output of `ocrust ocr` is written without the password: the text layer is
+added to the document as it reads once opened, and the command says so. If the
+file has to stay locked, encrypt it again afterwards. `ocrust pdf` builds a new
+document, so its output was never going to carry the old protection.
+
 ## Making an existing PDF searchable
 
 ```bash

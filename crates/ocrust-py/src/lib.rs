@@ -59,6 +59,8 @@ impl PyEngine {
         page_workers = None,
         memory = None,
         pdf_dpi = None,
+        pdf_password = None,
+        max_pixels = None,
         io_retries = None,
         preprocess = true,
         deskew = None,
@@ -87,6 +89,8 @@ impl PyEngine {
         page_workers: Option<usize>,
         memory: Option<&str>,
         pdf_dpi: Option<f32>,
+        pdf_password: Option<String>,
+        max_pixels: Option<u64>,
         io_retries: Option<u32>,
         preprocess: bool,
         deskew: Option<bool>,
@@ -133,6 +137,10 @@ impl PyEngine {
                     )))
                 }
             };
+        }
+        config.ingest.pdf_password = pdf_password.map(ocrust_core::ingest::Password);
+        if let Some(limit) = max_pixels {
+            config.ingest.max_pixels = limit;
         }
         if let Some(dpi) = pdf_dpi {
             config.ingest.pdf_dpi = dpi;
@@ -389,6 +397,7 @@ impl PyEngine {
             dpi: dpi.unwrap_or(self.inner.config().ingest.pdf_dpi),
             skip_pages_with_text,
             compress,
+            password: self.inner.config().ingest.pdf_password.clone(),
         };
         let outcome: ocrust_core::Result<(Vec<u8>, OverlayReport)> =
             py.detach(|| self.inner.add_pdf_text_layer(&data, &options));
@@ -413,6 +422,7 @@ impl PyEngine {
     ) -> PyResult<Vec<PagePlanTuple>> {
         let options = OverlayOptions {
             skip_pages_with_text,
+            password: self.inner.config().ingest.pdf_password.clone(),
             ..Default::default()
         };
         let plans = self

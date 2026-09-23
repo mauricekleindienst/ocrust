@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+import ocrust
 from conftest import squash
 
 
@@ -280,3 +283,90 @@ def test_a_batch_keeps_its_page_selection_for_every_file(engine, invoice_pdf, tm
     assert sorted(p.name for p in out.iterdir()) == ["a.txt", "b.txt", "c.txt"]
     for written in out.iterdir():
         assert written.read_text().strip(), written
+
+
+def _locked(source: Path, target: Path) -> Path:
+    pypdf = pytest.importorskip("pypdf")
+    writer = pypdf.PdfWriter(clone_from=pypdf.PdfReader(source))
+    writer.encrypt(user_password="geheim", owner_password="owner", algorithm="AES-256")
+    with target.open("wb") as handle:
+        writer.write(handle)
+    return target
+
+
+def test_a_locked_pdf_names_the_password_it_needs(engine, tmp_path, invoice_pdf):
+    locked = _locked(invoice_pdf, tmp_path / "locked.pdf")
+    models = Path(engine.models["detection"]).parent
+
+    # `scan` treats a file it cannot open as unreadable — a ValueError, which
+    # `except (IOError, ValueError)` in a batch loop skips. `ocr_pdf` reports
+    # every failure as OcrustError, as it always has. Either way it is an
+    # error now: it used to succeed, layering "0 of 0 pages".
+    with pytest.raises(ValueError, match="protected by a password"):
+        engine.scan(locked)
+    with pytest.raises(ocrust.OcrustError, match="protected by a password"):
+        engine.ocr_pdf(locked)
+
+    wrong = ocrust.Ocr(models_dir=models, password="falsch")
+    with pytest.raises(ocrust.OcrustError, match="does not open"):
+        wrong.ocr_pdf(locked)
+
+    right = ocrust.Ocr(models_dir=models, password="geheim")
+    # The fixture already carries text, so force the layer: that proves the
+    # decrypted page is rendered and read, not merely counted.
+    data, report = right.ocr_pdf(locked, skip_pages_with_text=False)
+    assert report["pages"] == 1 and report["pages_with_layer"] == 1
+    assert right.scan(locked).text.strip()
+
+
+def test_an_oversized_image_is_refused_before_decoding(engine, tmp_path):
+    """A picture declares its size first; one too large is refused on that."""
+    from PIL import Image
+
+    big = tmp_path / "big.png"
+    Image.new("L", (2000, 1500), 255).save(big)
+    models = Path(engine.models["detection"]).parent
+
+    strict = ocrust.Ocr(models_dir=models, max_pixels=1_000_000)
+    # An input it will not read is a ValueError, like any unreadable file.
+    with pytest.raises(ValueError, match="megapixels"):
+        strict.scan(big)
+    assert ocrust.Ocr(models_dir=models, max_pixels=0).scan(big).pages
+
+
+def test_a_decomposed_query_finds_composed_text(engine, tmp_path):
+    """ "Grüße" typed on a Mac arrives as u + combining diaeresis and matched
+    nothing, because recognized text is composed."""
+    import unicodedata
+
+    from conftest import _pdf_with_text
+
+    pdf = tmp_path / "gruss.pdf"
+    pdf.write_bytes(_pdf_with_text([("Viele Gruesse und Grüße", 30)]))
+    doc = engine.scan(pdf)
+    composed = unicodedata.normalize("NFC", "Grüße")
+    decomposed = unicodedata.normalize("NFD", "Grüße")
+    assert composed != decomposed
+    assert len(doc.search(decomposed)) == len(doc.search(composed)) >= 1
+
+
+def test_the_documented_batch_loop_survives_every_unreadable_file(engine, tmp_path, invoice_pdf):
+    """The error contract: an unreadable file raises IOError or ValueError, so
+
+        except (IOError, ValueError): skip it
+
+    keeps a batch going. A PDF with a valid header and nothing after it raised a
+    bare RuntimeError instead, and the loop the documentation recommends crashed.
+    """
+    from PIL import Image
+
+    damaged = tmp_path / "header_only.pdf"
+    damaged.write_bytes(b"%PDF-1.7\n")
+    locked = _locked(invoice_pdf, tmp_path / "locked.pdf")
+    huge = tmp_path / "huge.png"
+    Image.new("L", (1200, 1000), 255).save(huge)
+    strict = ocrust.Ocr(models_dir=Path(engine.models["detection"]).parent, max_pixels=1_000_000)
+
+    for scanner, path in ((engine, damaged), (engine, locked), (strict, huge)):
+        with pytest.raises((OSError, ValueError)):
+            scanner.scan(path)

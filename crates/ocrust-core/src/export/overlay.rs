@@ -36,6 +36,10 @@ pub struct OverlayOptions {
     pub skip_pages_with_text: bool,
     /// Compress the added content streams.
     pub compress: bool,
+    /// Password for an encrypted PDF. The output is written decrypted: the
+    /// layer is added to the document as it reads once opened, and a password
+    /// cannot be re-applied with the same key.
+    pub password: Option<crate::ingest::Password>,
 }
 
 impl Default for OverlayOptions {
@@ -44,6 +48,7 @@ impl Default for OverlayOptions {
             dpi: 200.0,
             skip_pages_with_text: true,
             compress: true,
+            password: None,
         }
     }
 }
@@ -121,7 +126,7 @@ pub struct PagePlan {
 /// Useful on its own (`ocrust ocr --dry-run`) and used internally so that only
 /// the pages that need OCR are rasterized.
 pub fn plan(pdf: &[u8], opts: &OverlayOptions) -> Result<Vec<PagePlan>> {
-    let doc = load(pdf)?;
+    let doc = load(pdf, opts.password.as_ref())?;
     let mut plans = Vec::new();
     for (position, (_, page_id)) in doc.get_pages().into_iter().enumerate() {
         let page_box = page_box(&doc, page_id)?;
@@ -160,6 +165,13 @@ where
         pages_skipped: plans.len() - wanted.len(),
         ..Default::default()
     };
+    // A PDF with no readable pages is not a PDF with nothing left to do. The
+    // pass-through below is for documents whose every page already has text;
+    // taking it for zero pages is how a locked file used to come back
+    // unchanged, "0 of 0 pages layered", with a successful exit.
+    if plans.is_empty() {
+        return Err(Error::Pdf("no readable pages in this PDF".into()));
+    }
     if wanted.is_empty() {
         return Ok((pdf.to_vec(), report));
     }
@@ -170,11 +182,12 @@ where
         std::sync::Arc::new(pdf.to_vec()),
         &crate::ingest::IngestConfig {
             pdf_dpi: opts.dpi,
+            pdf_password: opts.password.clone(),
             ..Default::default()
         },
     )?;
 
-    let mut doc = load(pdf)?;
+    let mut doc = load(pdf, opts.password.as_ref())?;
     let page_ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
     let font_id = doc.add_object(dictionary! {
         "Type" => "Font",
@@ -246,8 +259,22 @@ where
     Ok((out, report))
 }
 
-fn load(pdf: &[u8]) -> Result<PdfDocument> {
-    PdfDocument::load_mem(pdf).map_err(|e| Error::Pdf(format!("could not parse PDF: {e}")))
+fn load(pdf: &[u8], password: Option<&crate::ingest::Password>) -> Result<PdfDocument> {
+    let loaded = match password {
+        Some(p) => PdfDocument::load_mem_with_options(pdf, lopdf::LoadOptions::with_password(&p.0)),
+        None => PdfDocument::load_mem(pdf),
+    };
+    let doc = loaded.map_err(|e| match e {
+        lopdf::Error::InvalidPassword => crate::ingest::pdf::password_error(true),
+        other => Error::Unsupported(format!("could not parse PDF: {other}")),
+    })?;
+    // lopdf does not refuse a document it cannot decrypt: it logs a warning and
+    // returns it still encrypted, and every page of it then reads as missing.
+    // Encrypted in the file but never decrypted is the signature of that.
+    if doc.is_encrypted() && !doc.was_encrypted() {
+        return Err(crate::ingest::pdf::password_error(password.is_some()));
+    }
+    Ok(doc)
 }
 
 /// Builds the content stream holding the invisible text for one page.
@@ -524,6 +551,35 @@ mod tests {
     use super::*;
     use crate::doc::{Block, BlockKind, Line, PageOrigin};
     use crate::geom::{Quad, Rect};
+
+    /// A PDF with no page that can be read is an error. The pass-through for a
+    /// document whose every page already has text used to catch this case as
+    /// well, which is how a password-protected file came back byte for byte
+    /// unchanged — "0 of 0 pages layered", and a successful exit.
+    #[test]
+    fn a_pdf_without_readable_pages_is_an_error_not_a_pass_through() {
+        let mut doc = PdfDocument::with_version("1.5");
+        let pages = doc.add_object(lopdf::dictionary! {
+            "Type" => "Pages",
+            "Kids" => Vec::<lopdf::Object>::new(),
+            "Count" => 0,
+        });
+        let catalog = doc.add_object(lopdf::dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages,
+        });
+        doc.trailer.set("Root", catalog);
+        let mut pdf = Vec::new();
+        doc.save_to(&mut pdf).unwrap();
+
+        let outcome = add_text_layer(
+            &pdf,
+            &OverlayOptions::default(),
+            |_: usize, _: RgbImage| -> Result<Page> { unreachable!("nothing to recognize") },
+        );
+        let err = outcome.unwrap_err().to_string();
+        assert!(err.contains("no readable pages"), "{err}");
+    }
 
     fn page_with_line(text: &str, bbox: Rect, width: u32, height: u32) -> Page {
         Page {

@@ -101,6 +101,39 @@ Note that content sniffing beats the extension: a PNG named `.pdf` is read as a
 PNG. The reverse — a real PDF named `.png` — also works. TGA is the one format
 with no magic bytes, so it is resolved by file name.
 
+## `this PDF is protected by a password`
+
+The PDF needs a password to open. Pass it:
+
+```bash
+ocrust scan statement.pdf --password geheim
+OCRUST_PASSWORD=geheim ocrust ocr statement.pdf     # stays out of shell history
+```
+
+In Python, `ocrust.Ocr(password="geheim")`. `the password given does not open
+this PDF` means the password is wrong. A PDF protected by an owner password
+alone opens without one; this message is only for files that need a password
+to *read*. Until 0.2.4, `ocrust ocr` on such a file exited 0 and wrote an
+unchanged copy — if a script of yours relied on that, it was relying on a bug.
+
+## `… pixels is … megapixels, over the …-megapixel limit`
+
+The image declares more pixels than `max_pixels` allows, and was refused before
+any of it was decoded. A few kilobytes of CCITT TIFF can declare hundreds of
+megapixels, each of which costs three bytes once decoded — which is what the
+limit is for. For a genuine oversized scan, raise it: `--max-pixels 400000000`,
+or `max_pixels=` in Python; `0` removes it. The default admits an A0 sheet at
+300 dpi.
+
+## `… would both be written to …; none of them was read`
+
+Two inputs would produce the same output file — usually `rechnung.pdf` beside
+`rechnung.png` in one folder, or two files with one name listed from different
+folders. Neither is read, so neither can overwrite the other; the rest of the
+batch still runs and the exit status is 1. Rename one, or scan them into
+separate output folders. Files in *subfolders* of a scanned folder never clash:
+the output mirrors the folder.
+
 ## `recognition model … does not cover the requested language(s)`
 
 ```text

@@ -7,6 +7,7 @@ compare and print without surprises.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -368,6 +369,11 @@ class Document:
         """
         if not needle:
             return ()
+        # Recognized text is composed (NFC); a query typed on macOS, or pasted
+        # out of some PDFs, is often decomposed — "ü" as "u" plus a combining
+        # diaeresis — and would match nothing. Only the needle is normalized, so
+        # every offset still points into `line.text` and the boxes stay right.
+        needle = unicodedata.normalize("NFC", needle)
         pattern = needle if regex else re.escape(needle)
         if whole_words:
             pattern = rf"\b(?:{pattern})\b"

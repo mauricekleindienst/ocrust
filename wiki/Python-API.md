@@ -34,6 +34,8 @@ ocr = ocrust.Ocr(
     threads=None,         # threads per inference operator
     page_workers=None,    # pages in parallel; None -> 1
     pdf_dpi=None,         # PDF rasterization DPI, default 200
+    password=None,        # for encrypted PDFs; owner-only protection needs none
+    max_pixels=None,      # decompression-bomb guard; ~179 million by default, 0 = off
     io_retries=None,      # extra attempts on a transient read failure; 2 by default
     preprocess=True,      # auto-invert, deskew, rescale
     deskew=None,          # deskew alone, when preprocess is on
@@ -63,6 +65,8 @@ the GIL for the whole scan, so a thread pool in Python parallelizes properly.
 | `det_limit_side` | The detector's working size (960). Large formats are tiled automatically above 3840 px. |
 | `det_unclip_ratio` | 1.5. Raise it when characters are clipped, lower it when neighbouring lines merge. |
 | `lang` | Always, in production. See [Languages](Languages.md). |
+| `password` | A PDF that needs a password to open. Protection by an owner password alone — the usual bank statement — needs none. A text layer added with `ocr_pdf` is written without the password. |
+| `max_pixels` | An image is refused on the size it declares, before any of it is decoded. The default is Pillow's threshold (178 956 970), which admits an A0 sheet at 300 dpi; lower it for a service that accepts uploads, `0` removes it. |
 | `io_retries` | Reading off a network share. Two retries by default; raise it for a share that drops, set `0` to fail fast. See [Network shares](Network-shares.md). |
 | `rec_space_gap` | Almost never. `0` disables space restoration, which you want only if a swallowed space is preferable to a wrongly inserted one. |
 
@@ -147,7 +151,9 @@ own `index`, so a hit still names the right page of the source document when onl
 some pages were scanned. The box is the union of the *words* the hit covers, which
 is what makes highlighting possible; without word boxes (`word_boxes=False`) it is
 the line's box. Matching is case-insensitive by default, because OCR case is not
-reliable enough to search on.
+reliable enough to search on. The query is normalized to composed Unicode first,
+so `Grüße` typed on a Mac — where `ü` often arrives as `u` plus a combining
+diaeresis — still finds the text.
 
 ## Converting into one PDF
 
@@ -275,6 +281,11 @@ for path in paths:
 
 `scan_many` raises `OcrustError` for a file that failed, after yielding the ones
 that succeeded before it.
+
+A PDF that needs a password, or an image over `max_pixels`, is an unreadable
+file like any other: `scan` and `read` raise `ValueError`, with a message that
+says what to pass. `ocr_pdf` reports every failure as `OcrustError`, these two
+included.
 
 ## Diagnostics
 

@@ -69,6 +69,18 @@ Output rules worth knowing:
   it is a **directory**, and each input gets its own file named after it. That is
   why `-f json -o results` over ten inputs writes ten files instead of
   overwriting one.
+- A folder is **mirrored**: `ocrust scan archive/ -o out/` writes
+  `archive/2024/rechnung.pdf` to `out/2024/rechnung.txt` and
+  `archive/2025/rechnung.pdf` to `out/2025/rechnung.txt`. Files at the top of the
+  folder, and files named on the command line, land directly in `out/` as they
+  always have.
+- Two inputs that would still share one output — `rechnung.pdf` beside
+  `rechnung.png`, or `a/x.png` and `b/x.png` named separately — are **refused by
+  name**, and neither is read; everything else in the batch still is, and the
+  run exits 1. Before 0.2.4 the second silently replaced the first.
+- Outputs are written **atomically**: to a hidden temporary file that then
+  replaces the target in one step. An interrupted run leaves the previous file
+  or none, never a truncated one.
 - Several inputs default to `--workers 4`; a single input to 1. Pages and
   documents share the cores with the inference threads, so more is not better —
   see [Performance](Performance.md).
@@ -93,6 +105,30 @@ done: 1 file, 4 pages, 88 lines, 6.2 s, 2 already written
 `--skip-existing` compares against the file the run *would* write, format
 included, so a text pass does not make a later `-f markdown` pass think it is
 finished. It needs `-o`: without an output path there is nothing to compare.
+Because outputs are written atomically, a file it finds was finished — and
+because a folder is mirrored, it is never another document's output.
+
+### Password-protected PDFs and oversized images
+
+```console
+$ ocrust ocr statement.pdf --password geheim
+$ OCRUST_PASSWORD=geheim ocrust scan statements/ -o out/   # kept out of shell history
+```
+
+`--password` works on `scan`, `pdf`, `ocr` and `tiff`; the `OCRUST_PASSWORD`
+environment variable does the same without leaving the password in your shell
+history or in the process list. A PDF protected by an owner password alone —
+the usual bank statement — opens without one. Without the password a locked PDF
+is an error that says so; `ocrust ocr` used to exit 0 with a byte-for-byte copy
+of the input. A text layer added to a password-protected PDF is written without
+the password, and `ocrust ocr` says so when it happens.
+
+`--max-pixels N` refuses images larger than N pixels before decoding a byte of
+them. An image declares its size up front, and a mostly blank CCITT TIFF of 9 KB
+can declare 144 megapixels — which used to cost 1.8 GB and 40 seconds. The
+default is Pillow's decompression-bomb threshold, about 179 million pixels,
+which admits an A0 sheet at 300 dpi; `0` removes the limit. PDF pages were
+already capped, at 4000 pixels on the long side.
 
 ### Reading from stdin
 

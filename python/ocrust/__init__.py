@@ -239,6 +239,13 @@ class Ocr:
         threads: Threads per inference operator. ``None`` lets the runtime decide.
         page_workers: Pages scanned in parallel. ``None`` means one per core.
         pdf_dpi: Rasterization resolution for PDF pages (default 200).
+        password: Password for encrypted PDFs. PDFs protected by an owner
+            password alone open without one. A text layer added to a
+            password-protected PDF is written without the password.
+        max_pixels: Largest image, in pixels, that will be decoded — a guard
+            against decompression bombs, checked before any decoding happens.
+            Defaults to Pillow's threshold (about 179 million), which admits an
+            A0 sheet at 300 dpi. ``0`` removes the limit.
         io_retries: Extra attempts when reading a file fails transiently
             (default 2). Reading off a network share is not a local read: SMB
             and NFS time out and drop connections for reasons that have nothing
@@ -273,6 +280,8 @@ class Ocr:
         page_workers: int | None = None,
         memory: str | None = None,
         pdf_dpi: float | None = None,
+        password: str | None = None,
+        max_pixels: int | None = None,
         io_retries: int | None = None,
         preprocess: bool = True,
         deskew: bool | None = None,
@@ -313,6 +322,8 @@ class Ocr:
             "page_workers": page_workers,
             "memory": memory,
             "pdf_dpi": pdf_dpi,
+            "pdf_password": password,
+            "max_pixels": max_pixels,
             "io_retries": io_retries,
             "preprocess": preprocess,
             "deskew": deskew,

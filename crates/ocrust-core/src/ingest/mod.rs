@@ -81,6 +81,33 @@ pub struct IngestConfig {
     pub read_retries: u32,
     /// How long to wait before the first retry; it doubles after that.
     pub retry_delay_ms: u64,
+    /// Largest image, in pixels, that will be decoded. `0` removes the limit.
+    ///
+    /// PDF pages have always been capped by `pdf_max_side`; image files were
+    /// not, and a picture declares its size before a byte of it is decoded. A
+    /// 9 KB CCITT TIFF of a 12000 × 12000 page took 1.8 GB and 40 s, and the
+    /// TIFF decoder's own limit let one fourteen times larger through. The
+    /// default is Pillow's decompression-bomb threshold — twice 89 478 485 —
+    /// which still admits an A0 sheet scanned at 300 dpi (139 Mpx).
+    pub max_pixels: u64,
+    /// Password for encrypted PDFs. `None` opens only those that need none —
+    /// which includes every PDF protected by an owner password alone.
+    pub pdf_password: Option<Password>,
+}
+
+/// Default for [`IngestConfig::max_pixels`]: Pillow's `DecompressionBombError`
+/// threshold, so a limit Python users already know.
+pub const DEFAULT_MAX_PIXELS: u64 = 2 * 89_478_485;
+
+/// A PDF password that stays out of logs: its `Debug` output is redacted, and
+/// an engine's configuration is exactly the kind of thing that gets logged.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Password(pub String);
+
+impl std::fmt::Debug for Password {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Password(<redacted>)")
+    }
 }
 
 impl Default for IngestConfig {
@@ -91,8 +118,28 @@ impl Default for IngestConfig {
             pages: None,
             read_retries: 2,
             retry_delay_ms: 150,
+            max_pixels: DEFAULT_MAX_PIXELS,
+            pdf_password: None,
         }
     }
+}
+
+/// Refuses a picture too large to decode safely, before any of it is decoded.
+///
+/// Returns the reason rather than an error, so each caller can label it once:
+/// a TIFF names its page, a single image its file.
+fn check_pixels(width: u32, height: u32, max_pixels: u64) -> std::result::Result<(), String> {
+    let pixels = width as u64 * height as u64;
+    if max_pixels > 0 && pixels > max_pixels {
+        return Err(format!(
+            "{width} × {height} pixels is {:.0} megapixels, over the {:.0}-megapixel limit \
+             that guards against decompression bombs; raise `max_pixels` \
+             (`--max-pixels`) if this is a genuine scan",
+            pixels as f64 / 1e6,
+            max_pixels as f64 / 1e6
+        ));
+    }
+    Ok(())
 }
 
 impl IngestConfig {
@@ -147,6 +194,8 @@ pub struct Reader {
     name: String,
     /// Zero-based page indices this reader will produce, in order.
     indices: Vec<usize>,
+    /// Pixel budget for pictures decoded later, from [`IngestConfig::max_pixels`].
+    max_pixels: u64,
 }
 
 enum Inner {
@@ -194,6 +243,8 @@ fn open_inner(source: &Source, name: String, cfg: &IngestConfig) -> Result<Reade
             inner: Inner::Frame(Some(image.clone())),
             name,
             indices: if cfg.wants(0) { vec![0] } else { Vec::new() },
+            // Already decoded by whoever handed it over: nothing left to guard.
+            max_pixels: 0,
         }),
         Source::Bytes { data, .. } => open_bytes(Arc::new(data.clone()), name, cfg),
         Source::Path(path) => {
@@ -222,7 +273,7 @@ fn open_bytes(data: Arc<Vec<u8>>, name: String, cfg: &IngestConfig) -> Result<Re
             }
         }
         Container::Tiff => {
-            let frames = Box::new(TiffFrames::new(data)?);
+            let frames = Box::new(TiffFrames::new(data, cfg.max_pixels)?);
             let total = frames.total;
             (Inner::Tiff(frames), total)
         }
@@ -232,6 +283,7 @@ fn open_bytes(data: Arc<Vec<u8>>, name: String, cfg: &IngestConfig) -> Result<Re
         inner,
         name,
         indices: (0..total).filter(|i| cfg.wants(*i)).collect(),
+        max_pixels: cfg.max_pixels,
     })
 }
 
@@ -263,7 +315,9 @@ impl Reader {
             inner,
             name,
             indices,
+            max_pixels,
         } = self;
+        let max_pixels = *max_pixels;
         let labelled = |e| label(name, e);
         match inner {
             // Taken, not cloned: the caller handed us this frame to scan.
@@ -282,7 +336,7 @@ impl Reader {
             }
             Inner::Encoded(data) => {
                 for &index in indices.iter() {
-                    let image = decode_single(data, Some(name)).map_err(labelled)?;
+                    let image = decode_single(data, Some(name), max_pixels).map_err(labelled)?;
                     sink(RawPage {
                         index,
                         image,
@@ -406,7 +460,7 @@ fn is_transient(error: &std::io::Error) -> bool {
 /// `hint` is the file name or extension, used when the bytes alone are not
 /// enough: TGA and a few other formats have no magic number, so content
 /// sniffing cannot identify them.
-fn decode_single(data: &[u8], hint: Option<&str>) -> Result<RgbImage> {
+fn decode_single(data: &[u8], hint: Option<&str>, max_pixels: u64) -> Result<RgbImage> {
     let mut reader = image::ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .map_err(Error::PlainIo)?;
@@ -416,6 +470,8 @@ fn decode_single(data: &[u8], hint: Option<&str>) -> Result<RgbImage> {
         }
     }
     let mut decoder = reader.into_decoder()?;
+    let (width, height) = decoder.dimensions();
+    check_pixels(width, height, max_pixels).map_err(Error::Unsupported)?;
     // Phone photos are almost always stored rotated with an EXIF tag.
     let orientation = decoder.orientation().ok();
     let mut img = DynamicImage::from_decoder(decoder)?;
@@ -447,6 +503,8 @@ struct TiffFrames {
     /// Directory the decoder currently sits on.
     at: usize,
     total: usize,
+    /// Pixel budget per frame; see [`IngestConfig::max_pixels`].
+    max_pixels: u64,
 }
 
 /// Lets one buffer back several cursors without being copied for each.
@@ -462,7 +520,7 @@ impl AsRef<[u8]> for SharedBytes {
 impl TiffFrames {
     /// Counts the directories, which needs no pixels decoded, and leaves a
     /// decoder parked on the first one.
-    fn new(data: Arc<Vec<u8>>) -> Result<Self> {
+    fn new(data: Arc<Vec<u8>>, max_pixels: u64) -> Result<Self> {
         let data = SharedBytes(data);
         let mut counter = decoder_for(&data)?;
         let mut total = 1usize;
@@ -477,6 +535,7 @@ impl TiffFrames {
             data,
             at: 0,
             total,
+            max_pixels,
         })
     }
 
@@ -502,6 +561,9 @@ impl TiffFrames {
             .decoder
             .dimensions()
             .map_err(|e| tiff_error(page, &e.to_string()))?;
+        // Checked before `read_image`: a CCITT page of a few kilobytes can
+        // declare hundreds of megapixels, and each one becomes three bytes.
+        check_pixels(w, h, self.max_pixels).map_err(|reason| tiff_error(page, &reason))?;
         let color = self
             .decoder
             .colortype()
@@ -670,6 +732,63 @@ mod tests {
         255, 255, 255,
     ];
 
+    /// A picture is refused on the size it declares, before any of it is
+    /// decoded: a 9 KB CCITT TIFF declaring 144 megapixels used to cost 1.8 GB
+    /// and 40 seconds before anything looked at it.
+    #[test]
+    fn an_oversized_picture_is_refused_before_it_is_decoded() {
+        assert!(
+            check_pixels(100, 100, 10_000).is_ok(),
+            "exactly at the limit"
+        );
+        let reason = check_pixels(101, 100, 10_000).unwrap_err();
+        assert!(reason.contains("101 × 100"), "{reason}");
+        assert!(
+            reason.contains("max_pixels"),
+            "says how to raise it: {reason}"
+        );
+        assert!(
+            check_pixels(u32::MAX, u32::MAX, 0).is_ok(),
+            "0 means no limit"
+        );
+
+        // Through each decode path: a single image, and a TIFF's frames.
+        let img = RgbImage::from_pixel(8, 8, image::Rgb([255, 255, 255]));
+        let mut png = Vec::new();
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let err = decode_single(&png, None, 63).unwrap_err().to_string();
+        assert!(err.contains("megapixels"), "{err}");
+        assert!(decode_single(&png, None, 64).is_ok());
+
+        let mut frames = TiffFrames::new(Arc::new(multipage_tiff(2)), 35).unwrap();
+        let err = frames.frame(0).unwrap_err().to_string();
+        assert!(err.contains("TIFF page 1"), "{err}");
+        // Labelled once: the page, then the reason, not the error kind twice.
+        assert_eq!(err.matches("unsupported input").count(), 1, "{err}");
+    }
+
+    #[test]
+    fn the_default_limit_admits_an_a0_sheet_at_300_dpi() {
+        // 841 × 1189 mm at 300 dpi is the largest standard sheet at archival
+        // resolution, and it has to keep working.
+        let (w, h) = (9933u32, 14043u32);
+        assert!(check_pixels(w, h, DEFAULT_MAX_PIXELS).is_ok());
+        assert_eq!(DEFAULT_MAX_PIXELS, 178_956_970, "Pillow's threshold");
+    }
+
+    #[test]
+    fn a_password_never_appears_in_debug_output() {
+        let cfg = IngestConfig {
+            pdf_password: Some(Password("geheim".into())),
+            ..Default::default()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains("geheim"), "{shown}");
+        assert!(shown.contains("redacted"), "{shown}");
+    }
+
     /// Bilevel is how a scanned archive and every CCITT fax is stored, and it
     /// used to fail outright: the packed rows fell through to "unsupported pixel
     /// layout (Gray(1))". The corpus never caught it because its "1-bit fax"
@@ -690,7 +809,7 @@ mod tests {
         };
 
         let decode = |bytes: &[u8]| {
-            TiffFrames::new(Arc::new(bytes.to_vec()))
+            TiffFrames::new(Arc::new(bytes.to_vec()), 0)
                 .expect("a readable TIFF")
                 .frame(0)
                 .expect("page 1 must decode")
@@ -800,10 +919,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            decode_single(&tga, None).is_err(),
+            decode_single(&tga, None, 0).is_err(),
             "sniffing cannot work here"
         );
-        let decoded = decode_single(&tga, Some("page.tga")).expect("hint decodes it");
+        let decoded = decode_single(&tga, Some("page.tga"), 0).expect("hint decodes it");
         assert_eq!(decoded.dimensions(), (4, 3));
 
         // The same path goes through the public entry point.
@@ -978,7 +1097,7 @@ mod tests {
     fn a_frame_walk_can_go_backwards_by_starting_over() {
         // Nothing in the pipeline reads a TIFF backwards, but the walker has to
         // survive it rather than hand back the wrong frame.
-        let mut frames = TiffFrames::new(Arc::new(multipage_tiff(4))).unwrap();
+        let mut frames = TiffFrames::new(Arc::new(multipage_tiff(4)), 0).unwrap();
         assert_eq!(frames.total, 4);
         assert_eq!(frames.frame(3).unwrap().get_pixel(0, 0).0[0], 60);
         assert_eq!(frames.frame(1).unwrap().get_pixel(0, 0).0[0], 20);
