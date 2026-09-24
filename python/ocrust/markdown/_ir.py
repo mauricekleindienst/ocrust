@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Union
 
@@ -267,7 +268,7 @@ def normalize(content: list[Inline]) -> list[Inline]:
                 isinstance(last, Span)
                 and last.kind == item.kind
                 and last.url == item.url
-                and item.kind != "code"
+                and item.kind not in ("code", "image")
             ):
                 last.children.extend(item.children)
             else:
@@ -280,7 +281,8 @@ def normalize(content: list[Inline]) -> list[Inline]:
             out.append("".join(item))
         elif isinstance(item, Span):
             item.children = normalize(item.children)
-            if item.children or item.kind == "code":
+            # A picture without alt text is still a picture.
+            if item.children or item.kind in ("code", "image"):
                 out.append(item)
         else:
             out.append(item)
@@ -330,6 +332,35 @@ def subscript(text: str) -> str:
 
 def nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
+
+
+def retarget_images(blocks: list[Block], change: Callable[[str], str]) -> None:
+    """Points every picture link in `blocks` somewhere else: pictures of
+    their own, in list items, and in table cells."""
+
+    def inline(items: list[Inline]) -> None:
+        for item in items:
+            if isinstance(item, Span):
+                if item.kind == "image" and item.url:
+                    item.url = change(item.url)
+                inline(item.children)
+
+    for block in blocks:
+        if isinstance(block, Image):
+            if block.target:
+                block.target = change(block.target)
+            retarget_images(block.blocks, change)
+        elif isinstance(block, (Quote, Footnote)):
+            retarget_images(block.blocks, change)
+        elif isinstance(block, ListBlock):
+            for item in block.items:
+                retarget_images(item, change)
+        elif isinstance(block, Table):
+            for row in block.rows:
+                for cell in row:
+                    inline(cell)
+        elif isinstance(block, (Paragraph, Heading)):
+            inline(block.content)
 
 
 def flatten(blocks: list[Block]) -> list[Inline]:

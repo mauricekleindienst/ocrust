@@ -114,8 +114,13 @@ def inline(content: Iterable[Inline], *, breaks: str = "  \n") -> str:
             if text.startswith("[") and previous.endswith("!") and not previous.endswith("\\!"):
                 # `Neu!` right before a link would make it a picture.
                 out[-1] = previous[:-1] + "\\!"
-            elif isinstance(items[index - 1], FootnoteRef) and text[0] in "([:":
-                # `[^1](2019)` would read as a link, `[^1]:` as a footnote.
+            elif (
+                isinstance(item, str)
+                and isinstance(items[index - 1], FootnoteRef)
+                and text[0] in "([:"
+            ):
+                # `[^1](2019)` would read as a link, `[^1]:` as a footnote;
+                # a second reference or a link right after one is markup.
                 text = "\\" + text
         out.append(text)
     return "".join(out)

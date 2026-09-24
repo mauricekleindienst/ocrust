@@ -168,9 +168,10 @@ def _page(page: Page, boilerplate: set[str], levels: dict[float, int]) -> list[B
 
     blocks: list[tuple[ScanBlock, list[Line]]] = []
     for block in page.blocks:
-        lines = (
-            list(block.lines) if block.kind == "table" else [ln for ln in block.lines if kept(ln)]
-        )
+        # A heading is never a running head, even when it says the same: the
+        # title on page one is what a browser repeats small at every top.
+        whole = block.kind in ("table", "heading")
+        lines = list(block.lines) if whole else [ln for ln in block.lines if kept(ln)]
         if lines and any(line.text.strip() for line in lines):
             blocks.append((block, lines))
 

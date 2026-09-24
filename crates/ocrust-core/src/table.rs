@@ -98,6 +98,11 @@ const MIN_COLUMN_ROWS: usize = 2;
 /// How far apart two rows may sit, in text heights, and still be one table.
 const MAX_ROW_GAP: f32 = 2.0;
 
+/// How close under a row, in text heights, the next line of a cell that wraps
+/// sits: at the line spacing, with nothing between. Rows are set further
+/// apart than that, or a wrapped cell could not be told from a row.
+const CONTINUATION_GAP: f32 = 0.35;
+
 /// A run of lines that reads as a table.
 pub(crate) struct Found {
     /// The first line of the table, and one past its last.
@@ -140,7 +145,7 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32) -> Vec<Found> 
             at += 1;
             continue;
         }
-        let (end, candidates) = grow(&rows, lines, at, text_height * MAX_ROW_GAP);
+        let (end, candidates) = grow(&rows, lines, at, text_height);
         log::debug!("  grow from {at}: end {end}, {candidates} candidate rows");
         if candidates >= MIN_ROWS {
             if let Some(columns) = columns_of(&rows[at..end], gutter) {
@@ -162,7 +167,13 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32) -> Vec<Found> 
                 found.push(Found {
                     start,
                     end,
-                    table: grid(&rows[start..end], &columns, gutter, adopted),
+                    table: grid(
+                        &rows[start..end],
+                        &continuations(&rows[start..end], &lines[start..end], text_height),
+                        &columns,
+                        gutter,
+                        adopted,
+                    ),
                 });
                 at = end;
                 taken = end;
@@ -247,7 +258,8 @@ fn gutter_between_groups(gaps: &[f32]) -> Option<f32> {
 ///
 /// Returns one past the last row of the run and how many of its rows carry more
 /// than one cell.
-fn grow(rows: &[Vec<Candidate>], lines: &[Line], start: usize, max_row_gap: f32) -> (usize, usize) {
+fn grow(rows: &[Vec<Candidate>], lines: &[Line], start: usize, text_height: f32) -> (usize, usize) {
+    let max_row_gap = text_height * MAX_ROW_GAP;
     let mut last = start;
     let mut candidates = 1usize;
     let mut previous = gutters_of(&rows[start]);
@@ -270,11 +282,55 @@ fn grow(rows: &[Vec<Candidate>], lines: &[Line], start: usize, max_row_gap: f32)
             // A line across the whole width — a title, a total — sits inside the
             // table without saying anything about its columns.
             continue;
+        } else if offset == last + 1
+            && lines[offset].bbox.y0 - lines[offset - 1].bbox.y1 <= text_height * CONTINUATION_GAP
+            && within_a_cell(row, &rows[last])
+        {
+            // The next line of a cell that wraps: part of the row above.
+            last = offset;
         } else {
             break;
         }
     }
     (last + 1, candidates)
+}
+
+/// Whether every cell of `row` lies under one cell of `above`.
+fn within_a_cell(row: &[Candidate], above: &[Candidate]) -> bool {
+    !row.is_empty()
+        && row.iter().all(|candidate| {
+            let bbox = candidate.cell.bbox;
+            above
+                .iter()
+                .filter(|a| a.cell.bbox.horizontal_overlap(&bbox) > 0.0)
+                .count()
+                == 1
+        })
+}
+
+/// Which rows of a run carry on the row above: the next lines of cells that
+/// wrap. A row is one when it has fewer cells than the table's fullest rows
+/// and sits right under the line above, while the table's rows are set
+/// clearly further apart than that. A table set without space between its
+/// rows keeps every line a row.
+fn continuations(rows: &[Vec<Candidate>], lines: &[Line], text_height: f32) -> Vec<bool> {
+    let fullest = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let gap = |i: usize| lines[i].bbox.y0 - lines[i - 1].bbox.y1;
+    let mut row_gaps: Vec<f32> = (1..rows.len())
+        .filter(|&i| rows[i].len() == fullest)
+        .map(gap)
+        .collect();
+    row_gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let usual = row_gaps.get(row_gaps.len() / 2).copied().unwrap_or(0.0);
+    (0..rows.len())
+        .map(|i| {
+            i > 0
+                && rows[i].len() < fullest
+                && gap(i) <= text_height * CONTINUATION_GAP
+                && gap(i) < usual * 0.5
+                && within_a_cell(&rows[i], &rows[i - 1])
+        })
+        .collect()
 }
 
 /// The gaps between one row's cells.
@@ -394,10 +450,23 @@ fn wide(bbox: &Rect, extent: Rect) -> bool {
 /// already cut it into titles and it must be cut even though it runs the width of
 /// the table. Any other row that wide, alone on its line, is a title or a note
 /// and stays whole.
-fn grid(rows: &[Vec<Candidate>], columns: &[(f32, f32)], gutter: f32, header: bool) -> Table {
+fn grid(
+    rows: &[Vec<Candidate>],
+    continues: &[bool],
+    columns: &[(f32, f32)],
+    gutter: f32,
+    header: bool,
+) -> Table {
     let extent = extent_of(rows).unwrap_or_default();
-    let mut cells = Vec::new();
-    for (row, row_cells) in rows.iter().enumerate() {
+    let mut cells: Vec<Cell> = Vec::new();
+    // Where each (row, column) cell is, so a wrapped cell's next line joins it.
+    let mut placed: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+    let mut row = 0usize;
+    for (index, row_cells) in rows.iter().enumerate() {
+        if index > 0 && !continues.get(index).copied().unwrap_or(false) {
+            row += 1;
+        }
         for candidate in row_cells {
             // The columns are better evidence than the gap threshold that found
             // them: a header setting two column titles a word space apart is cut
@@ -411,6 +480,14 @@ fn grid(rows: &[Vec<Candidate>], columns: &[(f32, f32)], gutter: f32, header: bo
             };
             for piece in pieces {
                 let (column, span) = place(&piece.bbox, columns);
+                if let Some(&at) = placed.get(&(row, column)) {
+                    let cell = &mut cells[at];
+                    cell.text = format!("{} {}", cell.text, piece.text);
+                    cell.bbox = cell.bbox.union(&piece.bbox);
+                    cell.confidence = cell.confidence.min(piece.confidence);
+                    continue;
+                }
+                placed.insert((row, column), cells.len());
                 cells.push(Cell {
                     row,
                     column,
@@ -424,7 +501,7 @@ fn grid(rows: &[Vec<Candidate>], columns: &[(f32, f32)], gutter: f32, header: bo
     }
     cells.sort_by_key(|c| (c.row, c.column));
     Table {
-        rows: rows.len(),
+        rows: if rows.is_empty() { 0 } else { row + 1 },
         columns: columns.len(),
         cells,
     }

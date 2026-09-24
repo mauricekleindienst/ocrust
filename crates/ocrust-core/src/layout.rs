@@ -139,9 +139,26 @@ fn median_text_height(lines: &[Line]) -> f32 {
     hs[hs.len() / 2]
 }
 
-/// The size most of the characters outside `tables` are set in: the height
-/// at which half of them are in lines at most that tall.
-fn body_text_height(lines: &[Line], tables: &[crate::table::Found]) -> Option<f32> {
+/// Share of a page's characters, outside its tables, that makes a size the
+/// body's: a heading is a small part of what a page says.
+const BODY_SHARE: f32 = 0.3;
+/// Print smaller than this, in points, is small print: footnotes, the terms
+/// of business, a caption.
+const SMALL_PRINT_POINTS: f32 = 8.0;
+/// A line's box on a page read from its own text, as a share of its font
+/// size: the ascent and the descent together.
+const LINE_OVER_SIZE: f32 = 1.2;
+
+/// The size of the body text, outside `tables`, on a page whose sizes are
+/// exact: the largest of the median line's, the median character's, and any
+/// size a large share of the characters are set in. A price list is many
+/// short lines, and the terms of business in six points few long ones; the
+/// letter above either is still the body, and never a heading.
+fn body_text_height(
+    lines: &[Line],
+    tables: &[crate::table::Found],
+    pixels_per_point: f32,
+) -> Option<f32> {
     let mut sized: Vec<(f32, usize)> = lines
         .iter()
         .enumerate()
@@ -149,19 +166,46 @@ fn body_text_height(lines: &[Line], tables: &[crate::table::Found]) -> Option<f3
         .map(|(_, line)| (line.quad.edge_height().max(1.0), line.text.chars().count()))
         .filter(|(_, chars)| *chars > 0)
         .collect();
+    // Small print is never the body, as long as there is other text: a short
+    // letter over the terms of business in six points is still a letter.
+    if pixels_per_point > 0.0 {
+        let smallest = SMALL_PRINT_POINTS * LINE_OVER_SIZE * pixels_per_point;
+        if sized.iter().any(|(height, _)| *height >= smallest) {
+            sized.retain(|(height, _)| *height >= smallest);
+        }
+    }
     let total: usize = sized.iter().map(|(_, chars)| chars).sum();
     if total == 0 {
         return None;
     }
     sized.sort_by(|a, b| cmp_f32(a.0, b.0));
+    let by_line = sized[sized.len() / 2].0;
     let mut seen = 0;
-    for (height, chars) in sized {
+    let mut by_character = by_line;
+    for (height, chars) in &sized {
         seen += chars;
         if seen * 2 >= total {
-            return Some(height);
+            by_character = *height;
+            break;
         }
     }
-    None
+    // Sizes a twentieth apart are one size.
+    let mut largest_share = 0.0f32;
+    let mut index = 0;
+    while index < sized.len() {
+        let first = sized[index].0;
+        let mut chars = 0;
+        let mut last = first;
+        while index < sized.len() && sized[index].0 <= first * 1.05 {
+            chars += sized[index].1;
+            last = sized[index].0;
+            index += 1;
+        }
+        if chars as f32 >= BODY_SHARE * total as f32 {
+            largest_share = largest_share.max(last);
+        }
+    }
+    Some(by_line.max(by_character).max(largest_share))
 }
 
 fn median_height(lines: &[Line]) -> f32 {
@@ -262,16 +306,22 @@ fn xy_cut(
     // has enough baselines to tell: a drawing's title block is a table even
     // though the sheet around it is not, and the dimension labels outside it must
     // not be merged just because the block below them repeats.
-    let max_merge_gap =
-        if cfg.merge_baselines && baseline_bands(&lines, cfg.baseline_overlap).len() >= 3 {
-            if has_repeating_columns(&lines, scale, cfg.baseline_overlap) {
-                f32::MAX
-            } else {
-                scale * cfg.max_merge_gap_factor
-            }
+    // Only baselines with more than one box on them say anything about columns:
+    // the second line of a cell that wraps, alone on its baseline, does not
+    // make two rows of a table enough to judge them apart from the page.
+    let rows_of_cells = baseline_bands(&lines, cfg.baseline_overlap)
+        .iter()
+        .filter(|band| band.len() >= 2)
+        .count();
+    let max_merge_gap = if cfg.merge_baselines && rows_of_cells >= 3 {
+        if has_repeating_columns(&lines, scale, cfg.baseline_overlap) {
+            f32::MAX
         } else {
-            inherited_merge_gap
-        };
+            scale * cfg.max_merge_gap_factor
+        }
+    } else {
+        inherited_merge_gap
+    };
 
     if lines.len() <= 1 || depth > 12 {
         emit_leaf(lines, cfg, max_merge_gap, out);
@@ -330,9 +380,10 @@ fn xy_cut(
                         cfg,
                     ));
             let straddled = shared_baseline_share(&left, &right, cfg.baseline_overlap);
-            // A column is a block of lines. One box on a side is a cell, a page
-            // number or a stray label — never a column.
-            let thin_side = left.len() < 2 || right.len() < 2;
+            // A column is a block of lines. One baseline on a side — a cell or
+            // two of a row, a page number, a stray label — is never a column.
+            let thin_side = baseline_bands(&left, cfg.baseline_overlap).len() < 2
+                || baseline_bands(&right, cfg.baseline_overlap).len() < 2;
             let narrowest = horizontal_span(&left).min(horizontal_span(&right));
             let region_width = horizontal_span(&left).max(0.0) + gap + horizontal_span(&right);
             let too_narrow = narrowest < gap * cfg.column_min_width_over_gap
@@ -735,7 +786,7 @@ fn cmp_f32(a: f32, b: f32) -> std::cmp::Ordering {
 
 /// Groups ordered lines into blocks and classifies them.
 pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
-    group(lines, cfg, false)
+    group(lines, cfg, false, 0.0)
 }
 
 /// [`group_blocks`] for lines read from a PDF's own text rather than
@@ -744,11 +795,19 @@ pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
 /// them. The gaps between those segments are the page's gutters, however
 /// narrow — a browser sets a table's cells scarcely further apart than its
 /// words — so they, not the word spaces, set the width a column needs.
-pub(crate) fn group_exact_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
-    group(lines, cfg, true)
+///
+/// `pixels_per_point` is the page's scale, when it is known (0 otherwise): it
+/// says which print is small — terms of business, footnotes — and so never the
+/// body text a heading stands out from.
+pub(crate) fn group_exact_blocks(
+    lines: Vec<Line>,
+    cfg: &LayoutConfig,
+    pixels_per_point: f32,
+) -> Vec<Block> {
+    group(lines, cfg, true, pixels_per_point)
 }
 
-fn group(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Block> {
+fn group(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool, pixels_per_point: f32) -> Vec<Block> {
     if lines.is_empty() {
         return Vec::new();
     }
@@ -794,11 +853,10 @@ fn group(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Block> {
         })
         .collect();
     // Where sizes are exact a heading needs to stand out only a little, so the
-    // text it stands out from has to be the body's: the size most of the
-    // characters are set in outside the tables, not the median line — a price
-    // list in nine points is many short lines.
+    // text it stands out from has to be the body's, whatever the tables and
+    // the small print around it.
     let text_height = if exact {
-        body_text_height(&lines, &tables).unwrap_or(text_height)
+        body_text_height(&lines, &tables, pixels_per_point).unwrap_or(text_height)
     } else {
         text_height
     };
@@ -986,8 +1044,13 @@ fn classify_block(lines: &[Line], text_height: f32, exact: bool, cfg: &LayoutCon
     let heading =
         tall && lines.len() <= most_lines && first.text.chars().count() <= 120 && chars <= 240;
     let trimmed = first.text.trim_start();
-    let numbered = trimmed.split_once(['.', ')']).is_some_and(|(head, _)| {
-        !head.is_empty() && head.len() <= 3 && head.chars().all(|c| c.is_ascii_digit())
+    // `3. Punkt` and `3) Punkt`; not `12.03.2026 fand …` or `3.5 Tonnen …`,
+    // whose number runs on past the dot.
+    let numbered = trimmed.split_once(['.', ')']).is_some_and(|(head, rest)| {
+        !head.is_empty()
+            && head.len() <= 3
+            && head.chars().all(|c| c.is_ascii_digit())
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     });
     // A number in front of a large line numbers a chapter, not a list item.
     if trimmed.starts_with(BULLETS) || (numbered && !heading) {
@@ -1269,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn the_body_size_is_the_size_most_characters_are_set_in() {
+    fn the_body_size_is_neither_a_price_list_nor_the_small_print() {
         let mut lines = vec![
             line_at(
                 "The committee met on Monday to review the budget",
@@ -1291,7 +1354,89 @@ mod tests {
             lines.push(line_at(&format!("Item {row}"), 0.0, y, 40.0, y + 10.8));
         }
         assert!((median_text_height(&lines) - 10.8).abs() < 0.01);
-        assert!((body_text_height(&lines, &[]).unwrap() - 13.2).abs() < 0.01);
+        assert!((body_text_height(&lines, &[], 0.0).unwrap() - 13.2).abs() < 0.01);
+        // A letter in eleven points over the terms of business in six: fewer
+        // characters than the small print, and still the body.
+        let mut letter: Vec<Line> = (0..7)
+            .map(|row| {
+                let y = row as f32 * 16.0;
+                line_at(
+                    "Die Ware wurde heute an Sie versandt.",
+                    0.0,
+                    y,
+                    250.0,
+                    y + 13.2,
+                )
+            })
+            .collect();
+        let small = "Es gelten unsere Allgemeinen Geschäftsbedingungen ".repeat(4);
+        letter.extend((0..5).map(|row| {
+            let y = 140.0 + row as f32 * 8.0;
+            line_at(&small, 0.0, y, 500.0, y + 7.2)
+        }));
+        assert!((body_text_height(&letter, &[], 0.0).unwrap() - 13.2).abs() < 0.01);
+        // A shorter letter over more small print: known to be six points at
+        // this scale, the small print is not what the letter stands out from.
+        let mut short: Vec<Line> = (0..4)
+            .map(|row| {
+                let y = row as f32 * 24.0;
+                line_at("Die Ware wurde versandt.", 0.0, y, 200.0, y + 13.2)
+            })
+            .collect();
+        short.extend((0..5).map(|row| {
+            let y = 140.0 + row as f32 * 8.0;
+            line_at(&small, 0.0, y, 500.0, y + 7.2)
+        }));
+        assert!((body_text_height(&short, &[], 1.0).unwrap() - 13.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_cell_that_wraps_stays_in_its_row() {
+        let lines = vec![
+            line_at("Aufgabe", 200.0, 230.0, 320.0, 263.0),
+            line_at("Verantwortlich", 833.0, 230.0, 1030.0, 263.0),
+            line_at("Frist", 1166.0, 230.0, 1220.0, 263.0),
+            line_at("Server migrieren", 200.0, 291.0, 450.0, 325.0),
+            line_at("Mueller", 833.0, 291.0, 924.0, 325.0),
+            line_at("30.06.2026", 1166.0, 291.0, 1305.0, 325.0),
+            line_at("Monitoring einrichten", 200.0, 352.0, 457.0, 386.0),
+            line_at("Schmidt", 833.0, 352.0, 941.0, 386.0),
+            line_at("15.07.2026", 1166.0, 352.0, 1305.0, 386.0),
+            line_at("Abnahme", 200.0, 413.0, 318.0, 447.0),
+            line_at("Kunde", 833.0, 413.0, 913.0, 447.0),
+            line_at("und Partner", 833.0, 447.0, 990.0, 481.0),
+            line_at("31.07.2026", 1166.0, 413.0, 1305.0, 447.0),
+        ];
+        let cfg = LayoutConfig::default();
+        let blocks = group_exact_blocks(reading_order_exact(lines, &cfg), &cfg, 0.0);
+        assert_eq!(blocks.len(), 1);
+        let table = blocks[0].table.as_ref().expect("a table");
+        assert_eq!(table.rows, 4);
+        assert_eq!(
+            table.row_text(3),
+            ["Abnahme", "Kunde und Partner", "31.07.2026"]
+        );
+    }
+
+    #[test]
+    fn a_line_led_by_a_date_or_an_amount_is_not_a_list_item() {
+        let cfg = LayoutConfig::default();
+        for text in [
+            "12.03.2026 fand die Abnahme statt.",
+            "3.5 Tonnen wurden geliefert.",
+            "1.299,90 EUR wurden überwiesen.",
+        ] {
+            let line = line_at(text, 0.0, 0.0, 300.0, 12.0);
+            assert_eq!(
+                classify_block(&[line], 12.0, true, &cfg),
+                BlockKind::Paragraph
+            );
+        }
+        let item = line_at("3. Abnahme", 0.0, 0.0, 300.0, 12.0);
+        assert_eq!(
+            classify_block(&[item], 12.0, true, &cfg),
+            BlockKind::ListItem
+        );
     }
 
     #[test]
@@ -1363,7 +1508,7 @@ mod tests {
         let starts = |blocks: &[Block]| -> Vec<String> {
             blocks.iter().map(|b| b.lines[0].text.clone()).collect()
         };
-        let exact = group_exact_blocks(lines.clone(), &cfg);
+        let exact = group_exact_blocks(lines.clone(), &cfg, 0.0);
         assert_eq!(
             starts(&exact),
             [
@@ -1432,7 +1577,7 @@ mod tests {
             ),
         ];
         let cfg = LayoutConfig::default();
-        let exact = group_exact_blocks(lines.clone(), &cfg);
+        let exact = group_exact_blocks(lines.clone(), &cfg, 0.0);
         let table = exact[0].table.as_ref().expect("a table");
         assert_eq!((table.rows, table.columns), (3, 3));
         let last: Vec<&str> = table

@@ -89,13 +89,14 @@ impl Renderer {
                     text: Some(TextPage {
                         // Read without recognizing, a page whose font has
                         // no Unicode mapping stays empty rather than boxes.
-                        lines: if matches!(self.text, PdfText::Only) && !layer.mapped_enough() {
+                        lines: if matches!(self.text, PdfText::Only) && !layer.readable_enough() {
                             Vec::new()
                         } else {
                             layer.lines(matches!(self.text, PdfText::Always | PdfText::Only))
                         },
                         width,
                         height,
+                        pixels_per_point: scale,
                     }),
                 })?;
                 continue;

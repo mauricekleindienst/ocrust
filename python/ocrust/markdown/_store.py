@@ -35,7 +35,7 @@ from ocrust import OcrustError
 
 from . import FORMAT_VERSION, _formats, _nested, _suffix, compose, properties, read, supported
 from ._context import Context, Options
-from ._ir import Block, Footnote, Image, ListBlock, Note, Quote
+from ._ir import Note, retarget_images
 from ._package import ConversionError
 
 if TYPE_CHECKING:
@@ -187,6 +187,10 @@ def _walk(root: Path, out_dir: Path, skipped: list[Path]) -> Iterator[Path]:
                 continue
             path = here / name
             if supported(name):
+                if not path.is_file():
+                    # A pipe, a socket, a device: reading one waits forever.
+                    skipped.append(path)
+                    continue
                 yield path
             else:
                 skipped.append(path)
@@ -222,18 +226,6 @@ def _sources(
             sources.append(_Source(item, _safe_stem(item.name), item.name, absolute.parent))
             roots.append(absolute)
     return sources, roots
-
-
-def _images(blocks: Iterable[Block]) -> Iterator[Image]:
-    for block in blocks:
-        if isinstance(block, Image):
-            yield block
-            yield from _images(block.blocks)
-        elif isinstance(block, (Quote, Footnote)):
-            yield from _images(block.blocks)
-        elif isinstance(block, ListBlock):
-            for item in block.items:
-                yield from _images(item)
 
 
 def _options_key(options: Options) -> str:
@@ -596,9 +588,14 @@ class _Exporter:
         placed: dict[str, bytes] = {}
         for name, content in note.assets.items():
             placed[posixpath.join(folder, name)] = content
-        for image in _images(note.blocks):
-            if image.target and image.target in note.assets:
-                image.target = _relative_link(note_path, posixpath.join(folder, image.target))
+        retarget_images(
+            note.blocks,
+            lambda target: (
+                _relative_link(note_path, posixpath.join(folder, target))
+                if target in note.assets
+                else target
+            ),
+        )
         return placed
 
     def convert(self, source: _Source) -> None:
@@ -676,6 +673,18 @@ class _Exporter:
                 payload = text.encode("utf-8")
                 self.index.claim(key, note_path, hashlib.sha256(payload).hexdigest())
                 _write(target, payload)
+            except (OSError, UnicodeError) as exc:
+                failure = f"{note_path}: {getattr(exc, 'strerror', None) or exc}"
+                self.result.failed.append((source.path, failure))
+                self.progress("failed", source.path, None, failure)
+                if note_path in old_notes:
+                    entry_notes.append(old_notes[note_path])
+                continue
+            # Written: the note is this document's now, whatever becomes of
+            # its pictures — a disk that fills up after the note must not
+            # leave it looking like a stranger's file.
+            entry_notes.append({"path": note_path, "sha256": hashlib.sha256(payload).hexdigest()})
+            try:
                 for asset_path, content in assets.items():
                     owner = self.index.assets.get(asset_path)
                     destination = self.out_dir / asset_path
@@ -689,14 +698,13 @@ class _Exporter:
                     self.index.claim_asset(key, asset_path)
                     _write(destination, content)
                     entry_assets.append(asset_path)
-            except (OSError, UnicodeError) as exc:
-                failure = f"{note_path}: {getattr(exc, 'strerror', None) or exc}"
+            except OSError as exc:
+                # Tried again on the next run: the entry carries the failure.
+                failure = f"{note_path}: {exc.strerror or exc}"
                 self.result.failed.append((source.path, failure))
                 self.progress("failed", source.path, None, failure)
-                if note_path in old_notes:
-                    entry_notes.append(old_notes[note_path])
+                entry_assets.extend(a for a in old_assets if _asset_of(a, note_path))
                 continue
-            entry_notes.append({"path": note_path, "sha256": hashlib.sha256(payload).hexdigest()})
             self.result.written.append((source.path, target))
             self.progress("written", source.path, target, "")
         written = {item["path"] for item in entry_notes}
@@ -838,7 +846,16 @@ class _Exporter:
                     (self.out_dir / asset).unlink()
                 self._remove_empty((self.out_dir / asset).parent)
             if kept_notes:
-                self.index.put(key, {**entry, "notes": kept_notes, "assets": kept_assets})
+                # Converted again if it comes back: its other notes are gone.
+                self.index.put(
+                    key,
+                    {
+                        **entry,
+                        "notes": kept_notes,
+                        "assets": kept_assets,
+                        "error": "gone when pruned",
+                    },
+                )
             else:
                 self.index.drop(key)
 

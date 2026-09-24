@@ -222,8 +222,6 @@ def _chunk(lines: list[str], width: int) -> list[Block]:
     items = _list_items(lines)
     if items is not None:
         return items
-    if _records(lines):
-        return [Paragraph(_paragraph(lines, 0))]
     # A line that leads into a list — `Offene Punkte:` — then the list.
     for index in range(1, len(lines)):
         if _BULLET.match(lines[index]) or _ENUMERATOR.match(lines[index]):
@@ -232,6 +230,8 @@ def _chunk(lines: list[str], width: int) -> list[Block]:
             if rest is not None and (len(lines) - index >= 2 or lead_in):
                 return [Paragraph(_paragraph(lines[:index], width)), *rest]
             break
+    if _records(lines):
+        return [Paragraph(_paragraph(lines, 0))]
     return [Paragraph(_paragraph(lines, width))]
 
 
@@ -246,6 +246,9 @@ def _records(lines: list[str]) -> bool:
         return False
     leads: dict[str, int] = {}
     for line in lines:
+        if _BULLET.match(line) or _ENUMERATOR.match(line):
+            # A list item: the list above is what reads it.
+            continue
         found = _LEAD.search(line)
         if found:
             lead = re.sub(r"\d", "9", found.group().rstrip(",.:;"))

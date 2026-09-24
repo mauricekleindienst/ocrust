@@ -181,10 +181,23 @@ impl TextLayer {
         }
     }
 
+    /// Whether a page read without recognizing anything holds text rather
+    /// than boxes: most of its characters, shown or hidden, have their
+    /// Unicode. A symbol here and there — a stamp, a tick — is no reason to
+    /// leave a page empty.
+    pub fn readable_enough(&self) -> bool {
+        let printed: Vec<&TextGlyph> = self
+            .glyphs
+            .iter()
+            .filter(|g| !g.text.trim().is_empty())
+            .collect();
+        let mapped = printed.iter().filter(|g| g.mapped).count();
+        mapped * 2 >= printed.len()
+    }
+
     /// Whether the text a page shows has its characters: a font without a
     /// Unicode mapping reads as boxes, and one wrong character in twenty is
-    /// worse than recognizing the page — or, with nothing recognized, than
-    /// leaving it empty.
+    /// worse than recognizing the page.
     pub fn mapped_enough(&self) -> bool {
         let printed = self.glyphs.iter().filter(|g| !g.text.trim().is_empty());
         let visible: Vec<&TextGlyph> = printed.clone().filter(|g| g.visible).collect();
@@ -206,11 +219,15 @@ impl TextLayer {
             // An invisible layer is somebody's OCR. Over a scan it is all the
             // text there is; over text the page shows, it is the same words a
             // second time, and only what no shown line covers is kept.
-            let shown: Vec<Rect> = lines.iter().map(|line| line.bbox).collect();
+            // Only a shown line running the same way can cover a hidden one: the
+            // box of a watermark set across the page covers most of it.
+            let shown: Vec<(Rect, f32)> = lines.iter().map(|l| (l.bbox, l.angle)).collect();
             lines.extend(self.lines_of(false).into_iter().filter(|line| {
                 let area = (line.bbox.width() * line.bbox.height()).max(1.0);
-                !shown.iter().any(|b| {
-                    b.horizontal_overlap(&line.bbox) * b.vertical_overlap(&line.bbox) >= 0.5 * area
+                !shown.iter().any(|(b, angle)| {
+                    (angle - line.angle).abs() <= 5.0
+                        && b.horizontal_overlap(&line.bbox) * b.vertical_overlap(&line.bbox)
+                            >= 0.5 * area
                 })
             }));
         }
@@ -400,8 +417,9 @@ impl Run {
         let size = self.size.max(glyph.size());
         let b = glyph.baseline();
         let n = Vec2::new(-b.y, b.x);
-        // Off the baseline by more than a third of an em: another line.
-        if (glyph.origin - self.last_origin).dot(n).abs() > 0.35 * size {
+        // Off the baseline by more than a third of an em: another line —
+        // unless it is a superscript or a subscript, or the text after one.
+        if (glyph.origin - self.last_origin).dot(n).abs() > 0.35 * size && !self.script(glyph) {
             return false;
         }
         // The same glyph drawn again a hair away: "fake bold", or a text
@@ -427,6 +445,18 @@ impl Run {
         }
         self.push(glyph);
         true
+    }
+
+    /// Whether `glyph` sits on this run's line although it is off the last
+    /// glyph's baseline: a superscript or a subscript — set smaller, raised
+    /// up to 0.6 em or lowered up to a third of one, the way `mc²`, `r³` and a
+    /// footnote mark are — or the text right after one, back on the line.
+    fn script(&self, glyph: &TextGlyph) -> bool {
+        let up = self.up / self.up.hypot().max(f64::EPSILON);
+        let raised = (glyph.origin - self.start).dot(up);
+        let body = self.size;
+        let smaller = glyph.size() <= 0.85 * body;
+        (smaller && raised >= -0.35 * body && raised <= 0.6 * body) || raised.abs() <= 0.2 * body
     }
 
     fn baseline(&self) -> Vec2 {
@@ -799,8 +829,12 @@ impl<'a> Device<'a> for Collector {
         .unwrap_or(0.5 * UNITS_PER_EM);
         let end = full * KPoint::new(advance, 0.0);
         let (text, mapped) = match glyph.as_unicode() {
-            Some(BfString::Char(c)) => (unligature(c.to_string()), readable(c)),
+            Some(BfString::Char(c)) => {
+                let c = symbol_bullet(c).unwrap_or(c);
+                (unligature(c.to_string()), readable(c))
+            }
             Some(BfString::String(s)) => {
+                let s: String = s.chars().map(|c| symbol_bullet(c).unwrap_or(c)).collect();
                 let ok = !s.is_empty() && s.chars().all(readable);
                 (unligature(s), ok)
             }
@@ -842,6 +876,23 @@ fn unligature(text: String) -> String {
             other => other.to_string(),
         })
         .collect()
+}
+
+/// The bullets Word and PowerPoint draw from the Symbol and Wingdings fonts,
+/// which map them into the Private Use Area: a bullet is what they show.
+fn symbol_bullet(c: char) -> Option<char> {
+    matches!(
+        c,
+        '\u{F0B7}'
+            | '\u{F0A7}'
+            | '\u{F0A8}'
+            | '\u{F06E}'
+            | '\u{F071}'
+            | '\u{F076}'
+            | '\u{F0D8}'
+            | '\u{F0FC}'
+    )
+    .then_some('•')
 }
 
 /// A character a text layer should hold: not a replacement or private-use
@@ -1195,6 +1246,17 @@ mod tests {
     }
 
     #[test]
+    fn a_superscript_stays_on_its_line() {
+        // `E = mc²` and on: the 2 is set smaller and raised 0.4 em.
+        let mut glyphs = word("mc", 100.0, 200.0, 10.0);
+        glyphs.extend(word("2", 110.0, 195.9, 7.0));
+        glyphs.extend(word("for", 116.0, 200.0, 10.0));
+        let lines = layer(glyphs).lines(false);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "mc2 for");
+    }
+
+    #[test]
     fn an_invisible_layer_over_shown_text_is_not_read_twice() {
         let shown = word("Vertrag", 100.0, 200.0, 20.0);
         let mut glyphs = shown.clone();
@@ -1232,6 +1294,54 @@ mod tests {
             glyph.mapped = false;
         }
         assert!(!layer(glyphs).mapped_enough());
+    }
+
+    #[test]
+    fn a_watermark_across_the_page_does_not_hide_the_ocr_beneath() {
+        let mut glyphs: Vec<TextGlyph> = word("Vertrag", 100.0, 300.0, 20.0)
+            .into_iter()
+            .map(|mut g| {
+                g.visible = false;
+                g
+            })
+            .collect();
+        // VERTRAULICH, shown, drawn at 45 degrees across the hidden line.
+        for (i, c) in "VERTRAULICH".chars().enumerate() {
+            let step = 14.0 * i as f64;
+            glyphs.push(TextGlyph {
+                text: c.to_string(),
+                origin: KPoint::new(60.0 + step, 420.0 - step),
+                end: KPoint::new(70.0 + step, 410.0 - step),
+                up: Vec2::new(-14.0, -14.0),
+                visible: true,
+                mapped: true,
+            });
+        }
+        let texts: Vec<String> = layer(glyphs)
+            .lines(true)
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        assert!(texts.iter().any(|t| t == "Vertrag"), "{texts:?}");
+    }
+
+    #[test]
+    fn symbol_font_bullets_are_bullets_and_a_stamp_leaves_the_page_readable() {
+        assert_eq!(symbol_bullet('\u{F0B7}'), Some('•'));
+        assert_eq!(symbol_bullet('a'), None);
+        let mut glyphs: Vec<TextGlyph> = word("Hallo Welt", 100.0, 200.0, 20.0)
+            .into_iter()
+            .map(|mut g| {
+                g.visible = false;
+                g
+            })
+            .collect();
+        // A stamp in a symbol font, shown: nothing of it maps to Unicode.
+        glyphs.extend(word("XY", 100.0, 400.0, 20.0).into_iter().map(|mut g| {
+            g.mapped = false;
+            g
+        }));
+        assert!(layer(glyphs).readable_enough());
     }
 
     #[test]

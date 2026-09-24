@@ -195,8 +195,33 @@ class Element:
 
 #: Elements open inside one another at most. A generated page that opens a
 #: `<font>` on every line and never closes one is read as a browser shows it,
-#: not refused as nested too deeply: past this depth, content stays where it is.
+#: not refused as nested too deeply: past this depth, text formatting is let
+#: go and its content stays where it is. Everything that decides what is read
+#: — a script, a hidden element, a table — keeps its place.
 _MAX_DEPTH = 100
+_FORMATTING = {
+    "a",
+    "abbr",
+    "b",
+    "big",
+    "cite",
+    "em",
+    "font",
+    "i",
+    "ins",
+    "mark",
+    "nobr",
+    "q",
+    "s",
+    "small",
+    "span",
+    "strike",
+    "strong",
+    "sub",
+    "sup",
+    "tt",
+    "u",
+}
 
 
 class _Builder(HTMLParser):
@@ -225,7 +250,9 @@ class _Builder(HTMLParser):
             self._close(closes, boundary)
         node = Element(tag, {k.lower(): v or "" for k, v in attrs})
         self.stack[-1].children.append(node)
-        if tag not in _VOID and len(self.stack) < _MAX_DEPTH:
+        if tag not in _VOID and (
+            len(self.stack) < _MAX_DEPTH or tag not in _FORMATTING or _invisible(node)
+        ):
             self.stack.append(node)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -294,7 +321,9 @@ class _Converter:
                 pending.clear()
 
         for child in node.children:
-            if isinstance(child, str) or child.tag in _INLINE:
+            # A `<font>` around a table, the way old pages and mails are set,
+            # holds blocks: those are read as blocks, not as one line.
+            if isinstance(child, str) or (child.tag in _INLINE and not child.has_any(_STRUCTURE)):
                 pending.append(child)
                 continue
             flush()

@@ -954,6 +954,10 @@ class _TextOnly:
             data, label = Path(source).read_bytes(), name or str(source)
         payload = json.loads(_ocrust.read_pdf_text(data, label, self.password))
         if pages is not None:
+            count = len(payload["pages"])
+            missing = [index for index in pages if not 0 <= index < count]
+            if missing:
+                raise OcrustError(f"the document has no page {missing[0] + 1}")
             wanted = set(pages)
             payload["pages"] = [page for page in payload["pages"] if page.get("index") in wanted]
         return Document._from_json(payload)
@@ -2598,6 +2602,9 @@ def _markdown_one(
     """One document, to stdout or to one file; no index, nothing kept in sync."""
     from . import markdown
 
+    if options.assets and args.output is None:
+        _fail("--assets keeps the pictures beside the note: give it a file with -o note.md")
+        return 2
     try:
         if str(source) == STDIN:
             data = _read_stdin()
@@ -2627,7 +2634,20 @@ def _markdown_one(
     if _overwrites_input([args.output], [source]):
         _fail(f"{args.output} is the input itself; write the note somewhere else")
         return 2
-    if not _save(args.output, result.markdown, args):
+    text = result.markdown
+    if result.assets:
+        # Beside the note, under `_assets/<note>/`, as an export keeps them.
+        stem = args.output.name[:-3] if args.output.name.endswith(".md") else args.output.name
+        folder = f"_assets/{stem}"
+        markdown._ir.retarget_images(
+            result.note.blocks,
+            lambda target: f"{folder}/{target}" if target in result.assets else target,
+        )
+        text = markdown.compose(result.note, result.meta)
+        for name, content in result.assets.items():
+            if not _save(args.output.parent / folder / name, content, args):
+                return 1
+    if not _save(args.output, text, args):
         return 1
     if not args.quiet:
         _tell(_arrow(source, args.output))

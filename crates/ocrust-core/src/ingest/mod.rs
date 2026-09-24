@@ -72,6 +72,8 @@ pub struct TextPage {
     pub lines: Vec<crate::doc::Line>,
     pub width: u32,
     pub height: u32,
+    /// The page's scale: pixels to one point of the PDF.
+    pub pixels_per_point: f32,
 }
 
 /// How to rasterize vector input.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -938,3 +939,227 @@ def test_scan_reads_a_pdf_from_its_text_alone_without_the_models(monkeypatch, tm
     pdf.write_bytes(_pdf_with_text([("Hello text layer", 20)]))
     assert main(["scan", str(pdf), "--pdf-text", "only", "-q"]) == 0
     assert "Hello text layer" in capsys.readouterr().out
+
+
+# -- third review round
+
+
+def _pdf_of(lines: list[tuple[str, float, float, float]], mode: str = "") -> bytes:
+    """One page of `(text, size, x, y)` lines."""
+    from conftest import _pdf_from_stream, _winansi_literal
+
+    shown = (f"/F1 {s} Tf 1 0 0 1 {x} {y} Tm ({_winansi_literal(t)}) Tj" for t, s, x, y in lines)
+    return _pdf_from_stream(f"BT {mode}\n" + "\n".join(shown) + "\nET")
+
+
+@pytest.fixture
+def no_models(monkeypatch, tmp_path):
+    monkeypatch.setenv("OCRUST_MODELS_DIR", str(tmp_path / "no-models"))
+
+
+def test_a_letter_over_small_print_is_not_headings(no_models):
+    letter = ["Sehr geehrte Frau Müller,", "vielen Dank für Ihre Bestellung vom 3. März."]
+    letter += ["Die Ware wurde heute an Sie versandt.", "Mit freundlichen Grüßen"]
+    lines = [(t, 11, 60, 740 - i * 24) for i, t in enumerate(letter)]
+    small = "Es gelten unsere Allgemeinen Geschäftsbedingungen in der gültigen Fassung; " * 2
+    lines += [(small, 6, 60, 600 - i * 8) for i in range(5)]
+    note = markdown.convert(_pdf_of(lines), name="r.pdf", ocr=False)
+    assert not [line for line in note.body.splitlines() if line.startswith("#")]
+
+
+def test_a_watermark_across_a_scan_leaves_its_ocr_layer_alone(no_models):
+    import math
+
+    from conftest import _pdf_from_stream
+
+    hidden = [
+        f"/F1 11 Tf 1 0 0 1 72 {720 - i * 20} Tm (Zeile {i:02d} erkannt.) Tj" for i in range(20)
+    ]
+    turn = math.radians(45)
+    cos, sin = math.cos(turn), math.sin(turn)
+    stamp = (
+        f"BT 0 Tr /F1 90 Tf {cos:.4f} {sin:.4f} {-sin:.4f} {cos:.4f} 120 150 Tm (VERTRAULICH) Tj ET"
+    )
+    pdf = _pdf_from_stream("BT 3 Tr\n" + "\n".join(hidden) + "\nET\n" + stamp)
+    text = markdown.convert(pdf, name="s.pdf", ocr=False).markdown
+    assert all(f"Zeile {i:02d}" in text for i in range(20))
+
+
+def test_a_title_that_is_also_the_running_head_stays(no_models):
+    from conftest import _pdf_from_streams, _winansi_literal
+
+    pages = []
+    for n in range(1, 4):
+        lines = [("Projektbericht Nord", 9, 72, 770), (f"Seite {n}", 9, 480, 770)]
+        if n == 1:
+            lines.append(("Projektbericht Nord", 24, 72, 720))
+        lines += [
+            (f"Abschnitt {n} beginnt hier mit einem ganzen Satz Text.", 11, 72, 640 - i * 15)
+            for i in range(10)
+        ]
+        shown = (
+            f"/F1 {s} Tf 1 0 0 1 {x} {y} Tm ({_winansi_literal(t)}) Tj" for t, s, x, y in lines
+        )
+        pages.append("BT\n" + "\n".join(shown) + "\nET")
+    note = markdown.convert(_pdf_from_streams(pages), name="b.pdf", ocr=False)
+    assert "# Projektbericht Nord" in note.markdown
+    assert note.markdown.count("Projektbericht Nord") == 2  # the heading, and the title
+
+
+def test_a_plain_text_list_under_a_lead_in_is_a_list():
+    text = "Offene Punkte:\n- Budget\n- Termin\n- Raum\n- Catering\n"
+    assert "- Budget\n- Termin\n- Raum\n- Catering" in convert(text.encode(), "t.txt").markdown
+    numbered = "Schritte:\n1. Oeffnen\n2. Pruefen\n3. Schliessen\n4. Melden\n"
+    assert "1. Oeffnen\n2. Pruefen" in convert(numbered.encode(), "n.txt").markdown
+
+
+def test_superscripts_stay_with_their_word(no_models):
+    from conftest import _pdf_from_stream
+
+    raised = "/F1 7 Tf 4.12 Ts (2) Tj 0 Ts /F1 10 Tf"
+    stream = f"BT /F1 10 Tf 1 0 0 1 72 700 Tm (The energy is E = mc) Tj {raised} ( for a body at rest.) Tj ET"
+    text = markdown.convert(_pdf_from_stream(stream), name="p.pdf", ocr=False).body
+    assert "E = mc2 for a body at rest." in text
+
+
+def test_two_footnote_references_side_by_side():
+    assert _render.inline(["Wie festgestellt.", _ir.FootnoteRef("1"), _ir.FootnoteRef("2")]) == (
+        "Wie festgestellt.[^1][^2]"
+    )
+    link = _ir.Span("link", ["Quelle"], "https://example.org")
+    assert _render.inline(["x", _ir.FootnoteRef("1"), link]) == "x[^1][Quelle](https://example.org)"
+
+
+def test_a_page_past_the_depth_cap_hides_its_scripts_and_keeps_its_tables():
+    lines = "".join(f"<font color=navy>Zeile {i}<br>\n" for i in range(150))
+    page = (
+        f"<body>{lines}<script>var tracker = 'JS';</script><style>.x{{}} /* CSS */</style>"
+        "<p hidden>VERSTECKT</p><table><tr><th>Name</th><th>Wert</th></tr>"
+        "<tr><td>A</td><td>1</td></tr></table></body>"
+    )
+    text = convert(page.encode(), "p.html").markdown
+    assert "tracker" not in text and "CSS" not in text and "VERSTECKT" not in text
+    assert "| Name | Wert |" in text
+    wrapped = "<font face=Arial><table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table></font>"
+    assert "| A | B |" in convert(wrapped.encode(), "f.html").markdown
+
+
+def test_a_table_whose_cells_wrap_keeps_each_row_together(no_models):
+    from conftest import _pdf_from_stream
+
+    rows = [
+        [["Aufgabe"], ["Verantwortlich"], ["Frist"]],
+        [["Server migrieren und alte", "Maschinen abschalten"], ["Mueller"], ["30.06.2026"]],
+        [["Monitoring einrichten"], ["Schmidt,", "Weber"], ["15.07.2026"]],
+        [["Abnahme"], ["Kunde"], ["31.07.2026"]],
+    ]
+    shown, y = ["BT /F1 10 Tf"], 700
+    for row in rows:
+        for x, cell in zip([72, 300, 420], row, strict=True):
+            shown += [f"1 0 0 1 {x} {y - i * 12} Tm ({line}) Tj" for i, line in enumerate(cell)]
+        y -= 12 * max(len(cell) for cell in row) + 10
+    text = markdown.convert(
+        _pdf_from_stream("\n".join([*shown, "ET"])), name="a.pdf", ocr=False
+    ).body
+    assert "| Server migrieren und alte Maschinen abschalten | Mueller | 30.06.2026 |" in text
+    assert "| Monitoring einrichten | Schmidt, Weber | 15.07.2026 |" in text
+
+
+def test_a_paragraph_led_by_a_date_is_not_a_list_item(no_models):
+    lines = [("Chronik", 18, 72, 700), ("Das Projekt begann im Fruehjahr.", 11, 72, 670)]
+    lines += [("12.03.2026 fand die Abnahme statt.", 11, 72, 640)]
+    lines += [("3.5 Tonnen Material wurden geliefert.", 11, 72, 610)]
+    text = markdown.convert(_pdf_of(lines), name="c.pdf", ocr=False).body
+    assert "- 12.03" not in text and "12.03.2026 fand" in text and "- 3.5" not in text
+
+
+def test_a_picture_alone_in_a_table_cell_keeps_its_cell(tmp_path):
+    table = (
+        "<w:tbl><w:tr><w:tc><w:p><w:r><w:drawing>"
+        f'<a:blip {A} r:embed="rId9"/></w:drawing></w:r></w:p></w:tc>'
+        "<w:tc>" + para("Plan") + "</w:tc></w:tr><w:tr><w:tc>" + para("a") + "</w:tc>"
+        "<w:tc>" + para("b") + "</w:tc></w:tr></w:tbl>"
+    )
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 3000
+    word = docx(
+        table,
+        relations=(("rId9", "image", "media/image1.png"),),
+        extra={"word/media/image1.png": png},
+    )
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "t.docx").write_bytes(word)
+    markdown.export([tmp_path / "in"], tmp_path / "out", assets=True, ocr=False)
+    text = (tmp_path / "out" / "t.docx.md").read_text(encoding="utf-8")
+    assert "| ![](_assets/t.docx/image1.png) | Plan |" in text
+
+
+def test_one_note_with_assets_gets_its_pictures(tmp_path, capsys):
+    (tmp_path / "plan.docx").write_bytes(picture_docx())
+    note = tmp_path / "out" / "plan.md"
+    assert (
+        main(
+            ["markdown", str(tmp_path / "plan.docx"), "-o", str(note), "--assets", "--no-ocr", "-q"]
+        )
+        == 0
+    )
+    link = re.search(r"!\[[^\]]*\]\(([^)]+)\)", note.read_text(encoding="utf-8")).group(1)
+    assert (note.parent / link).is_file()
+    assert main(["markdown", str(tmp_path / "plan.docx"), "--assets", "--no-ocr"]) == 2
+
+
+def test_a_note_written_before_its_picture_failed_stays_the_exports(tmp_path, monkeypatch):
+    from ocrust.markdown import _store
+
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "r.docx").write_bytes(picture_docx())
+    write = _store._write
+
+    def full(path, data):
+        if path.suffix == ".png":
+            raise OSError(28, "No space left on device")
+        write(path, data)
+
+    monkeypatch.setattr(_store, "_write", full)
+    assert markdown.export([folder], tmp_path / "out", assets=True, ocr=False).failed
+    monkeypatch.setattr(_store, "_write", write)
+    result = markdown.export([folder], tmp_path / "out", assets=True, ocr=False)
+    assert not result.kept and not result.failed
+    assert (tmp_path / "out" / "_assets" / "r.docx" / "image1.png").is_file()
+
+
+def test_an_archive_back_after_a_prune_gets_all_its_notes_again(tmp_path):
+    folder, away = tmp_path / "in", tmp_path / "away"
+    folder.mkdir()
+    away.mkdir()
+    (folder / "akte.zip").write_bytes(package({"a.txt": "Vermerk A", "b.txt": "Vermerk B"}))
+    out = tmp_path / "kb"
+    markdown.export([folder], out)
+    note = out / "akte.zip" / "a.txt.md"
+    note.write_text(note.read_text(encoding="utf-8") + "\nmeine Notiz\n", encoding="utf-8")
+    (folder / "akte.zip").rename(away / "akte.zip")
+    markdown.export([folder], out, prune=True)
+    assert not (out / "akte.zip" / "b.txt.md").exists()
+    (away / "akte.zip").rename(folder / "akte.zip")
+    markdown.export([folder], out)
+    assert (out / "akte.zip" / "b.txt.md").is_file() and "meine Notiz" in note.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_a_named_pipe_in_a_folder_is_skipped(tmp_path):
+    if not hasattr(os, "mkfifo"):  # pragma: no cover - Windows
+        pytest.skip("no named pipes")
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "a.txt").write_text("a", encoding="utf-8")
+    os.mkfifo(folder / "pipe.txt")
+    result = markdown.export([folder], tmp_path / "out")
+    assert len(result.written) == 1 and folder / "pipe.txt" in result.skipped
+
+
+def test_scan_only_says_when_a_page_is_missing(no_models, tmp_path, capsys):
+    pdf = tmp_path / "t.pdf"
+    pdf.write_bytes(_pdf_of([("Hallo", 20, 72, 700)]))
+    assert main(["scan", str(pdf), "--pdf-text", "only", "--pages", "3", "-q"]) == 1
+    assert "no page 3" in " ".join(capsys.readouterr().err.split())
