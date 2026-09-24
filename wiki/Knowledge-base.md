@@ -98,7 +98,11 @@ copied back, restored — is recognized by its hash.
 
 - **A note edited by hand is never overwritten.** Someone added a remark in
   Obsidian: the note's hash no longer matches the index, and the export leaves
-  it alone and says so, every run, until `--force`.
+  it alone and says so, every run, until `--force` — without reading its
+  document again each time. `--force` replaces such a note, but never deletes
+  one: a note whose document is gone stays, edited, even with `--prune`.
+- **A document that cannot be read keeps its note**, and so does an archive
+  member that cannot: the last good version stays until it reads again.
 - **Nothing the export did not write is touched.** A file already sitting where
   a note would go is kept.
 - **`--prune` removes what is gone** — the notes of documents deleted from the

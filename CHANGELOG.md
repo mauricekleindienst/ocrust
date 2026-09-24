@@ -58,17 +58,17 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   page read from its own text.** A page drawn in real, visible glyphs with a
   Unicode mapping is read from its content stream instead of rendered and
   recognized — exact, with confidence 1.0 and origin `"pdf_text"`, and on four
-  generated reports of ten pages in 5 ms a page with no character wrong, where
-  recognizing them took 2.7 s a page. Scans, pictures of text, pages whose text
-  layer is someone else's invisible OCR, and fonts without a Unicode mapping are
-  recognized as before; `"always"` trusts any layer, `"only"` reads every page
-  from its layer and recognizes none, and `"never"` stays the default. The
-  glyphs are made into the lines a detector would deliver: fake bold and text
-  shadows are one character, bullets drawn as shapes are put back, ligatures are
-  the letters they join, a justified line's stretched spaces stay spaces, and on
-  a page that sets its own space glyphs every other gap is the edge of a table
-  cell — so a browser's table survives although its cells sit scarcely further
-  apart than its words.
+  generated reports of ten pages in 4 ms a page with no character wrong, where
+  recognizing them took 2.5 s a page on four cores. Scans, pictures of text,
+  pages whose text layer is someone else's invisible OCR, and fonts without a
+  Unicode mapping are recognized as before; `"always"` trusts any layer,
+  `"only"` reads every page from its layer and recognizes none, and `"never"`
+  stays the default. The glyphs are made into the lines a detector would
+  deliver: fake bold and text shadows are one character, bullets drawn as shapes
+  are put back, ligatures are the letters they join, a justified line's
+  stretched spaces stay spaces, and on a page that sets its own space glyphs
+  every other gap is the edge of a table cell — so a browser's table survives
+  although its cells sit scarcely further apart than its words.
 
 ### Changed
 
