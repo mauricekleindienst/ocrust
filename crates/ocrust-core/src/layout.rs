@@ -801,25 +801,26 @@ fn continues_a_suspended_hyphen(next: &str) -> bool {
             None => return false,
         }
     }
-    // Another word follows, or nothing: "und Nachname", "und" at the line end.
-    // A number or a comma after it ("to 12345", "to,") is a broken word.
+    // Another word or number follows, or nothing: "und Nachname", "bis 12-",
+    // "und" at the line end. Punctuation after it ("to,") is a broken word.
     rest.trim().is_empty()
         || (rest.starts_with(char::is_whitespace)
             && rest
                 .trim_start()
                 .chars()
                 .next()
-                .is_some_and(char::is_alphabetic))
+                .is_some_and(char::is_alphanumeric))
 }
 
 /// Joins words broken by a hyphen at a line end.
 fn dehyphenate(lines: &mut Vec<Line>) {
     let mut i = 0;
     while i + 1 < lines.len() {
-        let ends_hyphen = lines[i]
-            .text
-            .trim_end()
-            .ends_with(['-', '\u{2010}', '\u{00ad}']);
+        let head = lines[i].text.trim_end();
+        // A hyphen after a digit never breaks a word: "2- und 3-Zimmer",
+        // "3-" / "fach" — the hyphen is part of what was written.
+        let ends_hyphen = head.ends_with(['-', '\u{2010}', '\u{00ad}'])
+            && !head.chars().rev().nth(1).is_some_and(char::is_numeric);
         let next = lines[i + 1].text.trim_start();
         let next_starts_lower = next.chars().next().is_some_and(|c| c.is_lowercase());
         if ends_hyphen && next_starts_lower && !continues_a_suspended_hyphen(next) {
@@ -1307,6 +1308,13 @@ mod tests {
             ("Ein-", "oder Ausgang", "Ein-\noder Ausgang"),
             ("pre-", "and post-processing", "pre-\nand post-processing"),
             ("Vor-", "u. Nachname", "Vor-\nu. Nachname"),
+            (
+                "für 2-",
+                "und 3-Zimmer-Wohnungen",
+                "für 2-\nund 3-Zimmer-Wohnungen",
+            ),
+            ("die 10-", "bis 12-jährigen", "die 10-\nbis 12-jährigen"),
+            ("Ein-", "und 2-Zimmer", "Ein-\nund 2-Zimmer"),
             // "und" as the start of a longer word is a broken word after all
             ("Verb-", "undenkbar", "Verbundenkbar"),
             // and so are words that end in what could be a conjunction

@@ -11,6 +11,7 @@ import csv
 import io
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -921,3 +922,44 @@ def test_an_array_of_paths_is_not_an_image():
 
     assert _is_image(np.zeros((4, 4, 3), dtype=np.uint8))
     assert not _is_image(np.array([["a.pdf"], ["b.pdf"]]))
+
+
+def test_a_name_that_lost_its_last_letter_is_another_name():
+    for term, text in (("Frau Heinrichs", "Frau Heinrich"), ("Jürgen Peters", "Jürgen Peter")):
+        assert not _doc([text]).find(terms.load([term])).hits, text
+
+
+def test_a_regex_match_may_carry_a_footnote():
+    profile = terms.parse({"term": [{"name": "K", "regex": r"KD-\d{6}"}]})
+    assert [h.text for h in _doc(["Kunde KD-438300² bitte"]).find(profile)] == ["KD-438300"]
+
+
+def test_only_real_streams_are_streams(tmp_path):
+    from ocrust.cli import _special_file
+
+    assert _special_file(Path("/dev/stdout"))
+    assert not _special_file(tmp_path / "bericht.json")
+    assert not _special_file(tmp_path)
+    shm = Path("/dev/shm")
+    if shm.is_dir():  # a folder under /dev is still a folder, its files files
+        assert not _special_file(shm / "bericht.json")
+
+
+def test_a_reader_that_leaves_does_not_change_the_verdict(engine, letters, monkeypatch):
+    class Gone(io.StringIO):
+        def write(self, text):
+            raise BrokenPipeError
+
+        def fileno(self):
+            raise io.UnsupportedOperation
+
+    monkeypatch.setattr("sys.stdout", Gone())
+    brief = str(letters / "a_brief.pdf")
+    for fmt in ("text", "json", "jsonl"):
+        assert main(["find", brief, "--term", "Projekt Adler", "-f", fmt, "-q"]) == 3, fmt
+
+
+def test_several_files_into_one_plain_file_is_refused(letters, tmp_path):
+    target = tmp_path / "ausgabe"
+    target.write_text("", encoding="utf-8")
+    assert main(["scan", str(letters), "-o", str(target), "-q"]) == 2

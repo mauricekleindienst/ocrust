@@ -883,11 +883,13 @@ _STANDARD_STREAMS = {
 
 
 def _special_file(path: Path) -> bool:
-    """Whether `path` is a stream rather than a file to replace: a device or a
-    pipe, or anything under /dev or /proc — `/dev/stdout` is a regular file
+    """Whether `path` is a stream rather than a file to replace: standard
+    output or error by any of their names — `/dev/stdout` is a regular file
     when the shell sends standard output to one, and replacing that file
-    would lose what `>>` was appending to."""
-    if os.name == "posix" and str(path).startswith(("/dev/", "/proc/")):
+    would lose what `>>` was appending to — or anything that exists and is
+    neither a regular file nor a folder: a device, a named pipe. `/dev/shm`
+    and the files in it are what they look like."""
+    if str(path) in _STANDARD_STREAMS:
         return True
     try:
         return path.exists() and not path.is_file() and not path.is_dir()
@@ -1035,7 +1037,7 @@ def _destination(
             _fail(f"-o {args.output}: several files need a folder to be written to")
             return None
         return _Destination(args.output, False, roots)
-    if many and args.output and args.output.suffix:
+    if many and args.output and (args.output.suffix or args.output.is_file()):
         _fail("--output must be a directory when reading several files")
         return None
     # A path without a suffix is a directory: `-o out` writes out/<name>.<ext>,
@@ -2217,6 +2219,7 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
     items: list[Any] = []
     for path in inputs:
         items.append(_read_stdin() if str(path) == STDIN else path)
+    reader_gone = False
     try:
         for path, (_, result) in zip(inputs, engine.scan_each(items, pages=pages)):
             if isinstance(result, Exception):
@@ -2262,23 +2265,33 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
                 records.append(record)
             if out is sys.stdout or out is sys.stderr or out is stream_file:
                 out.flush()
+        if args.format == "json":
+            summary = {
+                "files": len(inputs),
+                "marked": marked,
+                "with_hits": with_hits,
+                "unreadable": unreadable,
+                "clean": clean,
+                "fail_on": [g.spec for g in gates],
+                "tripped": tripped,
+                "by_label": tally,
+            }
+            json.dump({"summary": summary, "files": records}, out, ensure_ascii=False, indent=2)
+            out.write("\n")
+            out.flush()
+    except BrokenPipeError:
+        # `ocrust find … | head -1`: the reader left. What was found so far
+        # still decides the exit status a gate (`set -o pipefail`) sees.
+        reader_gone = True
+        _silence_stdout()
     finally:
         if stream_file is not None:
             stream_file.close()
+    if reader_gone:
+        if tripped or earlier_tripped:
+            return _MARKED
+        return 1 if unreadable or earlier_unreadable else 0
 
-    if args.format == "json":
-        summary = {
-            "files": len(inputs),
-            "marked": marked,
-            "with_hits": with_hits,
-            "unreadable": unreadable,
-            "clean": clean,
-            "fail_on": [g.spec for g in gates],
-            "tripped": tripped,
-            "by_label": tally,
-        }
-        json.dump({"summary": summary, "files": records}, out, ensure_ascii=False, indent=2)
-        out.write("\n")
     if args.output and not streaming:
         try:
             _write(args.output, buffer.getvalue(), retries=_io_retries(args))
@@ -2469,12 +2482,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
     except BrokenPipeError:
         # `ocrust scan book.pdf | head -1`: the reader left, which is its right.
-        # Python still holds a dead stdout and would print "Exception ignored"
-        # while flushing it at exit, so it is pointed at the void first. A stdout
-        # without a file descriptor (a test harness, say) has nothing to redirect.
-        with contextlib.suppress(OSError, ValueError):
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        _silence_stdout()
         return 0
+
+
+def _silence_stdout() -> None:
+    """Points a stdout whose reader left at the void: Python still holds it and
+    would print "Exception ignored" while flushing it at exit. A stdout without
+    a file descriptor (a test harness, say) has nothing to redirect."""
+    with contextlib.suppress(OSError, ValueError):
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 def _dispatch(args: argparse.Namespace) -> int:

@@ -1079,7 +1079,7 @@ def _phrase_hits(term: Term, phrase: str, page: Page, ready: _Prepared) -> Itera
                 start, end, c = snapped
             if any(start < e and s < end for s, e in taken):
                 continue
-            if term.whole_words and _another_word(pattern, p_umlaut, stream, start, end, c):
+            if term.whole_words and _another_word(pattern, p_umlaut, breaks, stream, start, end, c):
                 continue
             if not _short_words_kept(pattern, breaks, stream, start, end):
                 continue
@@ -1095,13 +1095,20 @@ def _phrase_hits(term: Term, phrase: str, page: Page, ready: _Prepared) -> Itera
             yield _Found(hit, stream, start, end, _places(stream, stream.origin[start:end]))
 
 
-#: Terms up to this many letters lose their meaning with an edge letter: "Adler"
-#: without its "R" is another word than "Radler".
-_SHORT = 8
+#: Words up to this many letters may lose their meaning with an edge letter:
+#: "Adler" is another word than "Radler", "Heinrich" another name than
+#: "Heinrichs". Beyond it — long compounds — they do not.
+_SHORT = 12
 
 
 def _another_word(
-    pattern: str, p_umlaut: list[bool], stream: _Stream, start: int, end: int, cost: int
+    pattern: str,
+    p_umlaut: list[bool],
+    breaks: list[bool],
+    stream: _Stream,
+    start: int,
+    end: int,
+    cost: int,
 ) -> bool:
     """Whether the hit is another word or number that contains the term, or
     that the term contains: "Radler" or "Adlers" for "Adler", "Adler" for
@@ -1137,10 +1144,16 @@ def _another_word(
         c + _fit(pattern[: m - a], p_umlaut[: m - a], text[: n - b], dots[: n - b]) == cost
         for a, b, c in ends
     )
-    if m > _SHORT:
-        # A long term that lost its first or last letter to the scan is still
-        # the term: "eheimhaltungsvereinbarung" is no other word.
+    # A long word that lost its first or last letter to the scan is still the
+    # word: "eheimhaltungsvereinbarung" is no other word. A short one is:
+    # "Heinrich" for "Heinrichs", "Peter" for "Peters" — so it is the word at
+    # that edge that counts, not the whole phrase.
+    starts_at = [i for i, b in enumerate(breaks) if b]
+    first_word = starts_at[0] if starts_at else m
+    last_word = m - (starts_at[-1] if starts_at else 0)
+    if first_word > _SHORT:
         start_kept = start_kept or _fit(pattern[1:], p_umlaut[1:], text, dots) + EDIT == cost
+    if last_word > _SHORT:
         end_kept = end_kept or _fit(pattern[:-1], p_umlaut[:-1], text, dots) + EDIT == cost
     return not (start_kept and end_kept)
 
@@ -1477,17 +1490,22 @@ def _continues(
     line, offset = spot
     text = stream.lines[line].text
     edge = text[offset]
-    if not edge.isalnum():
+    if not _in_word(edge):
         return False
     k = offset + step
-    if 0 <= k < len(text) and text[k].isalnum():
+    if 0 <= k < len(text) and _in_word(text[k]):
         return True
     # A comb field is read with its spaces taken out ("K D - 4 3 8 3 0 0"):
     # there a digit next to a digit goes on, a word after the number does not.
     if 0 <= neighbour < len(flat.text):
         beside = flat.text[neighbour]
-        return beside.isalnum() and beside.isdigit() == edge.isdigit()
+        return _in_word(beside) and beside.isdigit() == edge.isdigit()
     return False
+
+
+def _in_word(ch: str) -> bool:
+    """A letter or digit of a word — not a footnote mark ¹ beside it."""
+    return ch.isalnum() and unicodedata.category(ch) not in _BESIDE
 
 
 def _beside_singles(text: str) -> set[int]:
