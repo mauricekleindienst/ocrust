@@ -581,6 +581,25 @@ fn render_document(document_json: &str, format: &str) -> PyResult<String> {
 
 /// Reports the ONNX Runtime the extension can load.
 /// Every file suffix the reader can open, without the leading dot.
+/// A PDF's own text as a document (JSON), read without recognition and
+/// without models: a page without a text layer comes back empty.
+#[pyfunction]
+#[pyo3(signature = (data, name, password = None))]
+fn read_pdf_text(
+    py: Python<'_>,
+    data: Vec<u8>,
+    name: &str,
+    password: Option<String>,
+) -> PyResult<String> {
+    let mut config = ocrust_core::EngineConfig::default();
+    config.ingest.pdf_password = password.map(ocrust_core::ingest::Password);
+    let source = Source::bytes(data, name);
+    let doc = py
+        .detach(|| ocrust_core::pipeline::read_pdf_text(&source, &config))
+        .map_err(to_py_err)?;
+    serde_json::to_string(&doc).map_err(|e| OcrustError::new_err(e.to_string()))
+}
+
 #[pyfunction]
 fn supported_suffixes() -> Vec<String> {
     ocrust_core::ingest::SUPPORTED_EXTENSIONS
@@ -663,6 +682,7 @@ fn _ocrust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_document, m)?)?;
     m.add_function(wrap_pyfunction!(runtime_version, m)?)?;
     m.add_function(wrap_pyfunction!(supported_suffixes, m)?)?;
+    m.add_function(wrap_pyfunction!(read_pdf_text, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_models, m)?)?;
     m.add_function(wrap_pyfunction!(models_cache_dir, m)?)?;
     m.add_function(wrap_pyfunction!(known_languages, m)?)?;

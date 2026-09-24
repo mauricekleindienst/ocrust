@@ -577,29 +577,7 @@ impl Engine {
     /// A page read from its PDF text layer: the same layout as a recognized
     /// page, from lines that are exact rather than recognized.
     fn text_page(&self, index: usize, text: crate::ingest::TextPage, started: Instant) -> Page {
-        let ordered = layout::reading_order_exact(text.lines, &self.config.layout);
-        let blocks = layout::group_exact_blocks(ordered, &self.config.layout);
-        let signals: Vec<crate::quality::LineSignals> = blocks
-            .iter()
-            .flat_map(|block| block.lines.iter())
-            .map(|line| crate::quality::LineSignals {
-                chars: line.text.chars().count(),
-                confidence: line.confidence,
-                margin: line.margin,
-                height_ratio: line.bbox.height() / text.height.max(1) as f32,
-            })
-            .collect();
-        Page {
-            quality: crate::quality::page_quality(&signals),
-            index,
-            width: text.width,
-            height: text.height,
-            rotation: 0.0,
-            origin: crate::doc::PageOrigin::PdfText,
-            blocks,
-            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-            image: None,
-        }
+        text_page(index, text, &self.config.layout, started)
     }
 
     /// Rotates a sideways page upright, when the box geometry says so.
@@ -897,6 +875,63 @@ pub struct Parallelism {
     pub intra_threads: usize,
     /// Sessions per model; a worker waits for one to be free.
     pub replicas: usize,
+}
+
+/// A page read from its PDF text layer: the same layout as a recognized
+/// page, from lines that are exact rather than recognized.
+fn text_page(
+    index: usize,
+    text: crate::ingest::TextPage,
+    layout_config: &layout::LayoutConfig,
+    started: Instant,
+) -> Page {
+    let ordered = layout::reading_order_exact(text.lines, layout_config);
+    let blocks = layout::group_exact_blocks(ordered, layout_config);
+    let signals: Vec<crate::quality::LineSignals> = blocks
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| crate::quality::LineSignals {
+            chars: line.text.chars().count(),
+            confidence: line.confidence,
+            margin: line.margin,
+            height_ratio: line.bbox.height() / text.height.max(1) as f32,
+        })
+        .collect();
+    Page {
+        quality: crate::quality::page_quality(&signals),
+        index,
+        width: text.width,
+        height: text.height,
+        rotation: 0.0,
+        origin: crate::doc::PageOrigin::PdfText,
+        blocks,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        image: None,
+    }
+}
+
+/// A PDF's own text, laid out, without any recognition: a page without a
+/// text layer comes back empty. Needs no models — what a conversion that must
+/// not recognize anything reads a PDF with.
+pub fn read_pdf_text(source: &Source, config: &EngineConfig) -> Result<Document> {
+    let started = Instant::now();
+    let ingest_config = IngestConfig {
+        pdf_text: crate::ingest::pdftext::PdfText::Only,
+        ..config.ingest.clone()
+    };
+    let mut reader = ingest::open(source, &ingest_config)?;
+    let mut doc = Document::new(source.name());
+    reader.for_each_page(&mut |raw| {
+        let page_started = Instant::now();
+        let text = raw.text.ok_or_else(|| {
+            Error::Unsupported("only a PDF's own text can be read without recognizing it".into())
+        })?;
+        doc.pages
+            .push(text_page(raw.index, text, &config.layout, page_started));
+        Ok(())
+    })?;
+    doc.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    Ok(doc)
 }
 
 /// Shares `cores` out between `workers`, unless threads or replicas were set.

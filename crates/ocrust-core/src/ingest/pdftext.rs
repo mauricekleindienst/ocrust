@@ -52,6 +52,9 @@ pub enum PdfText {
     /// Use any text layer with readable characters, an invisible OCR layer
     /// included; recognize only pages without one.
     Always,
+    /// Use the text layer and nothing else: a page without one comes back
+    /// empty. Needs no recognition models.
+    Only,
 }
 
 impl PdfText {
@@ -61,6 +64,7 @@ impl PdfText {
             "never" | "off" | "no" => Some(Self::Never),
             "auto" => Some(Self::Auto),
             "always" | "on" | "yes" => Some(Self::Always),
+            "only" | "text" => Some(Self::Only),
             _ => None,
         }
     }
@@ -155,6 +159,7 @@ impl TextLayer {
         match mode {
             PdfText::Never => false,
             PdfText::Always => printed.iter().any(|g| g.mapped),
+            PdfText::Only => true,
             PdfText::Auto => {
                 let visible: Vec<&&TextGlyph> = printed.iter().filter(|g| g.visible).collect();
                 if visible.is_empty() {
@@ -765,10 +770,10 @@ impl<'a> Device<'a> for Collector {
         .unwrap_or(0.5 * UNITS_PER_EM);
         let end = full * KPoint::new(advance, 0.0);
         let (text, mapped) = match glyph.as_unicode() {
-            Some(BfString::Char(c)) => (c.to_string(), readable(c)),
+            Some(BfString::Char(c)) => (unligature(c.to_string()), readable(c)),
             Some(BfString::String(s)) => {
                 let ok = !s.is_empty() && s.chars().all(readable);
-                (s, ok)
+                (unligature(s), ok)
             }
             None => ("\u{FFFD}".to_string(), false),
         };
@@ -789,6 +794,25 @@ impl<'a> Device<'a> for Collector {
             self.layer.image_area += area;
         }
     }
+}
+
+/// A ligature glyph as the letters it joins: "Pﬂicht" is searched for as
+/// "Pflicht", and a knowledge base's index does not know the two are one word.
+fn unligature(text: String) -> String {
+    if !text.chars().any(|c| ('\u{FB00}'..='\u{FB06}').contains(&c)) {
+        return text;
+    }
+    text.chars()
+        .map(|c| match c {
+            '\u{FB00}' => "ff".to_string(),
+            '\u{FB01}' => "fi".to_string(),
+            '\u{FB02}' => "fl".to_string(),
+            '\u{FB03}' => "ffi".to_string(),
+            '\u{FB04}' => "ffl".to_string(),
+            '\u{FB05}' | '\u{FB06}' => "st".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
 }
 
 /// A character a text layer should hold: not a replacement or private-use
@@ -1124,6 +1148,21 @@ mod tests {
 
         assert!(layer(word("Vertrag", 100.0, 200.0, 20.0)).usable(PdfText::Auto));
         assert!(!layer(word("Vertrag", 100.0, 200.0, 20.0)).usable(PdfText::Never));
+    }
+
+    #[test]
+    fn ligatures_are_the_letters_they_join() {
+        let ligature = format!("P{}ichten, e{}zient", '\u{FB02}', '\u{FB03}');
+        assert_eq!(unligature(ligature), "Pflichten, effizient");
+        assert_eq!(unligature("Straße".to_string()), "Straße");
+    }
+
+    #[test]
+    fn only_reads_any_page_and_never_recognizes_one() {
+        let empty = layer(Vec::new());
+        assert!(empty.usable(PdfText::Only));
+        assert!(!empty.usable(PdfText::Always));
+        assert_eq!(PdfText::parse("only"), Some(PdfText::Only));
     }
 
     #[test]

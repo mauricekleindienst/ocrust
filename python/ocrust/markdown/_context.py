@@ -51,9 +51,9 @@ class Options:
             reads it where it can be trusted and recognizes the rest,
             ``"always"`` reads any text layer, ``"never"`` recognizes every
             page.
-        ocr: Whether scans and pictures are recognized at all. Off, a scanned
-            PDF or a photo converts to a note without text, and nothing needs
-            the model files.
+        ocr: Whether scans and pictures are recognized at all. Off, a PDF is
+            read from its own text alone — a scanned page stays empty — images
+            and pictures are left unread, and nothing needs the model files.
         pictures: Whether the text in pictures inside documents — a diagram
             in a Word file, a screenshot on a slide — is read too.
         assets: Whether pictures inside documents are kept as files beside

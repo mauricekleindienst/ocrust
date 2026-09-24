@@ -576,3 +576,24 @@ def test_duplicate_archive_members_are_one(tmp_path):
     (tmp_path / "in" / "z.zip").write_bytes(buffer.getvalue())
     result = markdown.export([tmp_path / "in"], tmp_path / "out")
     assert len(result.written) == 1 and not result.kept
+
+
+# -- PDFs without the model files
+
+
+def test_without_ocr_a_pdf_is_read_from_its_text_and_a_scan_stays_empty(
+    table_pdf, tmp_path, monkeypatch
+):
+    from conftest import _pdf_from_stream
+
+    monkeypatch.setenv("OCRUST_MODELS_DIR", str(tmp_path / "no-models"))
+    note = markdown.convert(table_pdf, ocr=False)
+    assert "| Widget A | 12 | 49,90 | 598,80 |" in note.markdown
+    assert note.meta["extraction"] == "text"
+    # A page without any text drawn on it is what a scan looks like.
+    empty = tmp_path / "scan.pdf"
+    empty.write_bytes(_pdf_from_stream(""))
+    note = markdown.convert(empty, ocr=False)
+    assert body(note.markdown) == "<!-- page 1 -->"
+    assert note.meta["pages"] == 1 and note.meta["unread_pages"] == [1]
+    assert "\nunread_pages: [1]\n" in note.markdown

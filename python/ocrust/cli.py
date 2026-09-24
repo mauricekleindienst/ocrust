@@ -275,9 +275,9 @@ def _build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--dpi", type=_real(20, 2400), help="PDF rasterization DPI (default 200)")
     scan.add_argument(
         "--pdf-text",
-        choices=("never", "auto", "always"),
+        choices=("never", "auto", "always", "only"),
         help="use a PDF page's own text instead of recognizing it: auto where it can be "
-        "trusted, always, or never (default)",
+        "trusted, always, only (a page without text stays empty), or never (default)",
     )
     scan.add_argument("--models", type=Path, help="directory holding the ONNX models")
     scan.add_argument("--no-preprocess", action="store_true", help="skip deskew/invert/rescale")

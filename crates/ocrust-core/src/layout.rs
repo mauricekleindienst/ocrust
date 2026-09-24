@@ -886,6 +886,10 @@ pub(crate) fn strip_bullet(line: &str) -> &str {
 /// Lines a heading may run to on a page read from its own text, where sizes
 /// are exact: a title set large in a narrow column wraps more than twice.
 const EXACT_HEADING_LINES: usize = 4;
+/// How much larger than the text a heading's size has to be where sizes are
+/// exact: a sixteen-point heading over twelve-point text is one, though its
+/// recognized box would not stand out enough to be sure.
+const EXACT_HEADING_FACTOR: f32 = 1.2;
 
 fn classify_block(lines: &[Line], text_height: f32, exact: bool, cfg: &LayoutConfig) -> BlockKind {
     let first = match lines.first() {
@@ -894,7 +898,12 @@ fn classify_block(lines: &[Line], text_height: f32, exact: bool, cfg: &LayoutCon
     };
     // The quad, not the box: a de-hyphenated line's box spans both of the lines
     // it came from, which would make every short hyphenated paragraph a heading.
-    let tall = first.quad.edge_height() > text_height * cfg.heading_height_factor;
+    let factor = if exact {
+        EXACT_HEADING_FACTOR
+    } else {
+        cfg.heading_height_factor
+    };
+    let tall = first.quad.edge_height() > text_height * factor;
     let most_lines = if exact { EXACT_HEADING_LINES } else { 2 };
     let chars: usize = lines.iter().map(|l| l.text.chars().count()).sum();
     let heading =
@@ -1183,6 +1192,23 @@ mod tests {
         assert_eq!(classify_block(&title, 12.0, true, &cfg), BlockKind::Heading);
         assert_eq!(
             classify_block(&title, 12.0, false, &cfg),
+            BlockKind::Paragraph
+        );
+        // A sixteen-point section heading over twelve-point text: a heading
+        // where sizes are exact, too close to call where they are recognized.
+        let section = line_at("Ergebnisse", 0.0, 0.0, 200.0, 16.0);
+        assert_eq!(
+            classify_block(std::slice::from_ref(&section), 12.0, true, &cfg),
+            BlockKind::Heading
+        );
+        assert_eq!(
+            classify_block(&[section], 12.0, false, &cfg),
+            BlockKind::Paragraph
+        );
+        // A line a point larger than the text is not.
+        let larger = line_at("Ergebnisse", 0.0, 0.0, 200.0, 13.0);
+        assert_eq!(
+            classify_block(&[larger], 12.0, true, &cfg),
             BlockKind::Paragraph
         );
     }

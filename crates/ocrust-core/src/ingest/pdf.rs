@@ -87,7 +87,7 @@ impl Renderer {
                     image: image::RgbImage::new(0, 0),
                     origin: PageOrigin::PdfText,
                     text: Some(TextPage {
-                        lines: layer.lines(self.text == PdfText::Always),
+                        lines: layer.lines(matches!(self.text, PdfText::Always | PdfText::Only)),
                         width,
                         height,
                     }),

@@ -151,8 +151,24 @@ class Converted:
 
 
 def _scan(data: bytes, ctx: Context, suffix: str, name: str) -> Note:
-    if not ctx.options.ocr and suffix != ".pdf":
-        return Note(meta={"extraction": "none"})
+    if not ctx.options.ocr:
+        if suffix != ".pdf":
+            return Note(meta={"extraction": "none"})
+        # A PDF's own text, and nothing recognized: no models needed, and a
+        # scanned page stays empty.
+        import json
+
+        from ocrust import Document, _ocrust
+
+        raw = _ocrust.read_pdf_text(data, name, ctx.options.password)
+        doc = Document._from_json(json.loads(raw))
+        # Pages without text of their own are scans, or pictures of text: the
+        # note says which, so they can be recognized later.
+        unread = [page.index + 1 for page in doc.pages if not page.lines]
+        return Note(
+            blocks=blocks_of(doc, paged=True),
+            meta={"pages": len(doc.pages), "extraction": "text", "unread_pages": unread},
+        )
     doc = ctx.scan(data, name)
     paged = suffix in _PAGED and (suffix == ".pdf" or len(doc.pages) > 1)
     meta: dict[str, Any] = {"pages": len(doc.pages) if suffix in _PAGED else None}
@@ -314,6 +330,7 @@ _ORDER = (
     "attachments",
     "extraction",
     "ocr_quality",
+    "unread_pages",
     "truncated",
     "message_id",
     "publisher",
