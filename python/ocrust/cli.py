@@ -2534,6 +2534,9 @@ def _cmd_markdown(args: argparse.Namespace) -> int:
     except markdown.ConversionError as exc:
         _fail(str(exc))
         return 1
+    except OSError as exc:
+        _fail(f"{exc.filename or args.output}: {exc.strerror or exc}")
+        return 1
     for source, reason in result.failed:
         # Clashes are reported here; conversion failures came through progress.
         if "also" in reason and reason.endswith("rename one"):

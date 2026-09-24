@@ -243,7 +243,7 @@ def test_a_file_name_that_is_not_utf8_does_not_end_the_run(tmp_path):
         pytest.skip("the file system insists on valid names")
     folder = tmp_path / "in"
     folder.mkdir()
-    (folder / "b.txt").write_text("B")
+    (folder / "b.txt").write_text("B", encoding="utf-8")
     os.close(os.open(os.fsencode(folder) + b"/Bericht_M\xe4rz.txt", os.O_CREAT | os.O_WRONLY))
     result = markdown.export([folder], tmp_path / "out")
     assert len(result.written) == 2 and result.ok
@@ -255,9 +255,9 @@ def test_a_file_name_that_is_not_utf8_does_not_end_the_run(tmp_path):
 def test_a_note_too_long_for_its_name_is_shortened_and_nothing_else_stops(tmp_path):
     folder = tmp_path / "in"
     folder.mkdir()
-    (folder / ("L" * 240 + ".txt")).write_text("lang")
-    (folder / "z.txt").write_text("z")
-    (folder / "doc.txt").write_text("doc")
+    (folder / ("L" * 240 + ".txt")).write_text("lang", encoding="utf-8")
+    (folder / "z.txt").write_text("z", encoding="utf-8")
+    (folder / "doc.txt").write_text("doc", encoding="utf-8")
     (tmp_path / "out" / "doc.txt.md").mkdir(parents=True)
     result = markdown.export([folder], tmp_path / "out")
     names = sorted(p.name for _, p in result.written)
@@ -268,7 +268,7 @@ def test_a_note_too_long_for_its_name_is_shortened_and_nothing_else_stops(tmp_pa
 def test_a_link_in_one_folder_and_its_target_in_another_are_two_notes(tmp_path):
     (tmp_path / "A").mkdir()
     (tmp_path / "B").mkdir()
-    (tmp_path / "B" / "shared.txt").write_text("geteilt")
+    (tmp_path / "B" / "shared.txt").write_text("geteilt", encoding="utf-8")
     try:
         (tmp_path / "A" / "link.txt").symlink_to(tmp_path / "B" / "shared.txt")
     except OSError:  # pragma: no cover - no symbolic links here
@@ -279,8 +279,7 @@ def test_a_link_in_one_folder_and_its_target_in_another_are_two_notes(tmp_path):
     assert (out / "link.txt.md").exists() and (out / "shared.txt.md").exists()
 
 
-def picture_docx() -> bytes:
-    png = b"\x89PNG\r\n\x1a\n" + b"0" * 3000
+def picture_docx(png: bytes = b"\x89PNG\r\n\x1a\n" + b"0" * 3000) -> bytes:
     return docx(
         para("Plan") + f'<w:p><w:r><w:drawing><a:blip {A} r:embed="rId9"/></w:drawing></w:r></w:p>',
         relations=(("rId9", "image", "media/image1.png"),),
@@ -296,7 +295,7 @@ def test_an_edited_note_keeps_its_pictures(tmp_path):
     out = tmp_path / "out"
     markdown.export([folder], out, assets=True, ocr=False)
     note = out / "r.docx.md"
-    note.write_text(note.read_text() + "\nmeine Ergänzung\n")
+    note.write_text(note.read_text(encoding="utf-8") + "\nmeine Ergänzung\n", encoding="utf-8")
     asset = out / "_assets" / "r.docx" / "image1.png"
     source.write_bytes(picture_docx().replace(b"Plan", b"Neu!"))
     markdown.export([folder], out, assets=True, ocr=False)
@@ -309,7 +308,7 @@ def test_an_edited_note_keeps_its_pictures(tmp_path):
 def test_a_run_killed_after_writing_a_note_still_owns_it(tmp_path):
     folder = tmp_path / "in"
     folder.mkdir()
-    (folder / "d.txt").write_text("eins")
+    (folder / "d.txt").write_text("eins", encoding="utf-8")
     script = (
         "import os, signal\n"
         "from ocrust import markdown\n"
@@ -321,45 +320,45 @@ def test_a_run_killed_after_writing_a_note_still_owns_it(tmp_path):
     if not hasattr(signal, "SIGKILL"):  # pragma: no cover - Windows
         pytest.skip("no SIGKILL")
     subprocess.run([sys.executable, "-c", script], check=False)
-    (folder / "d.txt").write_text("zwei")
+    (folder / "d.txt").write_text("zwei", encoding="utf-8")
     result = markdown.export([folder], tmp_path / "out")
     assert not result.kept
-    assert "zwei" in (tmp_path / "out" / "d.txt.md").read_text()
+    assert "zwei" in (tmp_path / "out" / "d.txt.md").read_text(encoding="utf-8")
 
 
 def test_a_renamed_folder_takes_its_notes_along(tmp_path):
     (tmp_path / "Archiv").mkdir()
-    (tmp_path / "Archiv" / "x.txt").write_text("v1")
+    (tmp_path / "Archiv" / "x.txt").write_text("v1", encoding="utf-8")
     out = tmp_path / "out"
     markdown.export([tmp_path / "Archiv"], out)
     (tmp_path / "Archiv").rename(tmp_path / "Archive")
-    (tmp_path / "Archive" / "x.txt").write_text("v2")
+    (tmp_path / "Archive" / "x.txt").write_text("v2", encoding="utf-8")
     result = markdown.export([tmp_path / "Archive"], out, prune=True)
-    assert not result.kept and "v2" in (out / "x.txt.md").read_text()
+    assert not result.kept and "v2" in (out / "x.txt.md").read_text(encoding="utf-8")
 
 
 def test_force_does_not_take_another_documents_note(tmp_path):
     for name in ("A", "B"):
         (tmp_path / name).mkdir()
-        (tmp_path / name / "x.txt").write_text(f"Inhalt {name}")
+        (tmp_path / name / "x.txt").write_text(f"Inhalt {name}", encoding="utf-8")
     out = tmp_path / "out"
     markdown.export([tmp_path / "A"], out)
     forced = markdown.export([tmp_path / "B"], out, force=True)
-    assert forced.kept and "Inhalt A" in (out / "x.txt.md").read_text()
+    assert forced.kept and "Inhalt A" in (out / "x.txt.md").read_text(encoding="utf-8")
 
 
 def test_a_dry_run_writes_nothing_and_says_what_it_would_keep(tmp_path, capsys):
     source = tmp_path / "d.txt"
-    source.write_text("neu")
+    source.write_text("neu", encoding="utf-8")
     target = tmp_path / "d.md"
-    target.write_text("MEINE DATEI")
+    target.write_text("MEINE DATEI", encoding="utf-8")
     assert main(["md", str(source), "-o", str(target), "-n"]) == 0
-    assert target.read_text() == "MEINE DATEI"
+    assert target.read_text(encoding="utf-8") == "MEINE DATEI"
     folder = tmp_path / "in"
     folder.mkdir()
-    (folder / "e.txt").write_text("e")
+    (folder / "e.txt").write_text("e", encoding="utf-8")
     (tmp_path / "out").mkdir()
-    (tmp_path / "out" / "e.txt.md").write_text("fremd")
+    (tmp_path / "out" / "e.txt.md").write_text("fremd", encoding="utf-8")
     result = markdown.export([folder], tmp_path / "out", dry_run=True)
     assert not result.written and [p.name for p, _ in result.kept] == ["e.txt.md"]
     assert not (tmp_path / "out" / ".ocrust").exists()
@@ -367,8 +366,8 @@ def test_a_dry_run_writes_nothing_and_says_what_it_would_keep(tmp_path, capsys):
 
 def test_names_that_differ_only_in_case_clash(tmp_path):
     (tmp_path / "in").mkdir()
-    (tmp_path / "in" / "Bericht.txt").write_text("a")
-    (tmp_path / "in" / "bericht.txt").write_text("b")
+    (tmp_path / "in" / "Bericht.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "in" / "bericht.txt").write_text("b", encoding="utf-8")
     if len(list((tmp_path / "in").iterdir())) < 2:
         pytest.skip("a file system that folds case")
     result = markdown.export([tmp_path / "in"], tmp_path / "out")
@@ -597,3 +596,120 @@ def test_without_ocr_a_pdf_is_read_from_its_text_and_a_scan_stays_empty(
     assert body(note.markdown) == "<!-- page 1 -->"
     assert note.meta["pages"] == 1 and note.meta["unread_pages"] == [1]
     assert "\nunread_pages: [1]\n" in note.markdown
+
+
+# -- second review round: the folder of notes
+
+
+def test_force_and_prune_never_delete_a_note_edited_by_hand(tmp_path):
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "a.txt").write_text("alpha", encoding="utf-8")
+    out = tmp_path / "out"
+    markdown.export([folder], out)
+    note = out / "a.txt.md"
+    note.write_text(note.read_text(encoding="utf-8") + "\nWICHTIG\n", encoding="utf-8")
+    (folder / "a.txt").unlink()
+    preview = markdown.export([folder], out, prune=True, force=True, dry_run=True)
+    assert not preview.pruned and [p for p, _ in preview.kept] == [note]
+    result = markdown.export([folder], out, prune=True, force=True)
+    assert not result.pruned and "WICHTIG" in note.read_text(encoding="utf-8")
+
+
+def test_an_archive_member_that_fails_keeps_its_last_note(tmp_path):
+    good = docx(para("Vertrag mit Kunde A"))
+
+    def archive(member: bytes) -> bytes:
+        return package({"a.txt": "alpha", "b.docx": member})
+
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "p.zip").write_bytes(archive(good))
+    out = tmp_path / "out"
+    markdown.export([tmp_path / "in"], out, ocr=False)
+    (tmp_path / "in" / "p.zip").write_bytes(archive(good[:200]))
+    result = markdown.export([tmp_path / "in"], out, ocr=False)
+    assert result.failed
+    assert "Vertrag" in (out / "p.zip" / "b.docx.md").read_text(encoding="utf-8")
+    # Mended, it is written again.
+    (tmp_path / "in" / "p.zip").write_bytes(archive(docx(para("Vertrag, neu"))))
+    markdown.export([tmp_path / "in"], out, ocr=False)
+    assert "neu" in (out / "p.zip" / "b.docx.md").read_text(encoding="utf-8")
+
+
+def test_a_kept_note_does_not_make_every_run_convert_again(tmp_path):
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "v.txt").write_text("eins", encoding="utf-8")
+    out = tmp_path / "out"
+    markdown.export([folder], out)
+    note = out / "v.txt.md"
+    note.write_text(note.read_text(encoding="utf-8") + "\nAnmerkung\n", encoding="utf-8")
+    (folder / "v.txt").write_text("zwei", encoding="utf-8")
+    assert markdown.export([folder], out).kept
+    again = markdown.export([folder], out)
+    assert again.unchanged == [folder / "v.txt"] and not again.written
+    # Once the note is let go, the document is written again.
+    note.unlink()
+    assert markdown.export([folder], out).written
+    assert "zwei" in note.read_text(encoding="utf-8")
+
+
+def test_a_run_killed_after_writing_a_picture_still_owns_it(tmp_path):
+    if not hasattr(signal, "SIGKILL"):  # pragma: no cover - Windows
+        pytest.skip("no SIGKILL")
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "r.docx").write_bytes(picture_docx())
+    out = tmp_path / "out"
+    script = (
+        "import os, signal\n"
+        "from ocrust.markdown import _store\n"
+        "write = _store._write\n"
+        "def stop(path, data):\n"
+        "    write(path, data)\n"
+        "    if path.suffix == '.png':\n"
+        "        os.kill(os.getpid(), signal.SIGKILL)\n"
+        "_store._write = stop\n"
+        f"_store.export([{str(folder)!r}], {str(out)!r}, assets=True, ocr=False)\n"
+    )
+    subprocess.run([sys.executable, "-c", script], check=False)
+    markdown.export([folder], out, assets=True, ocr=False)
+    new = b"\x89PNG\r\n\x1a\n" + b"2" * 3000
+    (folder / "r.docx").write_bytes(picture_docx(new))
+    markdown.export([folder], out, assets=True, ocr=False)
+    asset = out / "_assets" / "r.docx" / "image1.png"
+    assert asset.read_bytes() == new
+    (folder / "r.docx").unlink()
+    markdown.export([folder], out, assets=True, ocr=False, prune=True)
+    assert not asset.exists()
+
+
+def test_a_case_twin_does_not_take_the_note_of_the_document_that_has_it(tmp_path):
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "report.txt").write_text("geprüft", encoding="utf-8")
+    out = tmp_path / "out"
+    markdown.export([folder], out)
+    (folder / "REPORT.txt").write_text("Entwurf", encoding="utf-8")
+    if (folder / "report.txt").read_text(encoding="utf-8") != "geprüft":
+        pytest.skip("names differing in case are one file here")
+    result = markdown.export([folder], out, prune=True)
+    assert [p.name for p, _ in result.failed] == ["REPORT.txt"]
+    assert sorted(p.name for p in out.glob("*.md")) == ["report.txt.md"]
+
+
+def test_an_output_folder_that_cannot_be_made_is_reported(tmp_path, capsys):
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "file").write_text("x", encoding="utf-8")
+    assert main(["markdown", str(tmp_path / "in"), "-o", str(tmp_path / "file" / "kb")]) == 1
+    assert "cannot create" in capsys.readouterr().err
+    with pytest.raises(markdown.ConversionError):
+        markdown.export([tmp_path / "in"], tmp_path / "file" / "kb")
+
+
+def test_a_lock_is_taken_over_only_from_a_process_that_is_gone():
+    from ocrust.markdown._store import _alive
+
+    assert _alive(os.getpid())
+    assert not _alive(999_999_999)

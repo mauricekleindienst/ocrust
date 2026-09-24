@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import posixpath
+import sys
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -249,6 +250,35 @@ def _options_key(options: Options) -> str:
     )
 
 
+def _alive(pid: int) -> bool:
+    """Whether a process of this number is running. Unsure counts as yes: a
+    lock is only ever taken over from a process known to be gone."""
+    if sys.platform == "win32":
+        # `os.kill` would end the process there, not look for it.
+        import ctypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            # ERROR_INVALID_PARAMETER: no process has this number.
+            return ctypes.get_last_error() != 87
+        try:
+            code = ctypes.c_ulong()
+            if not kernel.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle(ctypes.c_void_p(handle))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 class _Lock:
     """One export at a time per output folder."""
 
@@ -281,13 +311,7 @@ class _Lock:
             return True
         if pid <= 0 or pid == os.getpid():
             return True
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        except (PermissionError, OSError):
-            return False
-        return False
+        return not _alive(pid)
 
     def __exit__(self, *_: Any) -> None:
         with contextlib.suppress(OSError):
@@ -315,6 +339,8 @@ class _Index:
         #: Notes a run was about to write when it was stopped: note → (key,
         #: hash). Such a note is the export's, not a stranger's.
         self.claims: dict[str, tuple[str, str]] = {}
+        #: The same for pictures: picture → key.
+        self.asset_claims: dict[str, str] = {}
         self._replay()
         self.saved = time.monotonic()
         self.owners: dict[str, str] = {}
@@ -341,6 +367,8 @@ class _Index:
                 self.entries.pop(record["key"], None)
             elif isinstance(record.get("claim"), str):
                 self.claims[record["claim"]] = (record["key"], str(record.get("sha256", "")))
+            elif isinstance(record.get("asset"), str):
+                self.asset_claims[record["asset"]] = record["key"]
 
     def _log(self, record: dict[str, Any]) -> None:
         if not self.record:
@@ -352,6 +380,11 @@ class _Index:
     def claim(self, key: str, note_path: str, digest: str) -> None:
         """Says, before a note is written, that it is about to be."""
         self._log({"key": key, "claim": note_path, "sha256": digest})
+
+    def claim_asset(self, key: str, asset_path: str) -> None:
+        """Says, before a picture is written, that it is about to be."""
+        self.asset_claims[asset_path] = key
+        self._log({"key": key, "asset": asset_path})
 
     def _own(self, key: str, entry: dict[str, Any]) -> None:
         for item in entry.get("notes", []):
@@ -440,6 +473,8 @@ class _Exporter:
         self._built: Ocr | None = None
         self.seen: set[str] = set()
         self.member_failed = ""
+        #: Notes of archive members that failed this time: kept as they were.
+        self.failed_notes: set[str] = set()
 
     def _engine(self) -> Ocr:
         """One engine for the whole run, made when the first scan needs it."""
@@ -465,6 +500,11 @@ class _Exporter:
             return False
         if not all((self.out_dir / item["path"]).is_file() for item in entry.get("notes", [])):
             return False
+        for note_path in entry.get("kept", []):
+            if not isinstance(note_path, str) or not self._keep_reason(
+                self.out_dir / note_path, note_path, key
+            ):
+                return False
         if entry.get("size") == stat.st_size and entry.get("mtime_ns") == stat.st_mtime_ns:
             return True
         if entry.get("size") != stat.st_size:
@@ -500,6 +540,7 @@ class _Exporter:
                     self.result.failed.append((source.path, reason))
                     self.progress("failed", source.path, None, reason)
                     self.member_failed = reason
+                    self.failed_notes.add(f"{_safe_stem(stem)}.md")
                     continue
                 if converted is not None:
                     out.append(converted)
@@ -580,6 +621,7 @@ class _Exporter:
                 self.progress("would write", source.path, target, "")
             return
         self.member_failed = ""
+        self.failed_notes = set()
         try:
             data = source.path.read_bytes()
             notes = self.notes_of(source, data, stat)
@@ -601,15 +643,20 @@ class _Exporter:
         old_assets = set(previous.get("assets", []))
         entry_notes: list[dict[str, str]] = []
         entry_assets: list[str] = []
-        kept = False
+        kept: list[str] = []
         failure = self.member_failed
+        for failed in sorted(self.failed_notes & set(old_notes)):
+            # A member that could not be read this time keeps what it gave
+            # last time, as a document that fails does.
+            entry_notes.append(old_notes[failed])
+            entry_assets.extend(a for a in old_assets if _asset_of(a, failed))
         for note_path, text, assets in notes:
             target = self.out_dir / note_path
             reason = self._keep_reason(target, note_path, key)
             if reason:
                 # Left alone: still ours if it was, never ours if it was not,
                 # and looked at again next time. Its pictures stay with it.
-                kept = True
+                kept.append(note_path)
                 self.result.kept.append((target, reason))
                 self.progress("kept", target, None, reason)
                 if note_path in old_notes:
@@ -623,9 +670,14 @@ class _Exporter:
                 for asset_path, content in assets.items():
                     owner = self.index.assets.get(asset_path)
                     destination = self.out_dir / asset_path
-                    if owner not in (None, key) or (owner is None and destination.exists()):
+                    if owner not in (None, key) or (
+                        owner is None
+                        and destination.exists()
+                        and self.index.asset_claims.get(asset_path) != key
+                    ):
                         # A picture the export did not put there: left alone.
                         continue
+                    self.index.claim_asset(key, asset_path)
                     _write(destination, content)
                     entry_assets.append(asset_path)
             except (OSError, UnicodeError) as exc:
@@ -652,8 +704,7 @@ class _Exporter:
             "source": source.label,
             "stem": source.stem,
             "root": str(source.root),
-            # A note that was kept makes the next run try again.
-            "size": -1 if kept else stat.st_size,
+            "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
             "sha256": hashlib.sha256(data).hexdigest(),
             "options": self.options_key,
@@ -661,6 +712,10 @@ class _Exporter:
             "notes": entry_notes,
             "assets": sorted(set(entry_assets)),
         }
+        if kept:
+            # Looked at again on every run, without converting anything, and
+            # written once nothing keeps them any more.
+            entry["kept"] = kept
         if failure:
             # Tried again, and said again, on the next run.
             entry["error"] = failure
@@ -708,10 +763,17 @@ class _Exporter:
         else:
             self.index.drop(owner_key)
 
+    def _edited(self, note_path: str, digest: str) -> bool:
+        """Whether a note was changed by hand since it was written. Such a
+        note is never deleted, `--force` or not: nothing would replace it."""
+        target = self.out_dir / note_path
+        return target.is_file() and _file_sha256(target) != digest
+
     def _remove_note(self, note_path: str, digest: str) -> bool:
         target = self.out_dir / note_path
-        if target.exists() and not self.force and _file_sha256(target) != digest:
+        if self._edited(note_path, digest):
             self.result.kept.append((target, "edited since it was written; not deleted"))
+            self.progress("kept", target, None, "edited since it was written; not deleted")
             return False
         with contextlib.suppress(OSError):
             target.unlink()
@@ -741,8 +803,14 @@ class _Exporter:
             entry = self.index.entries[key]
             if self.dry_run:
                 for item in entry.get("notes", []):
-                    self.result.pruned.append(self.out_dir / item["path"])
-                    self.progress("would remove", path, self.out_dir / item["path"], "")
+                    target = self.out_dir / item["path"]
+                    if self._edited(item["path"], item.get("sha256", "")):
+                        reason = "edited since it was written; not deleted"
+                        self.result.kept.append((target, reason))
+                        self.progress("kept", target, None, reason)
+                        continue
+                    self.result.pruned.append(target)
+                    self.progress("would remove", path, target, "")
                 continue
             kept_notes = []
             for item in entry.get("notes", []):
@@ -824,7 +892,13 @@ def export(
     # Names that differ only in case are one file on Windows and macOS, and
     # a knowledge base is synced to both: they count as a clash here too.
     notes: dict[str, Path] = {}
-    for document in documents:
+    # The document that already has the note keeps it; a newcomer is refused.
+    established = {
+        _key(d.path)
+        for d in documents
+        if (entry := exporter.index.entries.get(_key(d.path))) and entry.get("stem") == d.stem
+    }
+    for document in sorted(documents, key=lambda d: _key(d.path) not in established):
         claimed = notes.setdefault(document.stem.casefold(), document.path)
         if claimed != document.path:
             exporter.result.failed.append(
@@ -839,7 +913,10 @@ def export(
         if prune:
             exporter.prune(roots, seen)
         return exporter.result
-    out.mkdir(parents=True, exist_ok=True)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConversionError(f"cannot create {out}: {exc.strerror or exc}") from exc
     with _Lock(out / INDEX_DIR):
         try:
             for document in documents:

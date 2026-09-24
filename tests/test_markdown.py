@@ -571,7 +571,10 @@ def test_a_web_page_reads_pictures_from_its_own_folder_only(tmp_path):
     secret.write_bytes(b"\x89PNG" + b"0" * 5000)
     (tmp_path / "site" / "logo.png").write_bytes(b"\x89PNG" + b"1" * 5000)
     page = tmp_path / "site" / "p.html"
-    page.write_text('<p>x</p><img src="logo.png" alt="a b"><img src="../secret.png" alt="c d">')
+    page.write_text(
+        '<p>x</p><img src="logo.png" alt="a b"><img src="../secret.png" alt="c d">',
+        encoding="utf-8",
+    )
     note = markdown.convert(page, assets=True, ocr=False)
     assert list(note.assets) == ["logo.png"]
 
@@ -917,11 +920,11 @@ def test_a_picture_in_a_word_file_is_read_and_can_be_kept(engine, image_fixtures
 
 def make_tree(root: Path) -> None:
     (root / "a" / "b").mkdir(parents=True)
-    (root / "a" / "brief.txt").write_text("Erster Brief.\n")
-    (root / "a" / "b" / "notiz.md").write_text("# Notiz\n\nText.\n")
-    (root / "a" / "b" / "brief.csv").write_text("x,y\n1,2\n")
+    (root / "a" / "brief.txt").write_text("Erster Brief.\n", encoding="utf-8")
+    (root / "a" / "b" / "notiz.md").write_text("# Notiz\n\nText.\n", encoding="utf-8")
+    (root / "a" / "b" / "brief.csv").write_text("x,y\n1,2\n", encoding="utf-8")
     (root / "a" / "tool.exe").write_bytes(b"MZ")
-    (root / "a" / ".versteckt.txt").write_text("nein")
+    (root / "a" / ".versteckt.txt").write_text("nein", encoding="utf-8")
 
 
 def test_an_export_mirrors_the_folder_and_converts_only_what_changed(tmp_path):
@@ -934,10 +937,10 @@ def test_an_export_mirrors_the_folder_and_converts_only_what_changed(tmp_path):
         "brief.txt.md",
     ]
     assert [p.name for p in first.skipped] == ["tool.exe"]
-    index = json.loads((out / ".ocrust" / "index.json").read_text())
+    index = json.loads((out / ".ocrust" / "index.json").read_text(encoding="utf-8"))
     assert len(index["documents"]) == 3
     assert not (out / ".ocrust" / "lock").exists()
-    note = (out / "brief.txt.md").read_text()
+    note = (out / "brief.txt.md").read_text(encoding="utf-8")
     assert 'source: "a/brief.txt"' in note and "Erster Brief." in note
 
     second = markdown.export([tmp_path / "a"], out)
@@ -948,10 +951,10 @@ def test_an_export_mirrors_the_folder_and_converts_only_what_changed(tmp_path):
     third = markdown.export([tmp_path / "a"], out)
     assert not third.written
 
-    (tmp_path / "a" / "brief.txt").write_text("Zweiter Brief.\n")
+    (tmp_path / "a" / "brief.txt").write_text("Zweiter Brief.\n", encoding="utf-8")
     fourth = markdown.export([tmp_path / "a"], out)
     assert [s.name for s, _ in fourth.written] == ["brief.txt"]
-    assert "Zweiter Brief." in (out / "brief.txt.md").read_text()
+    assert "Zweiter Brief." in (out / "brief.txt.md").read_text(encoding="utf-8")
 
 
 def test_a_note_edited_by_hand_or_not_written_by_an_export_is_never_overwritten(tmp_path):
@@ -959,36 +962,41 @@ def test_a_note_edited_by_hand_or_not_written_by_an_export_is_never_overwritten(
     out = tmp_path / "wissen"
     markdown.export([tmp_path / "a"], out)
     note = out / "brief.txt.md"
-    note.write_text(note.read_text() + "\nMeine Ergänzung\n")
-    (tmp_path / "a" / "brief.txt").write_text("Geändert.\n")
+    note.write_text(note.read_text(encoding="utf-8") + "\nMeine Ergänzung\n", encoding="utf-8")
+    (tmp_path / "a" / "brief.txt").write_text("Geändert.\n", encoding="utf-8")
     stranger = out / "b" / "fremd.txt.md"
-    stranger.write_text("von Hand")
-    (tmp_path / "a" / "b" / "fremd.txt").write_text("Quelle")
+    stranger.write_text("von Hand", encoding="utf-8")
+    (tmp_path / "a" / "b" / "fremd.txt").write_text("Quelle", encoding="utf-8")
 
     result = markdown.export([tmp_path / "a"], out)
     kept = sorted(p.name for p, _ in result.kept)
     assert kept == ["brief.txt.md", "fremd.txt.md"]
-    assert "Meine Ergänzung" in note.read_text() and stranger.read_text() == "von Hand"
+    assert (
+        "Meine Ergänzung" in note.read_text(encoding="utf-8")
+        and stranger.read_text(encoding="utf-8") == "von Hand"
+    )
     # And again on the next run: a kept note is not quietly taken over.
     assert sorted(p.name for p, _ in markdown.export([tmp_path / "a"], out).kept) == kept
 
     forced = markdown.export([tmp_path / "a"], out, force=True)
     assert not forced.kept
-    assert "Geändert." in note.read_text() and "Quelle" in stranger.read_text()
+    assert "Geändert." in note.read_text(encoding="utf-8") and "Quelle" in stranger.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_prune_removes_what_is_gone_and_only_that(tmp_path):
     make_tree(tmp_path)
     other = tmp_path / "anderes"
     other.mkdir()
-    (other / "x.txt").write_text("anders")
+    (other / "x.txt").write_text("anders", encoding="utf-8")
     out = tmp_path / "wissen"
     markdown.export([tmp_path / "a"], out)
     markdown.export([other], out)
     (tmp_path / "a" / "b" / "brief.csv").unlink()
     edited = out / "b" / "notiz.md.md"
     (tmp_path / "a" / "b" / "notiz.md").unlink()
-    edited.write_text(edited.read_text() + "\nbehalten\n")
+    edited.write_text(edited.read_text(encoding="utf-8") + "\nbehalten\n", encoding="utf-8")
 
     kept = markdown.export([tmp_path / "a"], out)
     assert (out / "b" / "brief.csv.md").exists()
@@ -1008,8 +1016,8 @@ def test_prune_removes_what_is_gone_and_only_that(tmp_path):
 def test_two_documents_that_would_share_a_note_are_refused(tmp_path):
     (tmp_path / "x").mkdir()
     (tmp_path / "y").mkdir()
-    (tmp_path / "x" / "a.txt").write_text("eins")
-    (tmp_path / "y" / "a.txt").write_text("zwei")
+    (tmp_path / "x" / "a.txt").write_text("eins", encoding="utf-8")
+    (tmp_path / "y" / "a.txt").write_text("zwei", encoding="utf-8")
     result = markdown.export([tmp_path / "x" / "a.txt", tmp_path / "y" / "a.txt"], tmp_path / "out")
     assert len(result.failed) == 1 and "rename one" in result.failed[0][1]
 
@@ -1017,7 +1025,7 @@ def test_two_documents_that_would_share_a_note_are_refused(tmp_path):
 def test_several_folders_each_get_their_own_folder(tmp_path):
     for name in ("x", "y"):
         (tmp_path / name).mkdir()
-        (tmp_path / name / "a.txt").write_text(name)
+        (tmp_path / name / "a.txt").write_text(name, encoding="utf-8")
     result = markdown.export([tmp_path / "x", tmp_path / "y"], tmp_path / "out")
     assert sorted(p.relative_to(tmp_path / "out").as_posix() for _, p in result.written) == [
         "x/a.txt.md",
@@ -1038,9 +1046,9 @@ def test_an_archive_becomes_a_folder_of_notes_and_nothing_escapes_it(tmp_path):
         "paket.zip/docs/a.txt.md",
     ]
     assert not (tmp_path / "evil.txt.md").exists()
-    assert (
-        'source: "in/paket.zip/docs/a.txt"' in (out / "paket.zip" / "docs" / "a.txt.md").read_text()
-    )
+    assert 'source: "in/paket.zip/docs/a.txt"' in (
+        out / "paket.zip" / "docs" / "a.txt.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_kept_pictures_live_in_assets_and_leave_with_their_note(tmp_path):
@@ -1057,7 +1065,9 @@ def test_kept_pictures_live_in_assets_and_leave_with_their_note(tmp_path):
     markdown.export([tmp_path / "in"], out, assets=True, ocr=False)
     asset = out / "_assets" / "sub" / "d.docx" / "image1.png"
     assert asset.read_bytes() == png
-    assert "![](../_assets/sub/d.docx/image1.png)" in (out / "sub" / "d.docx.md").read_text()
+    assert "![](../_assets/sub/d.docx/image1.png)" in (out / "sub" / "d.docx.md").read_text(
+        encoding="utf-8"
+    )
     source.unlink()
     markdown.export([tmp_path / "in"], out, assets=True, ocr=False, prune=True)
     assert not asset.exists() and not (out / "_assets").exists()
@@ -1067,11 +1077,11 @@ def test_a_second_export_into_the_same_folder_waits_its_turn(tmp_path):
     make_tree(tmp_path)
     out = tmp_path / "wissen"
     (out / ".ocrust").mkdir(parents=True)
-    (out / ".ocrust" / "lock").write_text(str(os.getppid()))
+    (out / ".ocrust" / "lock").write_text(str(os.getppid()), encoding="utf-8")
     with pytest.raises(markdown.ConversionError, match="another export"):
         markdown.export([tmp_path / "a"], out)
     # A lock whose process is gone is taken over.
-    (out / ".ocrust" / "lock").write_text("999999999")
+    (out / ".ocrust" / "lock").write_text("999999999", encoding="utf-8")
     assert markdown.export([tmp_path / "a"], out).ok
 
 
@@ -1085,7 +1095,7 @@ def test_the_command_line_writes_one_note_or_a_folder(tmp_path, capsys, monkeypa
     assert main(["markdown", str(source)]) == 0
     assert "Erster Brief." in capsys.readouterr().out
     assert main(["md", str(source), "-o", str(tmp_path / "n.md"), "-q"]) == 0
-    assert (tmp_path / "n.md").read_text().startswith("---\ntitle:")
+    assert (tmp_path / "n.md").read_text(encoding="utf-8").startswith("---\ntitle:")
     assert main(["md", str(tmp_path / "a"), str(source)]) == 2
     assert main(["md", str(tmp_path / "a"), "-o", str(tmp_path / "out")]) == 0
     assert "3 notes written" in capsys.readouterr().err
