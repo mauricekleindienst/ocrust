@@ -815,7 +815,10 @@ fn paragraphs(
                     gap / height - leading > EXACT_PARAGRAPH_SPACE
                         || (h0 - h1).abs() > EXACT_SIZE_STEP * h0.max(h1)
                 });
-                gap > scale * cfg.line_gap_factor || !shares_column || set_apart
+                // A bullet opens an item, however close it follows: a list set
+                // right under its lead-in is still a list.
+                let bullet = strip_bullet(&line.text).len() < line.text.trim_start().len();
+                gap > scale * cfg.line_gap_factor || !shares_column || set_apart || bullet
             }
         };
         if starts_new {
@@ -1109,6 +1112,25 @@ mod tests {
         } else {
             left.into_iter().chain(right).collect()
         }
+    }
+
+    #[test]
+    fn a_bullet_opens_a_list_item_right_under_its_lead_in() {
+        let lines = vec![
+            line_at("Offene Punkte der Begehung:", 0.0, 0.0, 300.0, 12.0),
+            line_at("• Brandschutz prüfen", 0.0, 14.0, 250.0, 26.0),
+            line_at("• Abnahme terminieren", 0.0, 28.0, 250.0, 40.0),
+        ];
+        let blocks = group_blocks(lines, &LayoutConfig::default());
+        let kinds: Vec<BlockKind> = blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                BlockKind::Paragraph,
+                BlockKind::ListItem,
+                BlockKind::ListItem
+            ]
+        );
     }
 
     #[test]

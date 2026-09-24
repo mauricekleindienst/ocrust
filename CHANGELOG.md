@@ -1,5 +1,81 @@
 # Changelog
 
+## 0.3.0 — 2026-09-24
+
+**Any document as Markdown, for a knowledge base.** `ocrust markdown` converts
+scans and PDFs, Word, PowerPoint, Excel, OpenDocument, e-books, web pages,
+mails, RTF, CSV, text and source code into Markdown notes and keeps a folder of
+them in sync — for Obsidian, or for a retrieval pipeline. And a born-digital
+PDF is now read from its own text: exact, and in milliseconds a page.
+
+### Added
+
+- **`ocrust markdown` / `ocrust.markdown`.** One note per document, named
+  after it with its extension (`q1.pdf.md`) and placed where it sits, so the
+  folders people navigate by stay the knowledge base's folders. CommonMark with
+  pipe tables and footnotes; flat YAML front matter — title, author, dates,
+  a mail's sender and recipients, language, source path, content hash, page
+  count, how the text was obtained and how good the OCR was — which Obsidian
+  shows as properties and a Markdown loader turns into chunk metadata; a
+  `<!-- page N -->` marker where each page, slide or sheet begins, so an answer
+  can cite its page. The same input gives the same bytes: NFC, LF, no
+  conversion time, properties in a fixed order.
+
+  Every format is read by ocrust itself, without Office and without another
+  package: Word (headings with their numbering, lists numbered as printed even
+  across a table, merged cells, links and hyperlink fields, footnotes, text
+  boxes, tracked changes and hidden text left out), PowerPoint (slides in
+  order, placeholders in reading order, nested bullets, speaker notes), Excel
+  (a table per block of rows, real dates and percentages, formulas as their
+  values), charts in either as the table of their numbers, SmartArt,
+  OpenDocument text, spreadsheets and presentations, EPUB, HTML (the page's
+  `<main>` or `<article>`, navigation and hidden elements dropped, layout
+  tables read as text, `rowspan` and `colspan`), mail (the HTML body,
+  attachments converted in turn, forwarded mails too), `.mht` web archives,
+  RTF (code pages, Unicode, tables, lists, links, footnotes), CSV and TSV,
+  plain text (wrapped lines joined, deliberate ones kept, lists, quotes,
+  tab tables; UTF-8, UTF-16 and Windows-1252), Markdown (kept as written, its
+  front matter completed), source code and data files, subtitles, and zip
+  archives as folders. `.doc`, `.xls` and `.ppt` go through LibreOffice when it
+  is installed. Text in pictures inside documents is recognized; `--assets`
+  keeps the pictures under `_assets/` and links them.
+
+  Scanned and PDF pages lose the running heads and page numbers repeated along
+  them, get heading levels from their sizes, have their lines joined where the
+  column was full and kept apart where a line was broken on purpose, and have a
+  paragraph cut by a page break joined again.
+
+  With `-o FOLDER` the export keeps an index in `.ocrust/index.json`: a
+  document with the same size and time is not read again, one only touched is
+  recognized by its hash, a note edited by hand or a file the export did not
+  write is never overwritten (`--force` does), `--prune` removes the notes of
+  documents gone from the folders given and nothing else, `--dry-run` shows
+  what would change, and one export at a time holds the folder.
+- **`Ocr(pdf_text="auto")`, `ocrust scan --pdf-text auto`: a born-digital PDF
+  page read from its own text.** A page drawn in real, visible glyphs with a
+  Unicode mapping is read from its content stream instead of rendered and
+  recognized — exact, with confidence 1.0 and origin `"pdf_text"`, and on four
+  generated reports of ten pages in 5 ms a page with no character wrong, where
+  recognizing them took 2.7 s a page. Scans, pictures of text, pages whose text
+  layer is someone else's invisible OCR, and fonts without a Unicode mapping are
+  recognized as before; `"always"` trusts any layer, and `"never"` stays the
+  default. The glyphs are made into the lines a detector would deliver: fake
+  bold and text shadows are one character, bullets drawn as shapes are put
+  back, a justified line's stretched spaces stay spaces, and on a page that sets
+  its own space glyphs every other gap is the edge of a table cell — so a
+  browser's table survives although its cells sit scarcely further apart than
+  its words.
+
+### Changed
+
+- **Two columns an em apart are read column by column** on a page read from its
+  own text: a gutter of half a line counts, and the drawing order tells it from
+  a table's. On such pages a paragraph ends where the lines open up past their
+  usual spacing or change size, and a heading may wrap over four lines.
+- **A large line starting with a number is a numbered heading**, not a list
+  item, in every output format; **a line starting with a bullet opens a list
+  item** even right under the line that leads into the list.
+
 ## 0.2.7 — 2026-09-24
 
 Bugs found in 0.2.6 by an independent review, in seven rounds: each round's
