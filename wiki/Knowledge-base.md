@@ -73,6 +73,7 @@ recognizes a date.
 | `source`, `source_type`, `source_modified`, `sha256` | the file: path relative to the folder given, kind, time, content hash |
 | `pages`, `slides`, `sheets`, `chapters`, `rows` | how long it is |
 | `extraction`, `ocr_quality` | how the text was obtained — `text` (a PDF's own), `ocr` or `mixed` — and the estimated share of correct characters where OCR was involved |
+| `unread_pages` | with `--no-ocr`, the pages of a PDF that have no text of their own — scans, pictures of text — and stayed empty |
 | `truncated` | a spreadsheet or CSV longer than `--max-rows` |
 
 **A marker where each page begins.** `<!-- page 3 -->` is invisible when the
@@ -132,14 +133,16 @@ copied back, restored — is recognized by its hash.
 
 Everything except PDFs, images and the pictures inside documents is read
 without the OCR models — a folder of Word files converts on a machine where
-they are not installed — and without any package besides ocrust itself.
+they are not installed — and without any package besides ocrust itself. With
+`--no-ocr` nothing needs them: a PDF is read from its own text alone, and its
+pages without any are listed as `unread_pages`, to be recognized later.
 
 ## Pictures
 
 The text in a picture inside a document — a scanned letter pasted into Word, a
 screenshot on a slide, a diagram — is recognized and follows the picture as a
 quote. `--no-pictures` leaves pictures unread, `--no-ocr` leaves images and
-pictures alone altogether.
+pictures alone altogether and reads PDFs from their own text only.
 
 `--assets` keeps the pictures too, under `_assets/` mirrored like the notes,
 and links them: `![Lageplan](../_assets/Berichte/q1.docx/image1.png)`. A

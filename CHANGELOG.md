@@ -38,7 +38,10 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   front matter completed), source code and data files, subtitles, and zip
   archives as folders. `.doc`, `.xls` and `.ppt` go through LibreOffice when it
   is installed. Text in pictures inside documents is recognized; `--assets`
-  keeps the pictures under `_assets/` and links them.
+  keeps the pictures under `_assets/` and links them. Only PDFs, images and
+  those pictures ever need the OCR models, and with `--no-ocr` nothing does: a
+  PDF is then read from its own text alone and the pages it has none on are
+  listed as `unread_pages`.
 
   Scanned and PDF pages lose the running heads and page numbers repeated along
   them, get heading levels from their sizes, have their lines joined where the
@@ -58,20 +61,22 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   generated reports of ten pages in 5 ms a page with no character wrong, where
   recognizing them took 2.7 s a page. Scans, pictures of text, pages whose text
   layer is someone else's invisible OCR, and fonts without a Unicode mapping are
-  recognized as before; `"always"` trusts any layer, and `"never"` stays the
-  default. The glyphs are made into the lines a detector would deliver: fake
-  bold and text shadows are one character, bullets drawn as shapes are put
-  back, a justified line's stretched spaces stay spaces, and on a page that sets
-  its own space glyphs every other gap is the edge of a table cell — so a
-  browser's table survives although its cells sit scarcely further apart than
-  its words.
+  recognized as before; `"always"` trusts any layer, `"only"` reads every page
+  from its layer and recognizes none, and `"never"` stays the default. The
+  glyphs are made into the lines a detector would deliver: fake bold and text
+  shadows are one character, bullets drawn as shapes are put back, ligatures are
+  the letters they join, a justified line's stretched spaces stay spaces, and on
+  a page that sets its own space glyphs every other gap is the edge of a table
+  cell — so a browser's table survives although its cells sit scarcely further
+  apart than its words.
 
 ### Changed
 
 - **Two columns an em apart are read column by column** on a page read from its
   own text: a gutter of half a line counts, and the drawing order tells it from
   a table's. On such pages a paragraph ends where the lines open up past their
-  usual spacing or change size, and a heading may wrap over four lines.
+  usual spacing or change size, and a heading may wrap over four lines and
+  needs to be only a fifth larger than the text, as sizes there are exact.
 - **A large line starting with a number is a numbered heading**, not a list
   item, in every output format; **a line starting with a bullet opens a list
   item** even right under the line that leads into the list.

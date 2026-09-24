@@ -540,7 +540,8 @@ def _build_parser() -> argparse.ArgumentParser:
     markdown.add_argument(
         "--no-ocr",
         action="store_true",
-        help="do not recognize image files or the pictures inside documents",
+        help="recognize nothing: PDFs are read from their own text alone, images and "
+        "the pictures inside documents are left unread, and no model files are needed",
     )
     markdown.add_argument(
         "--no-pictures",

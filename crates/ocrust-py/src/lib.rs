@@ -140,7 +140,7 @@ impl PyEngine {
             config.ingest.pdf_text = ocrust_core::ingest::pdftext::PdfText::parse(mode)
                 .ok_or_else(|| {
                     PyValueError::new_err(format!(
-                        "pdf_text {mode:?}: use \"never\", \"auto\" or \"always\""
+                        "pdf_text {mode:?}: use \"never\", \"auto\", \"always\" or \"only\""
                     ))
                 })?;
         }

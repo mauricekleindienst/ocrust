@@ -39,6 +39,7 @@ ocrust scan book.pdf --progress               # page-by-page on stderr
 ocrust scan '\\\\fileserver\\scans' --io-retries 5   # a share that drops connections
 ocrust scan scan.pdf --dpi 300 --lang de,fr
 ocrust scan report.pdf --pdf-text auto        # a born-digital PDF's own text, exact
+ocrust scan report.pdf --pdf-text only        # its text layer alone, nothing recognized
 ocrust scan photo.jpg -q                      # no summary line
 curl -s https://host/invoice.pdf | ocrust scan -    # from stdin
 ocrust scan in/ -o out/ --skip-existing        # resume where a run stopped
