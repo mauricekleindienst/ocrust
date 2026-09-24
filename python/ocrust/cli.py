@@ -273,6 +273,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "inputs; 1 for one)",
     )
     scan.add_argument("--dpi", type=_real(20, 2400), help="PDF rasterization DPI (default 200)")
+    scan.add_argument(
+        "--pdf-text",
+        choices=("never", "auto", "always"),
+        help="use a PDF page's own text instead of recognizing it: auto where it can be "
+        "trusted, always, or never (default)",
+    )
     scan.add_argument("--models", type=Path, help="directory holding the ONNX models")
     scan.add_argument("--no-preprocess", action="store_true", help="skip deskew/invert/rescale")
     scan.add_argument("--no-word-boxes", action="store_true", help="skip per-word geometry")
@@ -941,6 +947,7 @@ def _engine_from_args(args: argparse.Namespace) -> Ocr:
         io_retries=getattr(args, "io_retries", None),
         read_stamps=getattr(args, "_read_stamps", False),
         tick_boxes=getattr(args, "_tick_boxes", False),
+        pdf_text=getattr(args, "pdf_text", None),
     )
 
 

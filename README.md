@@ -12,7 +12,8 @@
 
 **Document OCR for Python, with a Rust core.** Images, multi-page TIFF and PDF in
 — text, Markdown, JSON, hOCR, ALTO, CSV, multi-page TIFF or a searchable PDF out.
-26 languages. One `pip install`, no system packages.
+And any document — Word, PowerPoint, Excel, mail, web pages, scans — as Markdown
+notes for a knowledge base. 26 languages. One `pip install`, no system packages.
 
 ```bash
 pip install "ocrust[models]"
@@ -246,11 +247,63 @@ the grade of 46 of 50 classified files and raised a grade on 2 of 48 unmarked
 ones; the cases it got wrong are listed, and fixed, on the page about it. See
 [Classification markings](wiki/Classification-markings.md).
 
+## Any document as Markdown, for a knowledge base
+
+`ocrust markdown` converts a folder of documents of any kind into a folder of
+Markdown notes — for Obsidian, or for a retrieval pipeline — and keeps it in
+sync.
+
+```text
+$ ocrust markdown archiv/ -o wissen/
+archiv/Angebote/kunde.docx -> wissen/Angebote/kunde.docx.md
+archiv/Berichte/q1.pdf -> wissen/Berichte/q1.pdf.md
+archiv/Mails/rueckfrage.eml -> wissen/Mails/rueckfrage.eml.md
+done: 3 notes written, 1.4 s
+```
+
+```markdown
+---
+title: "Projektbericht Nordlicht"
+language: "de"
+source: "Berichte/q1.pdf"
+source_type: "pdf"
+pages: 1
+extraction: "text"
+---
+
+<!-- page 1 -->
+
+# Projektbericht Nordlicht
+
+## Kosten
+
+| Gewerk | Budget | Ist |
+| --- | ---: | ---: |
+| Elektro | 120.000 € | 98.500 € |
+```
+
+- **One note per document**, folders mirrored, `q1.pdf.md` beside
+  `q1.docx.md`; CommonMark with pipe tables and footnotes; flat YAML front
+  matter that Obsidian shows as properties and a loader turns into metadata; a
+  marker where each page begins, so an answer can cite its page.
+- **Every kind of file, without Office and without another package**: PDF and
+  scans, Word, PowerPoint (with speaker notes), Excel, OpenDocument, EPUB,
+  HTML, mail with its attachments, RTF, CSV, text, source code, zip archives.
+  Charts become the table of their numbers, text in pictures is recognized.
+- **A born-digital PDF is read from its own text** — exact, and in
+  milliseconds a page instead of seconds — with its headings, lists, tables and
+  columns; scanned pages are recognized.
+- **Kept in sync**: a second run converts only what changed, never overwrites
+  a note edited by hand, and `--prune` removes the notes of deleted documents.
+  The same input gives the same bytes, so nothing is re-embedded for nothing.
+
+See [Knowledge base](wiki/Knowledge-base.md).
+
 ## Documentation
 
-The full documentation is 18 pages under [`wiki/`](wiki/Home.md) — installation,
-quickstart, Python API, CLI, PDF workflows, search profiles, classification
-markings, network shares, languages, models, performance, accuracy,
+The full documentation is 19 pages under [`wiki/`](wiki/Home.md) — installation,
+quickstart, Python API, CLI, PDF workflows, the knowledge-base export, search
+profiles, classification markings, network shares, languages, models, performance, accuracy,
 architecture, evaluation, troubleshooting, contributing and the roadmap. It
 reads as a wiki in the repository and can be pushed into the GitHub wiki
 verbatim (`wiki/_publish.md`).
@@ -327,6 +380,9 @@ doc = ocrust.scan("contract.pdf")
 # Reuse an engine for more than one document: the models load once.
 ocr = ocrust.Ocr(lang="de", device="auto", page_workers=8, pdf_dpi=240)
 
+# A born-digital PDF page's own text, exact; scanned pages are still recognized.
+exact = ocrust.Ocr(pdf_text="auto")
+
 doc = ocr.scan("invoice.pdf", pages=[0, 1])
 doc.text                      # reading order applied
 doc.markdown()                # headings, lists, paragraphs
@@ -393,6 +449,7 @@ ocrust pdf archive/ -o archive.pdf           # a folder of mixed formats, one PD
 ocrust tiff scan.pdf --gray --sidecar text   # archive TIFF plus text
 ocrust vs archive/ --fail-on vs-nfd          # which files are classified
 ocrust find archive/ --terms profil.toml     # every term of a search profile
+ocrust markdown archive/ -o wissen/          # any document as a Markdown note, in sync
 ocrust languages                             # model coverage
 ocrust models                                # which files are in use
 ocrust install-models                        # fetch them from GitHub

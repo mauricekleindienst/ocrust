@@ -28,8 +28,9 @@ Français: déjà payé
 | **[Installation](Installation.md)** | `pip install`, offline installs, GPU builds, what needs no admin rights |
 | **[Quickstart](Quickstart.md)** | The five calls that cover most work |
 | **[Python API](Python-API.md)** | `Ocr`, `Document`, every keyword argument, result objects |
-| **[CLI](CLI.md)** | `scan`, `ocr`, `pdf`, `tiff`, `vs`, `find`, `languages`, `models`, `doctor` |
+| **[CLI](CLI.md)** | `scan`, `ocr`, `pdf`, `tiff`, `vs`, `find`, `markdown`, `languages`, `models`, `doctor` |
 | **[Search profiles](Search-profiles.md)** | `ocrust find`: any terms from a config, found however the scan broke them; sharding and resume for large jobs |
+| **[Knowledge base](Knowledge-base.md)** | `ocrust markdown`: any document — scans, PDF, Office, mail, web pages — as Markdown notes for Obsidian or a RAG pipeline, kept in sync |
 | **[Classification markings](Classification-markings.md)** | `ocrust vs`: which files are VS-NfD, GEHEIM, NATO, EU, TLP — marking told apart from mention |
 | **[PDF workflows](PDF-workflows.md)** | Adding a text layer to existing PDFs, and converting anything readable into one |
 | **[Network shares](Network-shares.md)** | UNC paths, mapped drives, retries on a share that drops |

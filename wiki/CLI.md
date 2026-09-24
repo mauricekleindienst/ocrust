@@ -16,6 +16,9 @@ Fast document OCR: images, multi-page TIFF and PDF.
 | `ocr` | add an invisible text layer to an existing PDF, pages untouched |
 | `pdf` | build a new searchable PDF from images |
 | `tiff` | write a deskewed multi-page TIFF, optionally with a text sidecar |
+| `vs` | find classification markings: VS-NfD, GEHEIM, NATO, EU, TLP, company |
+| `find` | find the terms of a search profile, however broken up the scan reads them |
+| `markdown` (`md`) | convert documents of any kind to Markdown notes for a knowledge base, kept in sync |
 | `languages` | what the installed model covers |
 | `models` | which model files would be used |
 | `install-models` | download the bundled models from GitHub |
@@ -35,6 +38,7 @@ ocrust scan faint.png --min-confidence 0.3    # keep faint lines
 ocrust scan book.pdf --progress               # page-by-page on stderr
 ocrust scan '\\\\fileserver\\scans' --io-retries 5   # a share that drops connections
 ocrust scan scan.pdf --dpi 300 --lang de,fr
+ocrust scan report.pdf --pdf-text auto        # a born-digital PDF's own text, exact
 ocrust scan photo.jpg -q                      # no summary line
 curl -s https://host/invoice.pdf | ocrust scan -    # from stdin
 ocrust scan in/ -o out/ --skip-existing        # resume where a run stopped
@@ -330,6 +334,25 @@ ocrust find /mnt/share --terms profil.toml --shard 1/4 -f jsonl -o hits-1.jsonl
 Exit status 3 means a file has a hit at or above `--fail-on` (default: any hit).
 The profile format, how broken a word may be, and splitting large jobs between
 machines are on [Search profiles](Search-profiles.md).
+
+## `ocrust markdown`
+
+Converts documents of any kind — PDF and scans, Word, PowerPoint, Excel,
+OpenDocument, EPUB, HTML, mail, RTF, CSV, text, source code — to Markdown
+notes: one per document, flat YAML front matter, a marker where each page
+begins, tables as pipe tables.
+
+```bash
+ocrust markdown bericht.pdf                         # the note, on stdout
+ocrust md angebot.docx -o angebot.md                # one note, one file
+ocrust md archiv/ -o wissen/                        # a folder, mirrored, kept in sync
+ocrust md archiv/ -o wissen/ --prune --assets -q    # the nightly run
+```
+
+With `-o FOLDER`, a second run converts only what changed, never overwrites a
+note edited by hand, and with `--prune` removes the notes of documents that are
+gone. Exit status 1 when a document could not be converted. How the notes are
+stored, and why, is on [Knowledge base](Knowledge-base.md).
 
 ## Exit codes
 

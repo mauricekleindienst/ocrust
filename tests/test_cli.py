@@ -568,3 +568,9 @@ def test_ocr_of_a_locked_pdf_fails_instead_of_copying_it(engine, tmp_path, invoi
     assert not out.exists()
     assert main(["ocr", str(locked), "-o", str(out), "-q", "--password", "geheim"]) == 0
     assert out.read_bytes().startswith(b"%PDF")
+
+
+def test_scan_can_read_a_pdf_from_its_own_text(engine, table_pdf, capsys):
+    assert main(["scan", str(table_pdf), "--pdf-text", "auto", "-f", "json", "-q"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert [page["origin"] for page in doc["pages"]] == ["pdf_text"]

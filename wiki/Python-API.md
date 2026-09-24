@@ -34,6 +34,7 @@ ocr = ocrust.Ocr(
     threads=None,         # threads per inference operator
     page_workers=None,    # pages in parallel; None -> 1
     pdf_dpi=None,         # PDF rasterization DPI, default 200
+    pdf_text="never",     # "auto": a born-digital page's own text, exact; "always"; "never"
     password=None,        # for encrypted PDFs; owner-only protection needs none
     max_pixels=None,      # decompression-bomb guard; ~179 million by default, 0 = off
     io_retries=None,      # extra attempts on a transient read failure; 2 by default
@@ -60,6 +61,7 @@ the GIL for the whole scan, so a thread pool in Python parallelizes properly.
 | Argument | When to change it |
 |---|---|
 | `pdf_dpi` | 200 is the default. Raise to 300 for small print; 100 is faster and, on ordinary scans, just as accurate ([Performance](Performance.md)). |
+| `pdf_text` | Born-digital PDFs. `"auto"` reads a page whose text is drawn in real, visible, mapped glyphs straight from the page — exact, and without any model time — and recognizes the rest: scans, pictures of text, a page whose text layer is someone else's invisible OCR, a font without a Unicode mapping. Such pages have origin `"pdf_text"` and confidence 1.0. `"always"` trusts any text layer; `"never"`, the default, recognizes every page. `ocrust markdown` uses `"auto"`. |
 | `page_workers` | Multi-page documents and batches. Defaults to 1 because workers and inference threads share the same cores. |
 | `preprocess` | `False` buys ~9% and costs nothing measurable in CER; it can hurt multi-column layout. |
 | `word_boxes` | `False` when you only want text — it skips the per-character bookkeeping. |
