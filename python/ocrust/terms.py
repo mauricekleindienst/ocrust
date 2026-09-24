@@ -20,7 +20,7 @@ numbers, compound words, anything — and how strictly::
 >>> profile = ocrust.terms.load("suchprofil.toml")       # doctest: +SKIP
 >>> for hit in ocrust.scan("akte.pdf").find(profile):     # doctest: +SKIP
 ...     print(hit.page, hit.term, hit.text, hit.how)
-1 Projekt Adler Projekt Ad-\\nler ('hyphenated',)
+1 Projekt Adler Projekt Ad\\nler ('hyphenated',)
 
 Scanned text is rarely the text that was printed. A word is letter-spaced on a
 stamp ("P r o j e k t"), hyphenated at a line end, broken over two lines or two
@@ -41,11 +41,20 @@ import os
 import re
 import unicodedata
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ._types import Box, Document, Line, Page, _box_for_span
+from ._types import (
+    _LINE_END_HYPHENS,
+    Box,
+    Document,
+    Line,
+    Page,
+    _box_for_span,
+    _boxes_for_span,
+    _word_spans,
+)
 
 __all__ = ["Profile", "Term", "Hit", "TermReport", "load", "parse", "find", "SEVERITIES"]
 
@@ -119,6 +128,14 @@ class Profile:
         return len(self.terms)
 
     def __add__(self, other: Profile) -> Profile:
+        """Both profiles' terms. A name in both is an error, as it is within one
+        profile: two terms of one name would report one occurrence twice."""
+        mine = {t.name for t in self.terms}
+        clash = next((t.name for t in other.terms if t.name in mine), None)
+        if clash is not None:
+            sources = " and ".join(s for s in (self.source, other.source) if s)
+            where = f" (in {sources})" if sources else ""
+            raise ProfileError(f"two terms are named {clash!r}{where}; names must differ")
         return Profile(
             terms=self.terms + other.terms,
             markings=self.markings or other.markings,
@@ -142,6 +159,10 @@ def load(source: str | os.PathLike[str] | Profile | dict[str, Any] | Iterable[st
             text = path.read_text(encoding="utf-8-sig")
         except OSError as exc:
             raise ProfileError(f"{path}: {exc.strerror or exc}") from None
+        except UnicodeDecodeError as exc:
+            raise ProfileError(
+                f"{path}: not UTF-8 text (byte {exc.start}); save the profile as UTF-8"
+            ) from None
         suffix = path.suffix.lower()
         if suffix == ".toml":
             data = _toml(text, path)
@@ -151,12 +172,10 @@ def load(source: str | os.PathLike[str] | Profile | dict[str, Any] | Iterable[st
             except json.JSONDecodeError as exc:
                 raise ProfileError(f"{path}: line {exc.lineno}: {exc.msg}") from None
         else:
-            phrases = [
-                line.strip()
-                for line in text.splitlines()
-                if line.strip() and not line.lstrip().startswith("#")
-            ]
-            data = {"term": [{"match": phrase} for phrase in phrases]}
+            # `#` starts a comment, at the start of a line or after a space;
+            # "C#" stays a phrase.
+            phrases = [re.sub(r"(^|\s)#.*$", "", line).strip() for line in text.splitlines()]
+            data = {"term": [{"match": phrase} for phrase in phrases if phrase]}
         return parse(data, source=str(path))
     if isinstance(source, str):
         return parse({"term": [{"match": source}]})
@@ -192,19 +211,40 @@ def parse(data: dict[str, Any], source: str = "") -> Profile:
     """A profile from its dict form, checked: an unknown key or a bad value is
     an error that says where, not a term that silently never matches."""
     where = f"{source}: " if source else ""
+    if not isinstance(data, dict):
+        raise ProfileError(
+            f"{where}a profile is a table with [settings] and [[term]] entries, "
+            f"not a {type(data).__name__}"
+        )
     unknown = set(data) - {"settings", "term", "terms"}
     if unknown:
         raise ProfileError(f"{where}unknown section {sorted(unknown)}; use [settings] and [[term]]")
-    settings = data.get("settings") or {}
+    settings = data.get("settings", {})
     if not isinstance(settings, dict):
         raise ProfileError(f"{where}[settings] must be a table")
     bad = set(settings) - _SETTING_KEYS
     if bad:
         known = sorted(_SETTING_KEYS)
         raise ProfileError(f"{where}[settings]: unknown {sorted(bad)}; known: {known}")
-    raw_terms = data.get("term", []) + data.get("terms", [])
-    if not isinstance(raw_terms, list):
-        raise ProfileError(f"{where}[[term]] must be a list of tables")
+    raw_terms: list[Any] = []
+    for key in ("term", "terms"):
+        if key not in data:
+            continue
+        value = data[key]
+        if isinstance(value, dict):
+            raise ProfileError(
+                f"{where}[{key}] is a single table; write [[term]] (double brackets) "
+                "before each term"
+            )
+        if not isinstance(value, list):
+            raise ProfileError(f"{where}[[term]] must be a list of tables")
+        raw_terms.extend(value)
+    for i, entry in enumerate(raw_terms):
+        if not isinstance(entry, dict):
+            raise ProfileError(
+                f"{where}term {i + 1}: {entry!r} is not a table; phrases go in "
+                'match = ["…", "…"] inside a [[term]]'
+            )
     defaults = {k: v for k, v in settings.items() if k != "markings"}
     terms = [
         _term({**defaults, **entry}, f"{where}term {i + 1}") for i, entry in enumerate(raw_terms)
@@ -234,9 +274,13 @@ def _strings(value: Any, what: str, where: str) -> tuple[str, ...]:
 def _term(entry: dict[str, Any], where: str) -> Term:
     if not isinstance(entry, dict):
         raise ProfileError(f"{where}: must be a table")
-    bad = set(entry) - _TERM_KEYS - {"markings"}
+    bad = set(entry) - _TERM_KEYS
     if bad:
-        raise ProfileError(f"{where}: unknown {sorted(bad)}; known: {sorted(_TERM_KEYS)}")
+        hint = "; markings is a [settings] key" if "markings" in bad else ""
+        raise ProfileError(f"{where}: unknown {sorted(bad)}; known: {sorted(_TERM_KEYS)}{hint}")
+    for key in ("name", "category"):
+        if key in entry and not isinstance(entry[key], str):
+            raise ProfileError(f"{where}: {key} must be a string, not {entry[key]!r}")
     match = _strings(entry.get("match"), "match", where)
     regex = _strings(entry.get("regex"), "regex", where)
     if not match and not regex and isinstance(entry.get("name"), str) and entry["name"].strip():
@@ -507,18 +551,25 @@ def _reading_columns(page: Page) -> list[tuple[Line, Line, int]]:
         if len(group) < 2:
             order.extend(group)
             continue
-        x_gap, x_cut = _widest_gap([(p.box.x0, p.box.x1) for p, _, _ in group])
-        y_gap, y_cut = _widest_gap([(p.box.y0, p.box.y1) for p, _, _ in group])
-        if x_gap <= 0 and y_gap <= 0:
-            order.extend(sorted(group, key=lambda g: (g[0].box.y0, g[0].box.x0)))
+        xs = [_extent(g[0].box.x0, g[0].box.x1) for g in group]
+        ys = [_extent(g[0].box.y0, g[0].box.y1) for g in group]
+        x_gap, x_cut = _widest_gap(xs)
+        y_gap, y_cut = _widest_gap(ys)
+        spans, cut = (xs, x_cut) if x_gap > y_gap else (ys, y_cut)
+        before = [hi <= cut for _, hi in spans]
+        # A box drawn backwards cannot make a cut that leaves one side empty
+        # loop for ever: what cannot be cut is read top to bottom.
+        if max(x_gap, y_gap) <= 0 or all(before) or not any(before):
+            ranked = sorted(zip(ys, xs, range(len(group))))
+            order.extend(group[k] for _, _, k in ranked)
             continue
-        if x_gap > y_gap:
-            before = [g[0].box.x1 <= x_cut for g in group]
-        else:
-            before = [g[0].box.y1 <= y_cut for g in group]
         stack.append([g for g, b in zip(group, before) if not b])
         stack.append([g for g, b in zip(group, before) if b])
     return order
+
+
+def _extent(a: float, b: float) -> tuple[float, float]:
+    return (a, b) if a <= b else (b, a)
 
 
 def _widest_gap(spans: list[tuple[float, float]]) -> tuple[float, float]:
@@ -555,7 +606,13 @@ def _stream(page: Page, columns: bool = False) -> _Stream:
             s.zones.append(_zone(line, page))
             text = line.text
             spaced = _spaced_positions(text)
+            joins = _hyphen_joins(line)
+            apart = _far_apart(line)
             for i, ch in enumerate(text):
+                if i in apart and pending < _BLOCK:
+                    pending = _BLOCK
+                if i in joins:
+                    pending = _HYPHEN
                 if ch in _INVISIBLE:
                     continue
                 folded, umlaut = _fold(ch)
@@ -587,6 +644,40 @@ def _stream(page: Page, columns: bool = False) -> _Stream:
             else:
                 pending = _LINE
     return s
+
+
+def _hyphen_joins(line: Line) -> set[int]:
+    """Offsets in ``line.text`` where a word the layout joined across a line
+    end goes on: "Brand-" / "meldezentrale" read as "Brandmeldezentrale"."""
+    joins: set[int] = set()
+    for word, start, end, _ in _word_spans(line):
+        # The word kept its hyphen and the text did not: the layout joined it.
+        joined = word.text[-1:] in _LINE_END_HYPHENS and end - start < len(word.text)
+        if joined and end < len(line.text) and line.text[end].isalnum():
+            joins.add(end)
+    return joins
+
+
+def _far_apart(line: Line) -> set[int]:
+    """Offsets in ``line.text`` where a piece of the line starts that stands
+    far from the one before — the next column, not the next word. A phrase
+    across such a gap is "split", not "exact"."""
+    if len(line.segments) < 2:
+        return set()
+    starts: list[tuple[Any, int]] = []
+    cursor = 0
+    for segment in line.segments:
+        position = line.text.find(segment.text, cursor)
+        if position < 0:
+            continue
+        cursor = position + len(segment.text)
+        starts.append((segment, position))
+    apart: set[int] = set()
+    for (a, _), (b, position) in zip(starts, starts[1:]):
+        height = min(abs(a.box.y1 - a.box.y0), abs(b.box.y1 - b.box.y0))
+        if b.box.x0 - a.box.x1 > 2 * height:
+            apart.add(position)
+    return apart
 
 
 def _zone(line: Line, page: Page) -> str:
@@ -772,7 +863,7 @@ def _candidates(
     for canon, index, collapse in views:
         cpattern, _ = _canon(pattern, collapse)
         m = len(cpattern)
-        pieces = max(1, min(budget + 1, m // 2))
+        pieces = max(1, min(budget + 1, m))
         size = m // pieces
         for p in range(pieces):
             offset = p * size
@@ -828,12 +919,15 @@ def find(document: Document, profile: Profile | Any) -> TermReport:
                 for pattern in term.regex:
                     for flat in ready.flats():
                         found.extend(_regex_hits(term, pattern, page, ready.stream, flat))
-            for item in _distinct(found):
-                if item.hit.zone not in term.zones:
-                    continue
-                if not _context_ok(term, item.stream, item.start, item.end):
-                    continue
-                hits.append(item.hit)
+            # Zones and context first, per reading order: the order that puts
+            # "Codename" next to "Falke" is the one that counts.
+            allowed = [
+                item
+                for item in found
+                if item.hit.zone in term.zones
+                and _context_ok(term, item.stream, item.start, item.end)
+            ]
+            hits.extend(item.hit for item in _distinct(allowed))
     hits.sort(key=lambda h: (h.page, h.box.y0, h.box.x0))
     return TermReport(source=document.source, hits=tuple(hits))
 
@@ -917,7 +1011,7 @@ def _same_place(a: _Found, b: _Found) -> bool:
 def _phrase_hits(term: Term, phrase: str, page: Page, ready: _Prepared) -> Iterator[_Found]:
     stream = ready.stream
     pattern, breaks, p_umlaut = _skeleton_of(phrase)
-    budget = min(_budget(term, len(pattern)), max(0, (len(pattern) - 1) // 3))
+    budget = min(_budget(term, len(pattern)), len(pattern) // 3)
     # Look-alikes are forgiven, but not so many that the word is gone.
     lookalikes = max(1, len(pattern) // 3)
     taken: list[tuple[int, int]] = []
@@ -935,13 +1029,94 @@ def _phrase_hits(term: Term, phrase: str, page: Page, ready: _Prepared) -> Itera
                 start, end, c = snapped
             if any(start < e and s < end for s, e in taken):
                 continue
-            if term.case and not _same_case(phrase, stream, start, end):
+            if term.whole_words and _inside_longer_word(pattern, p_umlaut, stream, start, end, c):
                 continue
             if not _short_words_kept(pattern, breaks, stream, start, end):
                 continue
+            steps = _path(pattern, p_umlaut, stream.text[start:end], stream.umlauts[start:end])
+            wanted = _phrase_letters(phrase)
+            if term.case and not _same_case(wanted, steps, stream, start):
+                continue
             taken.append((start, end))
             hit = _hit(term, phrase, page, stream, start, end, c, breaks, len(pattern))
+            if _sharp_s_spelled(wanted, steps, stream, start) and "spelling" not in hit.how:
+                how = tuple(sorted(set(hit.how) - {"exact"} | {"spelling"}))
+                hit = replace(hit, how=how)
             yield _Found(hit, stream, start, end, _places(stream, stream.origin[start:end]))
+
+
+def _inside_longer_word(
+    pattern: str, p_umlaut: list[bool], stream: _Stream, start: int, end: int, cost: int
+) -> bool:
+    """Whether the hit is the term with a letter too many at an edge — "Radler"
+    for "Adler", "Adlers" — which is a longer word that contains the term,
+    not the term misread. An edit inside the word ("Opperation") is not."""
+    text, umlauts = stream.text, stream.umlauts
+    if end - start > 1:
+        if _fit(pattern, p_umlaut, text[start + 1 : end], umlauts[start + 1 : end]) + EDIT <= cost:
+            return True
+        if _fit(pattern, p_umlaut, text[start : end - 1], umlauts[start : end - 1]) + EDIT <= cost:
+            return True
+    return False
+
+
+def _path(
+    pattern: str, p_umlaut: list[bool], text: str, t_umlaut: list[bool]
+) -> list[tuple[str, int, int, int, int]]:
+    """How all of `text` reads as `pattern`, step by step: (kind, pattern from,
+    pattern to, text from, text to), for one cheapest alignment. Kinds: "same",
+    "look" (a look-alike), "edit", "spell" ("ae" for "ä"), "missing" (a letter
+    of the term the text lacks) and "extra" (a letter the term lacks)."""
+    cost, _ = _table(pattern, p_umlaut, text, t_umlaut, free=False)
+    i, j = len(pattern), len(text)
+    steps: list[tuple[str, int, int, int, int]] = []
+    while i > 0 or j > 0:
+        if i == 0:
+            steps.append(("extra", 0, 0, j - 1, j))
+            j -= 1
+            continue
+        if j == 0:
+            steps.append(("missing", i - 1, i, 0, 0))
+            i -= 1
+            continue
+        pc, tc = pattern[i - 1], text[j - 1]
+        # The same moves as `_table`, so one of them gives the table's value.
+        if tc == pc:
+            options = [(cost[i - 1][j - 1], "same", i - 1, j - 1)]
+        elif (tc, pc) in _LOOKALIKE:
+            options = [(cost[i - 1][j - 1] + LOOK, "look", i - 1, j - 1)]
+        else:
+            options = [(cost[i - 1][j - 1] + EDIT, "edit", i - 1, j - 1)]
+        options.append((cost[i - 1][j] + EDIT, "missing", i - 1, j))
+        options.append((cost[i][j - 1] + EDIT, "extra", i, j - 1))
+        if j >= 2:
+            two = text[j - 2 : j]
+            if (pc == "M" and two == "RN") or (pc == "W" and two == "VV"):
+                options.append((cost[i - 1][j - 2] + LOOK, "look", i - 1, j - 2))
+            if p_umlaut[i - 1] and two == pc + "E":
+                options.append((cost[i - 1][j - 2] + SPELL, "spell", i - 1, j - 2))
+        if i >= 2 and t_umlaut[j - 1] and pattern[i - 2 : i] == tc + "E":
+            options.append((cost[i - 2][j - 1] + SPELL, "spell", i - 2, j - 1))
+        _, kind, pi, pj = next(o for o in options if o[0] == cost[i][j])
+        steps.append((kind, pi, i, pj, j))
+        i, j = pi, pj
+    steps.reverse()
+    return steps
+
+
+def _phrase_letters(phrase: str) -> list[str]:
+    """For each letter of a phrase's skeleton, the character of the phrase it
+    came from: "Weiß" gives W, E, I, ß, ß."""
+    letters: list[str] = []
+    for ch in phrase:
+        folded, _ = _fold(ch)
+        letters.extend(ch for c in folded if c.isalnum())
+    return letters
+
+
+def _read_char(stream: _Stream, k: int) -> str:
+    line, offset = stream.origin[k]
+    return stream.lines[line].text[offset]
 
 
 def _snap(
@@ -1023,17 +1198,35 @@ def _short_words_kept(
     return True
 
 
-def _same_case(phrase: str, stream: _Stream, start: int, end: int) -> bool:
-    wanted = [c for c in phrase if c.isalnum()]
-    read = []
-    for k in range(start, end):
-        line, offset = stream.origin[k]
-        ch = stream.lines[line].text[offset]
-        if ch.isalnum():
-            read.append(ch)
-    if len(read) != len(wanted):
-        return True  # an edit moved things about; the letters decided already
-    return all(a.isupper() == b.isupper() for a, b in zip(read, wanted) if a.isalpha())
+def _same_case(
+    wanted: list[str], steps: list[tuple[str, int, int, int, int]], stream: _Stream, start: int
+) -> bool:
+    """For a case-sensitive term: whether every letter read in place of one of
+    the term's has its case — along the alignment, so "MUELLER" for "Müller"
+    and "ADLLER" for "Adler" are caught as well as "ADLER"."""
+    for kind, p0, p1, t0, t1 in steps:
+        if kind in ("missing", "extra"):
+            continue
+        for p in range(p0, p1):
+            for t in range(t0, t1):
+                a, b = wanted[p], _read_char(stream, start + t)
+                if a.isalpha() and b.isalpha() and a.isupper() != b.isupper():
+                    return False
+    return True
+
+
+def _sharp_s_spelled(
+    wanted: list[str], steps: list[tuple[str, int, int, int, int]], stream: _Stream, start: int
+) -> bool:
+    """Whether an ß of the term was read as "ss", or "ss" as an ß: the same
+    letters once folded, but a spelling all the same."""
+    for kind, p0, _, t0, _ in steps:
+        if kind == "same":
+            sharp_term = wanted[p0] in "ßẞ"
+            sharp_read = _read_char(stream, start + t0) in "ßẞ"
+            if sharp_term != sharp_read:
+                return True
+    return False
 
 
 def _hit(
@@ -1105,7 +1298,7 @@ def _span_boxes(stream: _Stream, start: int, end: int) -> tuple[list[Box], str]:
     for line_no, offsets in per_line.items():
         line = stream.lines[line_no]
         lo, hi = min(offsets), max(offsets) + 1
-        boxes.append(_box_for_span(line, lo, hi))
+        boxes.extend(_boxes_for_span(line, lo, hi))
         parts.append(line.text[lo:hi])
     return boxes, "\n".join(parts)
 
@@ -1136,14 +1329,24 @@ def _flat(stream: _Stream, close_lines: bool = False, compact: bool = False) -> 
         spaced = _spaced_positions(text) if not compact else _beside_singles(text)
         tail = text.rstrip()
         hyphenated = len(tail) > 1 and tail[-1] in _DASHES and tail[-2].isalpha()
-        for i, ch in enumerate(tail[:-1] if hyphenated else text):
+        # A hyphenated word goes on in the next line, without its hyphen; with
+        # `close_lines` anything that ends in a letter, a digit or a dash does,
+        # the dash kept — "KD-" / "123456" is "KD-123456".
+        joined = hyphenated or (
+            close_lines and bool(tail) and (tail[-1].isalnum() or tail[-1] in _DASHES)
+        )
+        if hyphenated and not close_lines:
+            kept = tail[:-1]  # the hyphen goes, the word goes on
+        elif joined:
+            kept = tail
+        else:
+            kept = text
+        for i, ch in enumerate(kept):
             if ch == " " and i + 1 in spaced:
                 continue  # letter-spacing: this space splits no word
             chars.append(ch)
             origin.append((number, i))
-        # A hyphenated word goes on in the next line; with `close_lines` so
-        # does anything that ends in a letter or digit.
-        if not hyphenated and not (close_lines and tail and tail[-1].isalnum()):
+        if not joined:
             chars.append(" ")
             origin.append(None)
     return _Flat("".join(chars), origin)
@@ -1171,7 +1374,11 @@ def _regex_hits(
         per_line: dict[int, list[int]] = {}
         for line, offset in spots:
             per_line.setdefault(line, []).append(offset)
-        boxes = [_box_for_span(stream.lines[n], min(o), max(o) + 1) for n, o in per_line.items()]
+        boxes = [
+            box
+            for n, o in per_line.items()
+            for box in _boxes_for_span(stream.lines[n], min(o), max(o) + 1)
+        ]
         text = "\n".join(stream.lines[n].text[min(o) : max(o) + 1] for n, o in per_line.items())
         how = {"regex"}
         if len(per_line) > 1:
@@ -1204,12 +1411,14 @@ def _context_ok(term: Term, stream: _Stream, start: int, end: int) -> bool:
     if not term.near and not term.not_near:
         return True
     text = stream.text
-    around = text[max(0, start - term.window) : start] + " " + text[end : end + term.window]
-    # The hit itself is not context: "Radler" beside "Adler" is, "Adler" is not.
-
-    def present(words: Sequence[str]) -> bool:
-        return any(_skeleton_of(w)[0] in around for w in words)
-
-    if term.not_near and present(term.not_near):
-        return False
-    return not term.near or present(term.near)
+    before = text[max(0, start - term.window) : start]
+    after = text[end : end + term.window]
+    # For `near` the hit itself is not context: "Adler" does not stand near
+    # "Adler". For `not_near` it is: a `not_near` word the hit is part of
+    # ("Adlerhorst" for a term that may sit inside words) rules it out.
+    if term.not_near:
+        whole = before + text[start:end] + after
+        if any(_skeleton_of(w)[0] in whole for w in term.not_near):
+            return False
+    around = before + " " + after
+    return not term.near or any(_skeleton_of(w)[0] in around for w in term.near)

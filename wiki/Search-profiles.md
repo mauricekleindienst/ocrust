@@ -63,12 +63,20 @@ A phrase is matched case-insensitively, with umlauts, `ß` and accents folded,
 and every space, dash, underscore and line break inside it optional:
 `Projekt-Adler`, `Projekt_Adler`, `ProjektAdler` and `Projekt` / `Adler` over two
 lines are all `Projekt Adler`. With `whole_words` (the default) a hit must start
-and end on a word boundary, so `Adler` is not in `Radler` or `Adlerhorst`.
+and end on a word boundary, so `Adler` is not in `Radler` or `Adlerhorst` — nor
+in `Adlers`: a letter too many at the edge makes a longer word, not a misread
+`Adler`, whatever `fuzzy` allows. For inflected forms list them
+(`match = ["Adler", "Adlers"]`) or set `whole_words = false`.
+
+With `case = true` every letter read in place of one of the term's must have
+its case, spellings included: `Mueller` is `Müller`, `MUELLER` is not.
 
 A mistake in a profile — an unknown key, a severity that does not exist, a
-regex that does not compile, two terms with one name — stops the run with the
+regex that does not compile, two terms with one name (also across two
+`--terms` files), `[term]` written for `[[term]]` — stops the run with the
 file, the term and what is wrong, rather than becoming a term that silently
-never matches.
+never matches. In a plain phrase list `#` starts a comment, at the start of a
+line or after a space.
 
 ## How broken can it be
 
@@ -81,14 +89,14 @@ per hit, how it was broken (`how` in the report):
 |---|---|---|
 | `exact` | `Projekt Adler`, `Projekt-Adler` | `Projekt Adler` |
 | `spaced` | `P r o j e k t  A d l e r` | letter-spaced on a stamp or heading |
-| `hyphenated` | `Geheimhaltungs-` / `vereinbarung` | a word hyphenated at a line end |
+| `hyphenated` | `Geheimhaltungs-` / `vereinbarung` | a word hyphenated at a line end, with a box on each line |
 | `split` | `Projekt` / `Adler` | a phrase over two lines, cells or columns |
 | `glued` | `ProjektAdler` | a space the scan lost |
 | `broken` | `Geheimhaltungs vereinbarung` | a space the scan added |
 | `ocr` | `Pr0jekt AdIer`, `Weißrnüller` | look-alike characters: 0/O/Q, 1/l/I, 5/S, 8/B, 6/G, 2/Z, rn/m, vv/w |
 | `spelling` | `Juergen Weissmueller` | `ae`/`oe`/`ue` for an umlaut, `ss` for `ß` |
 | `fuzzy` | `Geheimhaltungsvereinbrung` | real edits, within the term's budget |
-| `regex` | `KD-123456`, `KD-12` / `3456` | a regular expression; a number broken over a line is still one number |
+| `regex` | `KD-123456`, `KD-12` / `3456`, `KD-` / `123456` | a regular expression; a number broken over a line is still one number |
 
 Look-alikes and spellings cost almost nothing; real edits (a letter wrong,
 missing or extra) count against `fuzzy`:
@@ -117,7 +125,7 @@ ocrust vs akten/ --terms profil.toml                      # the same, from the o
 |---|---|
 | `--terms FILE` | a profile; repeat to combine several |
 | `--term PHRASE` | a phrase with the default settings; repeatable |
-| `--fail-on LEVEL` | exit 3 when a file has a hit at this severity or above, or a grade (`vs-nfd` …) with markings; `any` (the default) or `none`; repeat to combine |
+| `--fail-on LEVEL` | exit 3 when a file has a hit at this severity or above, or a grade (`vs-nfd` …) — which turns `--markings` on; `any` (the default: any hit, or any marking that restricts reading) or `none`; repeat to combine |
 | `--markings` | also report classification markings, as `ocrust vs` does |
 | `-f text\|json\|jsonl\|csv`, `-o FILE` | report format and destination |
 | `--shard K/N`, `--resume` | split a large job, and continue one — see below |
@@ -125,7 +133,8 @@ ocrust vs akten/ --terms profil.toml                      # the same, from the o
 
 Exit status: **3** a file has a hit at or above `--fail-on`, **1** none has but
 a file could not be read, **0** every file read and nothing found, **2** a bad
-argument or profile.
+argument or profile. After `--resume` it answers for the whole report,
+including the files the earlier run read.
 
 In the JSON report each file has a `terms` object with its hits; in CSV each hit
 is a row with `kind = term`, the term in `label`, the category in `scheme`, the
@@ -167,7 +176,9 @@ cat hits-*.jsonl > hits.jsonl
 
 A JSON Lines report is written as it goes, one line per file, so a run that is
 interrupted keeps what it did, and `--resume` carries on from there, skipping
-every file the report already has:
+every file the report already has. Half a line left by the interruption is cut
+off and its file read again; a file that is not such a report is refused and
+left as it is.
 
 ```bash
 ocrust find /mnt/share --terms profil.toml -f jsonl -o hits.jsonl            # interrupted
@@ -256,7 +267,15 @@ Matching takes about 11 ms a page, next to about 1.6 s for reading it.
   `Sentinel X4` — must be read as written; `fuzzy` is spent on the longer
   words only. `M. Schöllhorn` is not found in `Ms Schöllhorn`.
 - `near` and `not_near` look at letters to either side, not at sentences or
-  pages.
+  pages. `not_near` also sees the word the hit is part of: with
+  `whole_words = false`, `not_near = ["Adlerhorst"]` rules out the `Adler` in
+  `Adlerhorst`. Both are judged in each reading order, so a context word right
+  above the term in its column counts though the layout read the next column
+  in between.
+- A phrase across two pieces of a line far apart — two table cells, or two
+  columns the layout read as one line — is a hit, marked `split`: a table
+  row "Projekt | Adler" is the phrase, the end of one article and the start of
+  the next beside it may not be.
 - Letter-spaced text has no reliable word gaps, so inside a letter-spaced run
   a word boundary is assumed wherever one is needed: `ADLER` letter-spaced
   inside `R A D L E R` would be a hit.

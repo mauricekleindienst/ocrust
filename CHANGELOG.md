@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.2.7 — 2026-09-24
+
+Twenty-two bugs an independent review found in 0.2.6, every one reproduced
+before it was fixed and each with a test that fails against 0.2.6. Term search
+accuracy on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
+
+235 Rust unit tests, 10 Rust end-to-end tests, 335 Python tests.
+
+### Fixed
+
+- **An unreadable PDF could still end a batch.** A PDF, image, model or
+  runtime error — and the panic 0.2.6 turned into an error — reached Python as a
+  plain `RuntimeError`, which no per-file handler caught: `ocrust find` with
+  `--pages`, a single file or standard input, `ocrust scan` of a batch, and
+  `Ocr.scan_each` with `pages` stopped at the first such file. Every engine
+  error of that kind is now an `OcrustError`, from Rust, so the file is
+  reported unreadable and the batch goes on.
+- **`--resume` corrupted its own report.** It appended to the half-written last
+  line an interruption leaves, gluing the next record onto it. The fragment is
+  now cut off and its file read again. A file that is not a report of ocrust
+  is refused and left untouched.
+- **A resumed run's exit status ignored the report.** Files the earlier run had
+  found something in, or could not read, now count: a gate over a resumable run
+  no longer passes on the second run.
+- **A term was found inside a longer word.** With the default `fuzzy`, `Adler`
+  was found in `Radler`, `Sadler` and `Adlers` — a letter too many at the edge
+  is one edit — although the documentation promises the opposite. A letter too
+  many at the edge of a whole-word hit now rules it out; one inside the word
+  (`Opperation`) still counts as a misreading.
+- **`case = true` let spellings and edits through**: `MUELLER` and `mueller`
+  were hits for `Müller`, `ADLLER` for `Adler`. Case is now checked letter by
+  letter along the alignment.
+- **`near` and `not_near` were judged in one reading order only**, the one the
+  duplicate check kept; on a two-column page the order that puts `Codename`
+  above `Falke` was thrown away. Each reading order is judged on its own now.
+  `not_near` also sees the word the hit is part of.
+- **A word hyphenated at a line end**, which the layout joins into one line, was
+  reported `exact` with a box around its second half only — also in
+  `Document.search`. It is `hyphenated` now, with a box on each line.
+- **A regex missed a number broken after its own dash** (`KD-` / `123456`).
+- **A malformed profile crashed** with a traceback and exit 1 instead of saying
+  what is wrong: `[term]` for `[[term]]`, a list of strings for `term`, a JSON
+  list or `null`, a profile that is not UTF-8. `markings` inside a term, and a
+  category or name that is not a string, were accepted silently. All are errors
+  with exit 2 now.
+- **Two `--terms` files naming one term** counted every occurrence twice; it is
+  an error, as within one profile.
+- **`fuzzy = N` allowed fewer edits than documented**: "never more than a
+  third" was "less than a third", so `fuzzy = 1` did nothing for a three-letter
+  term.
+- **`ocrust find --markings` did not default to `--fail-on any`** as documented,
+  and **a grade gate without `--markings`** (`--fail-on geheim`) could never trip;
+  it turns markings on now.
+- **`-o` naming a folder**, or a report that cannot be written, failed with a
+  traceback after the whole scan; it is refused before scanning.
+- **A shard with no files** left no report for `-f json` and `-f csv`.
+- **Bad numbers** — `--workers -1`, `--max-pixels -1`, `--pages ,` — failed per
+  file with exit 1, and `--threads 100000` was accepted and grew the process to
+  gigabytes; all are exit 2 with the range now.
+- `ss` read for `ß` was reported `exact`; it is a `spelling`.
+- `Ocr.scan_each("folder")` read the path as a sequence of characters, and a
+  generator of sources was read to its end before the first result.
+- An inline `# comment` in a phrase list became part of the phrase.
+- A phrase joined across two columns the layout read as one line was `exact`;
+  it is `split`.
+- A box drawn backwards made the column reading order loop for ever.
+- Help texts and pages still gave 4 as the default number of workers.
+
 ## 0.2.6 — 2026-09-23
 
 Search profiles: `ocrust find` looks for whatever a profile names — code names,

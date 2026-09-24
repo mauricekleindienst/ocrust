@@ -14,7 +14,7 @@ import json
 import pytest
 
 from ocrust import Block, Box, Document, Line, Page, Segment, terms
-from ocrust.cli import main
+from ocrust.cli import _CSV_FIELDS, main
 
 PROFILE = terms.parse(
     {
@@ -254,6 +254,139 @@ def test_a_cell_that_wraps_is_read_down_the_column():
     assert [h.text for h in hits if h.term == "Vereinbarung"] == ["Geheimhaltungs\nvereinbarung"]
 
 
+def test_a_longer_word_is_not_the_term_misread():
+    # One edit is within the budget of "Adler", but a letter too many at the
+    # edge makes another word, not a misreading of this one.
+    profile = terms.parse({"term": [{"match": "Adler"}, {"match": "Operation Silberfuchs"}]})
+    for line in ("Der Radler zahlt bar.", "Die Sadler GmbH", "des Adlers Horst", "Adlerr"):
+        assert [h.text for h in _doc([line]).find(profile)] == [], line
+    assert [h.text for h in _doc(["Die Opperation Silberfuchs"]).find(profile)] == [
+        "Opperation Silberfuchs"
+    ]
+
+
+def test_case_is_checked_letter_by_letter_along_the_reading():
+    profile = terms.parse({"term": [{"match": "Müller", "case": True}]})
+    found = {
+        line: [h.text for h in _doc([line]).find(profile)]
+        for line in ("Herr Müller", "Herr Mueller", "Herr MÜLLER", "Herr MUELLER", "Herr mueller")
+    }
+    assert found == {
+        "Herr Müller": ["Müller"],
+        "Herr Mueller": ["Mueller"],
+        "Herr MÜLLER": [],
+        "Herr MUELLER": [],
+        "Herr mueller": [],
+    }
+    fuzzy = terms.parse({"term": [{"match": "Adler", "case": True, "fuzzy": 1}]})
+    assert [h.text for h in _doc(["Das Adlxr Team"]).find(fuzzy)] == ["Adlxr"]
+    assert not _doc(["Das ADLLER Team"]).find(fuzzy).hits
+
+
+def test_ss_for_sharp_s_is_a_spelling():
+    profile = terms.parse({"term": [{"match": "Hafenstraße"}, {"match": "Strasse 5"}]})
+    hits = _doc(["Die Hafenstrasse und die Straße 5"]).find(profile)
+    assert [(h.text, h.how) for h in hits] == [
+        ("Hafenstrasse", ("spelling",)),
+        ("Straße 5", ("spelling",)),
+    ]
+
+
+def test_fuzzy_allows_up_to_a_third_of_the_term():
+    for word, typo, fuzzy in (("Abteil", "Abxeiy", 2), ("Fax", "Fux", 1)):
+        profile = terms.parse({"term": [{"match": word, "fuzzy": fuzzy}]})
+        assert [h.text for h in _doc([f"Das {typo} dort"]).find(profile)] == [typo]
+        profile = terms.parse({"term": [{"match": word, "fuzzy": fuzzy - 1}]})
+        assert not _doc([f"Das {typo} dort"]).find(profile).hits
+
+
+def test_not_near_sees_the_word_the_hit_is_part_of():
+    profile = terms.parse(
+        {"term": [{"match": "Adler", "whole_words": False, "not_near": ["Adlerhorst"]}]}
+    )
+    assert not _doc(["Der Adlerhorst liegt oben"]).find(profile).hits
+    assert [h.text for h in _doc(["Der Adler kreist"]).find(profile)] == ["Adler"]
+
+
+def test_a_regex_sees_a_number_broken_after_its_dash():
+    hits = _found(["Kundennummer KD-", "123456 bitte angeben"])
+    assert [(h[0], h[1]) for h in hits] == [("Kunde", "KD-\n123456")]
+
+
+def test_a_word_the_layout_joined_across_a_line_end():
+    # A real scan: the layout reads "Brand-" / "meldezentrale" as one line
+    # "Brandmeldezentrale", and the words keep their own boxes and hyphen.
+    from ocrust import Word
+
+    words = (
+        Word("Die", Box(700, 100, 760, 130), 0.99),
+        Word("Brand-", Box(850, 100, 920, 130), 0.99),
+        Word("meldezentrale", Box(206, 140, 362, 170), 0.99),
+        Word("piept", Box(370, 140, 440, 170), 0.99),
+    )
+    line = Line(
+        text="Die Brandmeldezentrale piept",
+        box=Box(206, 100, 920, 170),
+        confidence=0.99,
+        angle=0.0,
+        words=words,
+    )
+    page = Page(
+        index=0,
+        width=1654,
+        height=2338,
+        rotation=0.0,
+        origin="image",
+        blocks=(Block(kind="paragraph", box=line.box, lines=(line,)),),
+        elapsed_ms=0.0,
+    )
+    document = Document(source="t", pages=(page,), elapsed_ms=0.0)
+    (hit,) = document.find(terms.load(["Brandmeldezentrale"]))
+    assert hit.how == ("hyphenated",)
+    assert [b.as_tuple() for b in hit.boxes] == [(850, 100, 920, 130), (206, 140, 362, 170)]
+
+
+def test_near_is_judged_in_the_order_that_puts_the_words_together():
+    page = _two_columns(
+        [
+            ("Der Codename", "Die Kantine bleibt am Freitag wegen Umbau geschlossen"),
+            ("Falke gilt ab Mai.", "und Anmeldungen nimmt das Sekretariat entgegen"),
+        ]
+    )
+    profile = terms.parse(
+        {"term": [{"match": "Falke", "fuzzy": 0, "near": ["Codename"], "window": 20}]}
+    )
+    hits = Document(source="t", pages=(page,), elapsed_ms=0.0).find(profile)
+    assert [h.text for h in hits] == ["Falke"]
+
+
+def test_a_join_across_a_column_gutter_is_a_split_not_exact():
+    page = _two_columns(
+        [
+            ("Die Kantine startet das Projekt", "Adler-Gehege im Zoo wird neu"),
+            ("Salat am Freitag mit allen.", "gebaut, sagt der Direktor."),
+        ]
+    )
+    hits = Document(source="t", pages=(page,), elapsed_ms=0.0).find(PROFILE)
+    assert [h.how for h in hits if h.term == "Projekt Adler"] == [("split",)]
+
+
+def test_a_box_drawn_backwards_does_not_hang_the_column_order():
+    first = Line(text="Adler eins", box=Box(0, 0, 10, 10), confidence=1.0, angle=0.0)
+    backwards = Line(text="zwei", box=Box(50, 20, 5, 30), confidence=1.0, angle=0.0)
+    page = Page(
+        index=0,
+        width=100,
+        height=100,
+        rotation=0.0,
+        origin="image",
+        blocks=(Block(kind="paragraph", box=first.box, lines=(first, backwards)),),
+        elapsed_ms=0.0,
+    )
+    report = Document(source="t", pages=(page,), elapsed_ms=0.0).find(terms.load(["Adler"]))
+    assert report.terms == {"Adler": 1}
+
+
 def test_every_hit_has_a_box_per_line():
     found = _doc(["Unterlagen zum Projekt", "Adler anbei."]).find(PROFILE)
     (hit,) = [h for h in found if h.term == "Projekt Adler"]
@@ -298,11 +431,41 @@ def test_profiles_load_from_toml_json_text_and_lists(tmp_path):
         ({"term": [{"match": "a"}, {"match": "a"}]}, "two terms are named"),
         ({"term": []}, "no terms"),
         ({"bogus": 1}, "unknown section"),
+        ({"term": {"match": "Adler"}}, "double brackets"),
+        ({"term": ["Adler", "Falke"]}, "is not a table"),
+        ({"term": None}, "must be a list"),
+        ({"settings": [], "term": [{"match": "x"}]}, "must be a table"),
+        ({"term": [{"match": "x", "markings": True}]}, "markings is a .settings. key"),
+        ({"term": [{"match": "x", "category": ["a"]}]}, "category must be a string"),
+        ({"term": [{"match": "x", "name": {"a": 1}}]}, "name must be a string"),
     ],
 )
 def test_a_bad_profile_says_what_is_wrong(data, message):
     with pytest.raises(terms.ProfileError, match=message):
         terms.parse(data, source="profil.toml")
+
+
+def test_a_profile_file_that_is_not_a_profile(tmp_path):
+    listed = tmp_path / "list.json"
+    listed.write_text('["Adler"]', encoding="utf-8")
+    with pytest.raises(terms.ProfileError, match="not a list"):
+        terms.load(listed)
+    latin = tmp_path / "namen.txt"
+    latin.write_bytes("Müller\n".encode("latin-1"))
+    with pytest.raises(terms.ProfileError, match="not UTF-8"):
+        terms.load(latin)
+
+
+def test_a_comment_after_a_phrase(tmp_path):
+    listed = tmp_path / "namen.txt"
+    listed.write_text("# Namen\nAdler   # der Vogel\nC#\n", encoding="utf-8")
+    assert [t.match for t in terms.load(listed).terms] == [("Adler",), ("C#",)]
+
+
+def test_two_profiles_may_not_name_one_term_twice():
+    a = terms.parse({"term": [{"match": "Adler"}]}, source="a.toml")
+    with pytest.raises(terms.ProfileError, match="two terms are named 'Adler'"):
+        a + a
 
 
 # ------------------------------------------------------------------ ocrust find
@@ -425,3 +588,121 @@ def test_a_bad_shard_is_refused(capsys):
     with pytest.raises(SystemExit) as raised:
         main(["find", "x.pdf", "--term", "Adler", "--shard", "4/3"])
     assert raised.value.code == 2
+
+
+def _unreadable_pdf() -> bytes:
+    """A PDF whose page has no area: the engine cannot read it."""
+    good = _letter_pdf(["Adler"])
+    return good.replace(b"/MediaBox [0 0 612 792]", b"/MediaBox [0 0 000 000]")
+
+
+def test_an_unreadable_pdf_does_not_end_the_batch(engine, letters, tmp_path, capsys):
+    bad = tmp_path / "leer.pdf"
+    bad.write_bytes(_unreadable_pdf())
+    brief = str(letters / "a_brief.pdf")
+    # --pages takes the one-file-at-a-time path, which let the error escape.
+    code = main(["find", str(bad), brief, "--term", "Projekt Adler", "--pages", "1"])
+    out = capsys.readouterr().out
+    assert code == 3
+    assert "unreadable" in out and "a_brief.pdf" in out
+    import ocrust
+
+    results = [result for _, result in engine.scan_each([str(bad), brief], pages=[0])]
+    assert isinstance(results[0], ocrust.OcrustError)
+    assert not isinstance(results[1], Exception)
+
+
+def test_resume_repairs_a_half_written_last_line(engine, letters, tmp_path):
+    report = tmp_path / "hits.jsonl"
+    args = ["find", str(letters), "--term", "Adler", "-f", "jsonl", "-o", str(report), "-q"]
+    main(args)
+    lines = report.read_text(encoding="utf-8").splitlines(keepends=True)
+    report.write_text(lines[0] + lines[1][:25], encoding="utf-8")  # killed mid-record
+    main([*args, "--resume"])
+    records = [json.loads(line) for line in report.read_text(encoding="utf-8").splitlines()]
+    assert sorted(r["source"] for r in records) == sorted(str(p) for p in letters.glob("*.pdf"))
+
+
+def test_a_resumed_run_answers_for_the_whole_report(engine, letters, tmp_path):
+    report = tmp_path / "hits.jsonl"
+    brief = str(letters / "a_brief.pdf")
+    args = ["--term", "Projekt Adler", "-f", "jsonl", "-o", str(report), "-q"]
+    assert main(["find", brief, *args]) == 3
+    # Nothing left to read, and the report still holds a hit.
+    assert main(["find", brief, *args, "--resume"]) == 3
+
+
+def test_resume_leaves_a_file_that_is_not_a_report_alone(letters, tmp_path):
+    other = tmp_path / "notizen.jsonl"
+    other.write_text("Einkaufsliste: Milch", encoding="utf-8")
+    args = ["find", str(letters), "--term", "Adler", "-f", "jsonl", "-o", str(other)]
+    with pytest.raises(SystemExit) as raised:
+        main([*args, "--resume", "-q"])
+    assert raised.value.code == 2
+    assert other.read_text(encoding="utf-8") == "Einkaufsliste: Milch"
+
+
+def test_a_report_into_a_folder_is_refused_before_scanning(letters, tmp_path, capsys):
+    code = main(["find", str(letters), "--term", "Adler", "-o", str(tmp_path), "-q"])
+    assert code == 2
+    assert "is a folder" in capsys.readouterr().err
+
+
+def test_an_empty_shard_still_leaves_its_report(letters, tmp_path):
+    only = tmp_path / "one"
+    only.mkdir()
+    (only / "a.pdf").write_bytes((letters / "a_brief.pdf").read_bytes())
+    for fmt in ("json", "csv"):
+        for k in (1, 2):
+            report = tmp_path / f"s{k}.{fmt}"
+            args = ["find", str(only), "--term", "Adler", "--shard", f"{k}/2"]
+            main([*args, "-f", fmt, "-o", str(report), "-q"])
+            assert report.exists(), (fmt, k)
+    empty = [p for p in tmp_path.glob("s*.json") if json.loads(p.read_text())["files"] == []]
+    assert len(empty) == 1
+    assert any(p.read_text().strip() == ",".join(_CSV_FIELDS) for p in tmp_path.glob("s*.csv"))
+
+
+def test_a_grade_gate_turns_markings_on(engine, tmp_path):
+    marked = tmp_path / "geheim.pdf"
+    marked.write_bytes(_letter_pdf(["GEHEIM", "", "Sehr geehrte Damen und Herren,"]))
+    assert main(["find", str(marked), "--fail-on", "geheim", "-q"]) == 3
+
+
+def test_find_trips_on_anything_by_default():
+    from argparse import Namespace
+
+    from ocrust.cli import _gates
+
+    assert [g.spec for g in _gates(Namespace(fail_on=None), True, None, "find")] == ["any"]
+    assert [g.spec for g in _gates(Namespace(fail_on=None), True, None, "vs")] == ["vs-nfd"]
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        ["--workers", "-1"],
+        ["--threads", "100000"],
+        ["--max-pixels", "-1"],
+        ["--dpi", "0"],
+        ["--pages", ","],
+    ],
+)
+def test_a_bad_number_is_a_bad_argument(letters, option):
+    with pytest.raises(SystemExit) as raised:
+        main(["find", str(letters), "--term", "Adler", *option, "-q"])
+    assert raised.value.code == 2
+
+
+def test_scan_each_takes_one_path_as_one_source(engine, letters):
+    results = list(engine.scan_each(str(letters)))
+    assert sorted(str(p) for p, _ in results) == sorted(str(p) for p in letters.glob("*.pdf"))
+
+
+def test_scan_each_does_not_read_a_generator_ahead(engine, letters):
+    def paths():
+        yield letters / "a_brief.pdf"
+        raise RuntimeError("the generator was read past the first chunk")
+
+    first = next(engine.scan_each(paths(), chunk=1))
+    assert first[0] == letters / "a_brief.pdf"

@@ -19,7 +19,7 @@ import shutil
 import sys
 import textwrap
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -243,7 +243,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("--pages", help="page selection for multi-page inputs, e.g. 1,3-5")
     scan.add_argument("--device", help="cpu (default), auto, cuda[:n], coreml, directml")
-    scan.add_argument("--threads", type=int, help="threads per inference operator")
+    scan.add_argument(
+        "--threads", type=_whole(1, _MAX_PARALLEL), help="threads per inference operator"
+    )
     scan.add_argument(
         "--memory",
         choices=("frugal", "fast"),
@@ -253,10 +255,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument(
         "--workers",
-        type=int,
-        help="pages scanned in parallel (default: 4 for several inputs, 1 otherwise)",
+        type=_whole(1, _MAX_PARALLEL),
+        help="pages scanned in parallel (default: one per core, at most 16, for several "
+        "inputs; 1 for one)",
     )
-    scan.add_argument("--dpi", type=float, help="PDF rasterization DPI (default 200)")
+    scan.add_argument("--dpi", type=_real(20, 2400), help="PDF rasterization DPI (default 200)")
     scan.add_argument("--models", type=Path, help="directory holding the ONNX models")
     scan.add_argument("--no-preprocess", action="store_true", help="skip deskew/invert/rescale")
     scan.add_argument("--no-word-boxes", action="store_true", help="skip per-word geometry")
@@ -267,7 +270,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument(
         "--min-confidence",
-        type=float,
+        type=_real(0, 1),
         help="drop lines below this mean confidence (0..1)",
     )
     scan.add_argument(
@@ -276,7 +279,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument(
         "--io-retries",
-        type=int,
+        type=_whole(0, 20),
         metavar="N",
         help="extra attempts when a read or write fails transiently "
         "(default 2, for network shares)",
@@ -298,7 +301,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument(
         "--watch-interval",
-        type=float,
+        type=_real(0.1, 3600),
         default=2.0,
         metavar="SECONDS",
         help="how often --watch looks for new files (default: 2)",
@@ -318,8 +321,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="defaults to <input>.ocr.pdf, and is required for more than one input",
     )
-    pdf.add_argument("--dpi", type=float, help="assumed page resolution")
-    pdf.add_argument("--quality", type=int, default=80, help="JPEG quality (default 80)")
+    pdf.add_argument("--dpi", type=_real(20, 2400), help="assumed page resolution")
+    pdf.add_argument("--quality", type=_whole(1, 100), default=80, help="JPEG quality (default 80)")
     pdf.add_argument("--models", type=Path)
     pdf.add_argument("--device")
     pdf.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
@@ -330,7 +333,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ocr.add_argument("input", type=Path)
     ocr.add_argument("-o", "--output", type=Path, help="defaults to <input>.ocr.pdf")
-    ocr.add_argument("--dpi", type=float, help="rasterization DPI for recognition")
+    ocr.add_argument("--dpi", type=_real(20, 2400), help="rasterization DPI for recognition")
     ocr.add_argument(
         "--force",
         action="store_true",
@@ -343,8 +346,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ocr.add_argument("--lang")
     ocr.add_argument("--models", type=Path)
     ocr.add_argument("--device")
-    ocr.add_argument("--workers", type=int)
-    ocr.add_argument("--io-retries", type=int, metavar="N")
+    ocr.add_argument("--workers", type=_whole(1, _MAX_PARALLEL))
+    ocr.add_argument("--io-retries", type=_whole(0, 20), metavar="N")
     ocr.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
 
     tiff = sub.add_parser("tiff", help="convert a document into a deskewed multi-page TIFF")
@@ -358,7 +361,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="how to pack the pages (default: lzw; none is roughly ten times the size)",
     )
     tiff.add_argument("--sidecar", choices=FORMATS, help="also write the text in this format")
-    tiff.add_argument("--dpi", type=float)
+    tiff.add_argument("--dpi", type=_real(20, 2400))
     tiff.add_argument("--models", type=Path)
     tiff.add_argument("--lang")
     tiff.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
@@ -404,8 +407,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="also list sentences that mention a grade without being marked with it",
     )
     vs.add_argument("--pages", help="page selection for multi-page inputs, e.g. 1,3-5")
-    vs.add_argument("--workers", type=int, help="pages scanned in parallel (default: one per core)")
-    vs.add_argument("--dpi", type=float, help="PDF rasterization DPI (default 200)")
+    vs.add_argument(
+        "--workers",
+        type=_whole(1, _MAX_PARALLEL),
+        help="pages scanned in parallel (default: one per core, at most 16, for several "
+        "inputs; 1 for one)",
+    )
+    vs.add_argument("--dpi", type=_real(20, 2400), help="PDF rasterization DPI (default 200)")
     vs.add_argument("--models", type=Path, help="directory holding the ONNX models")
     vs.add_argument("--device", help="cpu (default), auto, cuda[:n], coreml, directml")
     vs.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
@@ -449,9 +457,12 @@ def _build_parser() -> argparse.ArgumentParser:
     find.add_argument("-o", "--output", type=Path, help="write the report here instead of stdout")
     find.add_argument("--pages", help="page selection for multi-page inputs, e.g. 1,3-5")
     find.add_argument(
-        "--workers", type=int, help="pages scanned in parallel (default: one per core)"
+        "--workers",
+        type=_whole(1, _MAX_PARALLEL),
+        help="pages scanned in parallel (default: one per core, at most 16, for several "
+        "inputs; 1 for one)",
     )
-    find.add_argument("--dpi", type=float, help="PDF rasterization DPI (default 200)")
+    find.add_argument("--dpi", type=_real(20, 2400), help="PDF rasterization DPI (default 200)")
     find.add_argument("--models", type=Path, help="directory holding the ONNX models")
     find.add_argument("--device", help="cpu (default), auto, cuda[:n], coreml, directml")
     find.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
@@ -478,7 +489,7 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         searcher.add_argument(
             "--threads",
-            type=int,
+            type=_whole(1, _MAX_PARALLEL),
             help="threads per inference; set cores/processes when several runs share a machine",
         )
         searcher.add_argument(
@@ -494,7 +505,7 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         reader.add_argument(
             "--max-pixels",
-            type=int,
+            type=_whole(0),
             metavar="N",
             help="refuse images larger than N pixels, a decompression-bomb guard "
             "(default: about 179 million; 0 removes it)",
@@ -542,6 +553,42 @@ def _bad_argument(message: str) -> SystemExit:
     return SystemExit(2)
 
 
+def _whole(low: int, high: int | None = None) -> Callable[[str], int]:
+    """An argparse type: a whole number in ``low..high``, or exit 2 saying why."""
+
+    def parse(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+        if value < low or (high is not None and value > high):
+            bounds = f"from {low}" + (f" to {high}" if high is not None else " up")
+            raise argparse.ArgumentTypeError(f"{value} is out of range ({bounds})")
+        return value
+
+    return parse
+
+
+def _real(low: float, high: float) -> Callable[[str], float]:
+    """An argparse type: a number in ``low..high``, or exit 2 saying why."""
+
+    def parse(text: str) -> float:
+        try:
+            value = float(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+        if not low <= value <= high:
+            raise argparse.ArgumentTypeError(f"{value:g} is out of range ({low:g} to {high:g})")
+        return value
+
+    return parse
+
+
+#: Page workers and inference threads: past this, memory grows and nothing is
+#: gained on any machine ocrust runs on.
+_MAX_PARALLEL = 256
+
+
 def _parse_pages(spec: str | None) -> list[int] | None:
     """Turns ``"1,3-5"`` into zero-based indices ``[0, 2, 3, 4]``."""
     if not spec:
@@ -566,6 +613,8 @@ def _parse_pages(spec: str | None) -> list[int] | None:
         except ValueError:
             # `--pages 1-x` is a typo, not a crash.
             raise _bad_argument(f"{part!r} is not a page or a page range") from None
+    if not pages:
+        raise _bad_argument(f"--pages {spec!r} names no page; write e.g. 1,3-5")
     return sorted(set(pages))
 
 
@@ -1585,24 +1634,49 @@ class _Gate:
             ) from None
 
     def trips(self, marks: markings.MarkingReport | None, hits: terms.TermReport | None) -> bool:
+        return self._decide(
+            level=marks.level if marks is not None else 0,
+            tlp=marks.tlp if marks is not None else None,
+            company=bool(marks.company) if marks is not None else False,
+            severities=[h.severity for h in hits] if hits is not None else [],
+        )
+
+    def trips_record(self, record: dict[str, Any]) -> bool:
+        """The same decision for a file already in a JSON Lines report."""
+        found = record.get("terms")
+        hits = found.get("hits") if isinstance(found, dict) else None
+        return self._decide(
+            level=int(record.get("level") or 0),
+            tlp=record.get("tlp"),
+            company=bool(record.get("company")),
+            severities=[str(h.get("severity")) for h in hits or [] if isinstance(h, dict)],
+        )
+
+    def _decide(self, level: int, tlp: str | None, company: bool, severities: list[str]) -> bool:
         if self.spec == "none":
             return False
         if self.spec == "any":
             # Anything that restricts who may read it, and any term found.
             # OFFEN, UNCLASSIFIED and TLP:CLEAR are markings that say the opposite.
-            restricted = marks is not None and (
-                marks.level >= 1 or marks.tlp not in (None, "CLEAR") or bool(marks.company)
-            )
-            return restricted or bool(hits)
+            return level >= 1 or tlp not in (None, "CLEAR") or company or bool(severities)
         if self.grade is not None:
-            return marks is not None and marks.level >= self.grade
-        return hits is not None and hits.at_least(terms.SEVERITIES[self.severity or 0])
+            return level >= self.grade
+        wanted = self.severity or 0
+        return any(
+            s in terms.SEVERITIES and terms.SEVERITIES.index(s) >= wanted for s in severities
+        )
 
 
-def _gates(args: argparse.Namespace, marking: bool, profile: terms.Profile | None) -> list[_Gate]:
-    """The `--fail-on` criteria, or the command's defaults."""
+def _gates(
+    args: argparse.Namespace, marking: bool, profile: terms.Profile | None, command: str
+) -> list[_Gate]:
+    """The `--fail-on` criteria, or the command's defaults: for `ocrust find`
+    anything found, for `ocrust vs` a grade from VS-NfD up (and any term, when
+    it was given a profile)."""
     if args.fail_on:
         return [_Gate(spec) for spec in args.fail_on]
+    if command == "find":
+        return [_Gate("any")]
     defaults = []
     if marking:
         defaults.append("vs-nfd")
@@ -1620,13 +1694,13 @@ def _profile(args: argparse.Namespace) -> terms.Profile | None:
         phrases = getattr(args, "term", None) or []
         if phrases:
             parts.append(terms.load(list(phrases)))
+        if not parts:
+            return None
+        merged = parts[0]
+        for extra in parts[1:]:
+            merged = merged + extra
     except terms.ProfileError as exc:
         raise _bad_argument(str(exc)) from None
-    if not parts:
-        return None
-    merged = parts[0]
-    for extra in parts[1:]:
-        merged = merged + extra
     return merged
 
 
@@ -1666,21 +1740,67 @@ def _in_shard(path: Path, roots: Sequence[Path], shard: tuple[int, int]) -> bool
     return zlib.crc32(key.encode("utf-8")) % shard[1] == shard[0]
 
 
-def _already_done(report: Path) -> set[str]:
-    """Sources a JSON Lines report already has, for `--resume`."""
-    done: set[str] = set()
+def _already_done(report: Path) -> dict[str, dict[str, Any]]:
+    """The records a JSON Lines report already has, by source, for `--resume`.
+
+    The file is checked before anything is written to it: one that is not a
+    report of ours (not UTF-8, or no line of it a record) is refused and left
+    as it is. An interrupted run can leave half a record at the end; that one
+    is cut off, so the file it belonged to is read again and its new record
+    starts on a line of its own instead of being glued to the fragment.
+    """
+    done: dict[str, dict[str, Any]] = {}
     try:
-        with report.open(encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue  # the half-written last line of an interrupted run
-                if isinstance(record, dict) and "source" in record:
-                    done.add(str(record["source"]))
+        data = report.read_bytes()
     except FileNotFoundError:
-        pass
+        return done
+    except OSError as exc:
+        raise _bad_argument(f"--resume: cannot read {report}: {exc.strerror or exc}") from None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _bad_argument(f"--resume: {report} is not a JSON Lines report") from None
+    complete, newline, fragment = text.rpartition("\n")
+    if not newline:
+        complete, fragment = "", text
+    lines = [line for line in complete.split("\n") if line.strip()]
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a line an older run garbled; its file is read again
+        if isinstance(record, dict) and "source" in record:
+            done[str(record["source"])] = record
+    if (lines and not done) or (fragment.strip() and not fragment.lstrip().startswith("{")):
+        raise _bad_argument(f"--resume: {report} is not a JSON Lines report of ocrust")
+    if fragment:
+        keep = len((complete + newline).encode("utf-8"))
+        try:
+            with report.open("r+b") as fh:
+                fh.truncate(keep)
+        except OSError as exc:
+            reason = exc.strerror or exc
+            raise _bad_argument(f"--resume: cannot repair {report}: {reason}") from None
     return done
+
+
+def _empty_report(fmt: str, gates: Sequence[_Gate]) -> str:
+    """What a report with no files in it looks like, in each format."""
+    if fmt == "json":
+        summary = {
+            "files": 0,
+            "marked": 0,
+            "with_hits": 0,
+            "unreadable": 0,
+            "clean": 0,
+            "fail_on": [g.spec for g in gates],
+            "tripped": 0,
+            "by_label": {},
+        }
+        return json.dumps({"summary": summary, "files": []}, indent=2) + "\n"
+    if fmt == "csv":
+        return ",".join(_CSV_FIELDS) + "\r\n"
+    return ""
 
 
 def _page_ranges(numbers: Sequence[int]) -> str:
@@ -1861,24 +1981,41 @@ def _csv_rows(
 
 
 def _cmd_vs(args: argparse.Namespace) -> int:
-    return _cmd_findings(args, marking=True)
+    return _cmd_findings(args, marking=True, command="vs")
 
 
 def _cmd_find(args: argparse.Namespace) -> int:
-    return _cmd_findings(args, marking=bool(args.markings))
+    return _cmd_findings(args, marking=bool(args.markings), command="find")
 
 
-def _cmd_findings(args: argparse.Namespace, marking: bool) -> int:
+def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
     import csv
     import io
 
     profile = _profile(args)
     if profile is not None and profile.markings:
         marking = True
+    requested_gates = [_Gate(spec) for spec in args.fail_on or []]
+    if any(g.grade is not None for g in requested_gates):
+        marking = True  # a gate on a grade needs the grades read
     if not marking and profile is None:
         _fail("nothing to look for: give --terms FILE or --term PHRASE (or --markings)")
         return 2
-    gates = _gates(args, marking, profile)
+    gates = _gates(args, marking, profile, command)
+    if args.output is not None:
+        # Found out now, not after an hour of scanning.
+        if args.output.is_dir():
+            _fail(f"-o {args.output}: is a folder; give the report a file name")
+            return 2
+        folder = args.output.parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _fail(f"-o {args.output}: {exc.strerror or exc}")
+            return 2
+        if not os.access(folder, os.W_OK):
+            _fail(f"-o {args.output}: cannot write in {folder}")
+            return 2
     pages = _parse_pages(args.pages)
     shard = _shard(getattr(args, "shard", None))
     requested = list(args.inputs)
@@ -1891,22 +2028,40 @@ def _cmd_findings(args: argparse.Namespace, marking: bool) -> int:
         roots = _walk_roots(requested)
         inputs = [p for p in inputs if str(p) == STDIN or _in_shard(p, roots, shard)]
     streaming = args.format == "jsonl" and args.output is not None
+    # A resumed run answers for the whole report: files the earlier run
+    # already tripped on, or could not read, count toward the exit status.
+    earlier_tripped = earlier_unreadable = 0
     if args.resume:
         if not streaming:
             _fail("--resume continues a JSON Lines report: use it with -f jsonl -o FILE")
             return 2
         done = _already_done(args.output)
         inputs = [p for p in inputs if str(p) not in done]
+        for record in done.values():
+            if record.get("status") == "error":
+                earlier_unreadable += 1
+            elif any(g.trips_record(record) for g in gates):
+                earlier_tripped += 1
         if not args.quiet and done:
             _note(f"resuming: {_count(len(done), 'file')} already in {args.output}")
     if not inputs:
         if args.resume or shard is not None:
             # Nothing left to do is a finished job, not an error; a shard that
             # got no files still leaves its (empty) report where one is expected.
-            if streaming and not args.resume:
-                args.output.parent.mkdir(parents=True, exist_ok=True)
-                args.output.write_text("", encoding="utf-8")
-            return 0
+            if not args.resume:
+                empty = _empty_report(args.format, gates)
+                if args.output is not None:
+                    try:
+                        args.output.parent.mkdir(parents=True, exist_ok=True)
+                        args.output.write_text(empty, encoding="utf-8", newline="")
+                    except OSError as exc:
+                        _fail(f"{args.output}: {exc.strerror or exc}")
+                        return 2
+                else:
+                    sys.stdout.write(empty)
+            if earlier_tripped:
+                return _MARKED
+            return 1 if earlier_unreadable else 0
         _fail("nothing to read")
         return 2
 
@@ -1920,8 +2075,12 @@ def _cmd_findings(args: argparse.Namespace, marking: bool) -> int:
     buffer = io.StringIO()
     stream_file = None
     if streaming:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        stream_file = args.output.open("a" if args.resume else "w", encoding="utf-8")
+        try:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            stream_file = args.output.open("a" if args.resume else "w", encoding="utf-8")
+        except OSError as exc:
+            _fail(f"{args.output}: {exc.strerror or exc}")
+            return 2
         out: Any = stream_file
     else:
         out = buffer if args.output else sys.stdout
@@ -2002,7 +2161,11 @@ def _cmd_findings(args: argparse.Namespace, marking: bool) -> int:
         json.dump({"summary": summary, "files": records}, out, ensure_ascii=False, indent=2)
         out.write("\n")
     if args.output and not streaming:
-        _write(args.output, buffer.getvalue(), retries=_io_retries(args))
+        try:
+            _write(args.output, buffer.getvalue(), retries=_io_retries(args))
+        except OSError as exc:
+            _fail(f"{args.output}: {exc.strerror or exc}")
+            return 2
 
     if not args.quiet:
         parts = [_count(len(inputs), "file")]
@@ -2023,9 +2186,9 @@ def _cmd_findings(args: argparse.Namespace, marking: bool) -> int:
             parts.append(f"report -> {args.output}")
         print(_paint("done:", "rust", "bold") + " " + ", ".join(parts), file=sys.stderr)
 
-    if tripped:
+    if tripped or earlier_tripped:
         return _MARKED
-    return 1 if unreadable else 0
+    return 1 if unreadable or earlier_unreadable else 0
 
 
 def _cmd_languages(args: argparse.Namespace) -> int:

@@ -81,9 +81,9 @@ Output rules worth knowing:
 - Outputs are written **atomically**: to a hidden temporary file that then
   replaces the target in one step. An interrupted run leaves the previous file
   or none, never a truncated one.
-- Several inputs default to `--workers 4`; a single input to 1. Pages and
-  documents share the cores with the inference threads, so more is not better —
-  see [Performance](Performance.md).
+- Several inputs default to one worker per core (at most 16); a single input to
+  1. Every worker has a model session and a share of the cores, so more
+  workers than cores is not better — see [Performance](Performance.md).
 - `--pages` is 1-based and accepts ranges: `1,3-5,9`. The Python API is
   0-based, as Python should be. Asking for a page the document does not have is
   an error, not an empty file; a page spec that is not a number or a range is a

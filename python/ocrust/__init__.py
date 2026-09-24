@@ -78,8 +78,11 @@ __version__ = _ocrust.__version__
 FORMATS = ("text", "markdown", "json", "hocr", "alto", "csv")
 
 
-class OcrustError(RuntimeError):
-    """Raised when the engine cannot be built or a document cannot be read."""
+#: Raised when the engine cannot be built or a document cannot be read. It is
+#: the extension's own exception (a ``RuntimeError``), so an unreadable PDF or a
+#: model failure raised deep in the engine is this, and nothing broader.
+OcrustError = _ocrust.OcrustError
+OcrustError.__module__ = "ocrust"
 
 
 def _attach_render_methods() -> None:
@@ -200,29 +203,37 @@ def _as_exception(payload: dict[str, Any]) -> Exception:
 
 
 def _expand_sources(sources: Iterable[Any]) -> list[Any]:
-    """Expands directories and glob patterns, keeping everything else as is.
+    """Expands directories and glob patterns, keeping everything else as is."""
+    return list(_iter_sources(sources))
+
+
+def _iter_sources(sources: Iterable[Any]) -> Iterator[Any]:
+    """Expands directories and glob patterns as it goes, keeping everything
+    else as is.
 
     Files the caller named stay exactly as given, duplicates included — one
     document comes back per input, which is what makes ``zip(paths, docs)``
     work. Only *expanded* files are de-duplicated, because two overlapping
-    patterns should not read the same file twice.
+    patterns should not read the same file twice. One path, one bytes object
+    or one image is one source, not a sequence of characters.
     """
-    out: list[Any] = []
+    if isinstance(sources, (str, bytes, bytearray, memoryview, os.PathLike)):
+        sources = [sources]
     expanded: set[Path] = set()
 
-    def add_expanded(found: Iterable[Path]) -> None:
+    def fresh(found: Iterable[Path]) -> Iterator[Path]:
         for item in found:
             if item not in expanded:
                 expanded.add(item)
-                out.append(item)
+                yield item
 
     for source in sources:
         if not isinstance(source, (str, os.PathLike)):
-            out.append(source)
+            yield source
             continue
         path = Path(source)
         if path.is_dir():
-            add_expanded(
+            yield from fresh(
                 sorted(
                     child
                     for child in path.rglob("*")
@@ -230,10 +241,9 @@ def _expand_sources(sources: Iterable[Any]) -> list[Any]:
                 )
             )
         elif not path.exists() and any(ch in str(path) for ch in "*?["):
-            add_expanded(_glob(path))
+            yield from fresh(_glob(path))
         else:
-            out.append(path)
-    return out
+            yield path
 
 
 class Ocr:
@@ -475,25 +485,42 @@ class Ocr:
             chunk: Files handed to the engine at once; defaults to four per
                 page worker, at least eight.
         """
-        items = _expand_sources(sources)
         workers = self._kwargs.get("page_workers") or 1
         size = max(1, chunk or max(8, 4 * workers))
-        batchable = pages is None and all(isinstance(s, (str, os.PathLike)) for s in items)
-        if batchable and len(items) > 1:
-            for start in range(0, len(items), size):
-                batch = items[start : start + size]
+        pending: list[Any] = []
+
+        def one(item: Any) -> tuple[Any, Document | Exception]:
+            try:
+                return item, self.scan(item, pages=pages)
+            except (OcrustError, OSError, ValueError) as exc:
+                return item, exc
+
+        def flush() -> Iterator[tuple[Any, Document | Exception]]:
+            batch = list(pending)
+            pending.clear()
+            if len(batch) == 1:
+                yield one(batch[0])
+                return
+            if batch:
                 for item, raw in zip(batch, self._engine.scan_many([str(s) for s in batch])):
                     payload = json.loads(raw)
                     if "error" in payload and "pages" not in payload:
                         yield item, _as_exception(payload)
                     else:
                         yield item, Document._from_json(payload)
-            return
-        for item in items:
-            try:
-                yield item, self.scan(item, pages=pages)
-            except (OcrustError, OSError, ValueError) as exc:
-                yield item, exc
+
+        # Sources are taken a chunk at a time, so a generator of paths is not
+        # read to its end before the first result; paths go to the engine in
+        # parallel, anything else (bytes, images, a page selection) one by one.
+        for item in _iter_sources(sources):
+            if pages is None and isinstance(item, (str, os.PathLike)):
+                pending.append(item)
+                if len(pending) >= size:
+                    yield from flush()
+            else:
+                yield from flush()
+                yield one(item)
+        yield from flush()
 
     @property
     def languages(self) -> tuple[dict[str, str], ...]:

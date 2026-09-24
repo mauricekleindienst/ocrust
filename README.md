@@ -300,7 +300,8 @@ for doc in ocr.scan_many([r"\\fileserver\scans\2026"]):
 - **An unreachable share says so**: `\\fileserver\scans: [WinError 53] The
   network path was not found` instead of a bare "no such file".
 - **Latency hides behind workers.** On a share the read is the slow part, so
-  `--workers 4` (the default for a batch) helps more than it does on local disk.
+  page workers — one per core, at most 16, by default for a batch — help more
+  than they do on local disk.
 
 ## Every input format
 

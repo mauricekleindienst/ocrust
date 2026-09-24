@@ -452,23 +452,67 @@ def _box_for_span(line: Line, start: int, end: int) -> Box:
     was turned off, or the line has none — the line's own box is the honest
     answer.
     """
-    if not line.words:
-        return line.box
-
-    boxes: list[Box] = []
-    cursor = 0
-    for word in line.words:
-        position = line.text.find(word.text, cursor)
-        if position < 0:
-            continue
-        cursor = position + len(word.text)
-        if position < end and cursor > start:
-            boxes.append(word.box)
-    if not boxes:
-        return line.box
+    boxes = _boxes_for_span(line, start, end)
+    if len(boxes) == 1:
+        return boxes[0]
     return Box(
         x0=min(b.x0 for b in boxes),
         y0=min(b.y0 for b in boxes),
         x1=max(b.x1 for b in boxes),
         y1=max(b.y1 for b in boxes),
     )
+
+
+#: Hyphens a word can end in when the layout joins it across a line end.
+_LINE_END_HYPHENS = "-\u2010\u00ad"
+
+
+def _word_spans(line: Line) -> list[tuple[Word, int, int, Box]]:
+    """Each word of `line`, the range of ``line.text`` it covers, and its box.
+
+    A word hyphenated at a line end is joined into one when the layout reads
+    the two lines as one — "Brand-" and "meldezentrale" become
+    "Brandmeldezentrale" — but the word keeps its hyphen, which the text no
+    longer has; it is found without it.
+    """
+    spans: list[tuple[Word, int, int, Box]] = []
+    cursor = 0
+    for word in line.words:
+        position = line.text.find(word.text, cursor)
+        length = len(word.text)
+        if position < 0 and length > 1 and word.text[-1] in _LINE_END_HYPHENS:
+            length -= 1
+            position = line.text.find(word.text[:length], cursor)
+        if position < 0:
+            continue
+        cursor = position + length
+        spans.append((word, position, cursor, word.box))
+    return spans
+
+
+def _boxes_for_span(line: Line, start: int, end: int) -> list[Box]:
+    """The boxes around the words a character range covers, one per row of
+    print: a word the layout joined across a line end ("Brand-" /
+    "meldezentrale") gets a box on each line, not one box over both lines and
+    everything between them. Without word boxes, the line's own box."""
+    covered = [box for _, lo, hi, box in _word_spans(line) if lo < end and hi > start]
+    if not covered:
+        return [line.box]
+    rows: list[list[Box]] = []
+    for box in sorted(covered, key=lambda b: (b.y0 + b.y1) / 2):
+        if rows:
+            last = rows[-1][-1]
+            overlap = min(last.y1, box.y1) - max(last.y0, box.y0)
+            if overlap > 0.5 * min(last.y1 - last.y0, box.y1 - box.y0):
+                rows[-1].append(box)
+                continue
+        rows.append([box])
+    return [
+        Box(
+            x0=min(b.x0 for b in row),
+            y0=min(b.y0 for b in row),
+            x1=max(b.x1 for b in row),
+            y1=max(b.y1 for b in row),
+        )
+        for row in rows
+    ]

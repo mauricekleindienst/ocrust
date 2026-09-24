@@ -58,8 +58,8 @@ can reach, which is a bad thing to be told at the start of a batch. `ocrust`
 asks again and reports the real reason:
 
 ```console
-$ ocrust scan '\fileserver\scans6'
-ocrust: \fileserver\scans6: [WinError 53] The network path was not found
+$ ocrust scan '\\fileserver\scans\2026'
+ocrust: \\fileserver\scans\2026: [WinError 53] The network path was not found
 ```
 
 ```console
@@ -74,7 +74,7 @@ waiting on the network is not using a core. Batches therefore benefit from
 workers more than they do locally:
 
 ```bash
-ocrust scan '\fileserver\scans6' --workers 4     # the default for a batch
+ocrust scan '\\fileserver\scans\2026' --workers 8     # default: one per core, at most 16
 ```
 
 The numbers on [Performance](Performance.md) were measured on local disk; treat them as the

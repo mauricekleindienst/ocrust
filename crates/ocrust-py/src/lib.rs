@@ -37,13 +37,25 @@ fn error_kind(e: &ocrust_core::Error) -> &'static str {
     }
 }
 
+pyo3::create_exception!(
+    _ocrust,
+    OcrustError,
+    PyRuntimeError,
+    "Raised when the engine cannot be built or a document cannot be read."
+);
+
 /// Maps engine errors onto the Python exception a caller would expect.
+///
+/// Everything that is neither a file nor an argument problem — a PDF that
+/// cannot be read, an image that does not decode, a model or runtime failure,
+/// a panic caught while reading — is an `OcrustError`, the one exception the
+/// Python layer and the CLI treat as "this document could not be read".
 fn to_py_err(e: ocrust_core::Error) -> PyErr {
     use ocrust_core::Error as E;
     match e {
         E::Io { .. } | E::PlainIo(_) => PyIOError::new_err(e.to_string()),
         E::Unsupported(_) | E::Config(_) | E::Dict(_) => PyValueError::new_err(e.to_string()),
-        other => PyRuntimeError::new_err(other.to_string()),
+        other => OcrustError::new_err(other.to_string()),
     }
 }
 
@@ -278,7 +290,7 @@ impl PyEngine {
             .into_iter()
             .map(|r| match r {
                 Ok(doc) => {
-                    serde_json::to_string(&doc).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+                    serde_json::to_string(&doc).map_err(|e| OcrustError::new_err(e.to_string()))
                 }
                 Err(e) => Ok(
                     serde_json::json!({ "error": e.to_string(), "kind": error_kind(&e) })
@@ -490,8 +502,7 @@ impl PyEngine {
         };
         let outcome = py.detach(|| self.inner.to_tiff(&Source::path(path), opts));
         let (bytes, doc) = outcome.map_err(to_py_err)?;
-        let json =
-            serde_json::to_string(&doc).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let json = serde_json::to_string(&doc).map_err(|e| OcrustError::new_err(e.to_string()))?;
         Ok((PyBytes::new(py, &bytes), json))
     }
 
@@ -544,7 +555,7 @@ impl PyEngine {
             return Err(e);
         }
         let doc = doc.map_err(to_py_err)?;
-        serde_json::to_string(&doc).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        serde_json::to_string(&doc).map_err(|e| OcrustError::new_err(e.to_string()))
     }
 }
 
@@ -637,6 +648,7 @@ fn models_cache_dir() -> String {
 #[pymodule]
 fn _ocrust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", ocrust_core::VERSION)?;
+    m.add("OcrustError", m.py().get_type::<OcrustError>())?;
     m.add_class::<PyEngine>()?;
     m.add_function(wrap_pyfunction!(render_document, m)?)?;
     m.add_function(wrap_pyfunction!(runtime_version, m)?)?;
