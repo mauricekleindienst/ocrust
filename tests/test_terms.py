@@ -937,7 +937,8 @@ def test_a_regex_match_may_carry_a_footnote():
 def test_only_real_streams_are_streams(tmp_path):
     from ocrust.cli import _special_file
 
-    assert _special_file(Path("/dev/stdout"))
+    if os.name == "posix":  # Windows has no /dev
+        assert _special_file(Path("/dev/stdout"))
     assert not _special_file(tmp_path / "bericht.json")
     assert not _special_file(tmp_path)
     shm = Path("/dev/shm")
