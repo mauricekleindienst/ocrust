@@ -93,7 +93,7 @@ The file is not an image or PDF that `ocrust` can decode, or it is truncated.
 for path in paths:
     try:
         text = ocrust.read(path)
-    except (IOError, ValueError) as exc:
+    except (OSError, ValueError, ocrust.OcrustError) as exc:
         print(f"{path}: {exc}")     # skip and carry on
 ```
 

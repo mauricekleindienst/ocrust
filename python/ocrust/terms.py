@@ -428,7 +428,7 @@ class TermReport:
 # ------------------------------------------------------------------ folding
 
 #: Gaps between two letters of the stream, by what stood between them.
-_NONE, _SPACE, _PUNCT, _LINE, _HYPHEN, _BLOCK, _SPACED, _CASE = range(8)
+_NONE, _SPACE, _PUNCT, _LINE, _HYPHEN, _BLOCK, _SPACED, _CASE, _DIGIT = range(9)
 _DASHES = set("-‐‑‒–—―−﹘﹣－­")
 _INVISIBLE = set("​‌‍⁠﻿")
 #: Symbols the recognizer puts where a letter was, inside a word.
@@ -443,6 +443,25 @@ def _fold(ch: str) -> tuple[str, bool]:
     return plain.replace("ẞ", "SS"), umlaut
 
 
+#: Unicode categories of marks set beside a word rather than in it: a
+#: footnote ¹, a fraction ½, ①, ™, ®, ℃. The NFKD fold would turn them into
+#: letters and digits glued to the word ("Adler¹" into "ADLER1").
+_BESIDE = ("No", "So")
+
+
+def _letters(ch: str) -> tuple[str, bool]:
+    """What one character adds to the stream: its letters and digits, folded,
+    and whether an umlaut was folded away; nothing for a space, punctuation or
+    a mark beside a word. Phrase and page are read with this one rule, so a
+    term's letters line up with the page's."""
+    if unicodedata.category(ch) in _BESIDE:
+        return "", False
+    folded, umlaut = _fold(ch)
+    if not folded or not folded.isalnum():
+        return "", False
+    return folded, umlaut
+
+
 def _skeleton_of(phrase: str) -> tuple[str, list[bool], list[bool]]:
     """A term's letters and digits, where its own word breaks fall, and which
     letters were umlauts."""
@@ -451,16 +470,20 @@ def _skeleton_of(phrase: str) -> tuple[str, list[bool], list[bool]]:
     umlauts: list[bool] = []
     pending = False
     for ch in phrase:
-        folded, umlaut = _fold(ch)
-        if not folded.isalnum():
+        if unicodedata.combining(ch):
+            # Written decomposed, "u" + U+0308: the dots belong to the letter.
+            if ch == "\u0308" and umlauts:
+                umlauts[-1] = True
+            continue
+        folded, umlaut = _letters(ch)
+        if not folded:
             pending = bool(chars)
             continue
         for c in folded:
-            if c.isalnum():
-                chars.append(c)
-                breaks.append(pending)
-                umlauts.append(umlaut)
-                pending = False
+            chars.append(c)
+            breaks.append(pending)
+            umlauts.append(umlaut)
+            pending = False
     return "".join(chars), breaks, umlauts
 
 
@@ -615,21 +638,30 @@ def _stream(page: Page, columns: bool = False) -> _Stream:
                     pending = _HYPHEN
                 if ch in _INVISIBLE:
                     continue
-                folded, umlaut = _fold(ch)
+                if unicodedata.combining(ch):
+                    if ch == "\u0308" and s.chars and s.origin[-1][0] == number:
+                        s.umlauts[-1] = True
+                    continue
+                folded, umlaut = _letters(ch)
                 if ch in _SYMBOL_LETTERS and 0 < i < len(text) - 1:
                     before, after = text[i - 1], text[i + 1]
                     if before.isalpha() and after.isalpha():
                         folded, umlaut = _SYMBOL_LETTERS[ch], False
-                if not folded or not folded[0].isalnum():
+                if not folded:
                     pending = max(pending, _SPACE if ch.isspace() else _PUNCT)
                     continue
                 gap = pending
+                previous = text[i - 1] if i > 0 else ""
                 if gap == _SPACE and i in spaced:
                     gap = _SPACED
-                elif gap == _NONE and i > 0 and ch.isupper() and text[i - 1].islower():
+                elif gap == _NONE and ch.isupper() and previous.islower():
                     # "HerrWeißmüller", "DieAuswertung": a space the scan lost
                     # between two words still shows as a capital after a small.
                     gap = _CASE
+                elif gap == _NONE and previous.isalnum() and ch.isdigit() != previous.isdigit():
+                    # "Adler1", "FS220": a footnote read as a digit, a code
+                    # glued to its number. A word may end here; it need not.
+                    gap = _DIGIT
                 for c in folded:
                     s.chars.append(c)
                     s.gaps.append(gap)
@@ -919,13 +951,16 @@ def find(document: Document, profile: Profile | Any) -> TermReport:
                 for pattern in term.regex:
                     for flat in ready.flats():
                         found.extend(_regex_hits(term, pattern, page, ready.stream, flat))
-            # Zones and context first, per reading order: the order that puts
-            # "Codename" next to "Falke" is the one that counts.
+            # Zones and context per reading order, before one hit per place is
+            # chosen: `near` holds if any order puts the word beside the hit
+            # ("Codename" above "Falke" in its column), `not_near` rules the
+            # place out if any order does.
+            found = [item for item in found if item.hit.zone in term.zones]
+            vetoed = [item for item in found if not _not_near_ok(term, item)]
             allowed = [
                 item
                 for item in found
-                if item.hit.zone in term.zones
-                and _context_ok(term, item.stream, item.start, item.end)
+                if _near_ok(term, item) and not any(_same_place(item, v) for v in vetoed)
             ]
             hits.extend(item.hit for item in _distinct(allowed))
     hits.sort(key=lambda h: (h.page, h.box.y0, h.box.x0))
@@ -1029,7 +1064,7 @@ def _phrase_hits(term: Term, phrase: str, page: Page, ready: _Prepared) -> Itera
                 start, end, c = snapped
             if any(start < e and s < end for s, e in taken):
                 continue
-            if term.whole_words and _inside_longer_word(pattern, p_umlaut, stream, start, end, c):
+            if term.whole_words and _another_word(pattern, p_umlaut, stream, start, end, c):
                 continue
             if not _short_words_kept(pattern, breaks, stream, start, end):
                 continue
@@ -1045,19 +1080,69 @@ def _phrase_hits(term: Term, phrase: str, page: Page, ready: _Prepared) -> Itera
             yield _Found(hit, stream, start, end, _places(stream, stream.origin[start:end]))
 
 
-def _inside_longer_word(
+def _another_word(
     pattern: str, p_umlaut: list[bool], stream: _Stream, start: int, end: int, cost: int
 ) -> bool:
-    """Whether the hit is the term with a letter too many at an edge — "Radler"
-    for "Adler", "Adlers" — which is a longer word that contains the term,
-    not the term misread. An edit inside the word ("Opperation") is not."""
-    text, umlauts = stream.text, stream.umlauts
-    if end - start > 1:
-        if _fit(pattern, p_umlaut, text[start + 1 : end], umlauts[start + 1 : end]) + EDIT <= cost:
-            return True
-        if _fit(pattern, p_umlaut, text[start : end - 1], umlauts[start : end - 1]) + EDIT <= cost:
-            return True
-    return False
+    """Whether the hit is another word or number that contains the term, or
+    that the term contains: "Radler" or "Adlers" for "Adler", "Adler" for
+    "Radler", "Hafenstraße 12" for "Hafenstraße 120".
+
+    That is the case when no cheapest reading of the hit aligns its first and
+    its last letter with the term's: the letter too many, or too few, at the
+    edge cannot be read as anything else. "Opperation" aligns both ends; its
+    extra letter is inside the word, a misreading. A digit is stricter: "1200"
+    is not "120" misread, so where the term ends in a digit, any cheapest
+    reading with a digit too many or too few there rules the hit out.
+    """
+    text, dots = stream.text[start:end], stream.umlauts[start:end]
+    m, n = len(pattern), len(text)
+    if m < 2 or n < 2:
+        return False
+    if pattern[0].isdigit() and (
+        _fit(pattern, p_umlaut, text[1:], dots[1:]) + EDIT <= cost
+        or _fit(pattern[1:], p_umlaut[1:], text, dots) + EDIT <= cost
+    ):
+        return True
+    if pattern[-1].isdigit() and (
+        _fit(pattern, p_umlaut, text[:-1], dots[:-1]) + EDIT <= cost
+        or _fit(pattern[:-1], p_umlaut[:-1], text, dots) + EDIT <= cost
+    ):
+        return True
+    starts = _edge_moves(pattern, p_umlaut, text, dots, 0)
+    ends = _edge_moves(pattern, p_umlaut, text, dots, -1)
+    start_kept = any(
+        c + _fit(pattern[a:], p_umlaut[a:], text[b:], dots[b:]) == cost for a, b, c in starts
+    )
+    end_kept = any(
+        c + _fit(pattern[: m - a], p_umlaut[: m - a], text[: n - b], dots[: n - b]) == cost
+        for a, b, c in ends
+    )
+    return not (start_kept and end_kept)
+
+
+def _edge_moves(
+    pattern: str, p_umlaut: list[bool], text: str, dots: list[bool], edge: int
+) -> list[tuple[int, int, int]]:
+    """The moves of `_table` that read the term's letter at one edge (`edge` 0
+    the first, -1 the last) as the text's letter there: (term letters, text
+    letters, cost)."""
+    if edge == 0:
+        p, t, p2, t2 = pattern[0], text[0], pattern[:2], text[:2]
+    else:
+        p, t, p2, t2 = pattern[-1], text[-1], pattern[-2:], text[-2:]
+    if t == p:
+        moves = [(1, 1, 0)]
+    elif (t, p) in _LOOKALIKE:
+        moves = [(1, 1, LOOK)]
+    else:
+        moves = [(1, 1, EDIT)]
+    if (p == "M" and t2 == "RN") or (p == "W" and t2 == "VV"):
+        moves.append((1, 2, LOOK))  # rn read for m, vv for w
+    if p_umlaut[edge] and t2 == p + "E":
+        moves.append((1, 2, SPELL))  # "ae" written for the term's "ä"
+    if dots[edge] and p2 == t + "E":
+        moves.append((2, 1, SPELL))  # an "ä" printed for the term's "ae"
+    return moves
 
 
 def _path(
@@ -1109,8 +1194,10 @@ def _phrase_letters(phrase: str) -> list[str]:
     came from: "Weiß" gives W, E, I, ß, ß."""
     letters: list[str] = []
     for ch in phrase:
-        folded, _ = _fold(ch)
-        letters.extend(ch for c in folded if c.isalnum())
+        if unicodedata.combining(ch):
+            continue
+        folded, _ = _letters(ch)
+        letters.extend(ch for _ in folded)
     return letters
 
 
@@ -1177,7 +1264,7 @@ def _short_words_kept(
         return True
     tokens = [""]
     for k in range(start, end):
-        if k > start and stream.gaps[k] not in (_NONE, _SPACED, _HYPHEN):
+        if k > start and stream.gaps[k] not in (_NONE, _SPACED, _HYPHEN, _DIGIT):
             tokens.append("")
         tokens[-1] += stream.chars[k]
     words = [w.translate(_CANON) for w in words]
@@ -1328,14 +1415,18 @@ def _flat(stream: _Stream, close_lines: bool = False, compact: bool = False) -> 
         text = line.text
         spaced = _spaced_positions(text) if not compact else _beside_singles(text)
         tail = text.rstrip()
-        hyphenated = len(tail) > 1 and tail[-1] in _DASHES and tail[-2].isalpha()
-        # A hyphenated word goes on in the next line, without its hyphen; with
-        # `close_lines` anything that ends in a letter, a digit or a dash does,
-        # the dash kept — "KD-" / "123456" is "KD-123456".
+        following = stream.lines[number + 1].text.lstrip() if number + 1 < len(stream.lines) else ""
+        # A word hyphenated at the line end goes on, lower case, in the next
+        # line, and loses its hyphen: "Kunden-" / "nummer". With `close_lines`
+        # anything else that ends in a letter, a digit or a dash goes on too,
+        # the dash kept: "KD-" / "123456" is "KD-123456".
+        hyphenated = (
+            len(tail) > 1 and tail[-1] in _DASHES and tail[-2].isalpha() and following[:1].islower()
+        )
         joined = hyphenated or (
             close_lines and bool(tail) and (tail[-1].isalnum() or tail[-1] in _DASHES)
         )
-        if hyphenated and not close_lines:
+        if hyphenated:
             kept = tail[:-1]  # the hyphen goes, the word goes on
         elif joined:
             kept = tail
@@ -1350,6 +1441,28 @@ def _flat(stream: _Stream, close_lines: bool = False, compact: bool = False) -> 
             chars.append(" ")
             origin.append(None)
     return _Flat("".join(chars), origin)
+
+
+def _continues(
+    stream: _Stream, flat: _Flat, neighbour: int, spot: tuple[int, int], step: int
+) -> bool:
+    """Whether the printed text goes on in a letter or digit beyond this end of
+    a regex match (`step` -1 before it, +1 after it): "KD-1234567" and
+    "XKD-123456" are other numbers than "KD-123456"."""
+    line, offset = spot
+    text = stream.lines[line].text
+    edge = text[offset]
+    if not edge.isalnum():
+        return False
+    k = offset + step
+    if 0 <= k < len(text) and text[k].isalnum():
+        return True
+    # A comb field is read with its spaces taken out ("K D - 4 3 8 3 0 0"):
+    # there a digit next to a digit goes on, a word after the number does not.
+    if 0 <= neighbour < len(flat.text):
+        beside = flat.text[neighbour]
+        return beside.isalnum() and beside.isdigit() == edge.isdigit()
+    return False
 
 
 def _beside_singles(text: str) -> set[int]:
@@ -1370,6 +1483,11 @@ def _regex_hits(
     for m in re.finditer(pattern, flat.text, flags):
         spots = [o for o in flat.origin[m.start() : m.end()] if o is not None]
         if not spots:
+            continue
+        if term.whole_words and (
+            _continues(stream, flat, m.start() - 1, spots[0], -1)
+            or _continues(stream, flat, m.end(), spots[-1], +1)
+        ):
             continue
         per_line: dict[int, list[int]] = {}
         for line, offset in spots:
@@ -1402,23 +1520,36 @@ def _regex_hits(
         yield _Found(hit, stream, span[0], span[1], _places(stream, spots))
 
 
-def _context_ok(term: Term, stream: _Stream, start: int, end: int) -> bool:
-    """`near` and `not_near`: whether the words around the hit allow it.
+def _near_ok(term: Term, item: _Found) -> bool:
+    """`near`: one of its words within `window` letters to either side of the
+    hit. The hit itself is not context — "Adler" does not stand near "Adler".
 
-    Measured in the letter stream, `window` letters to either side, so a
-    context word counts across a line break just as the term does.
+    Measured in the letter stream, so a context word counts across a line
+    break just as the term does.
     """
-    if not term.near and not term.not_near:
+    if not term.near:
         return True
-    text = stream.text
-    before = text[max(0, start - term.window) : start]
-    after = text[end : end + term.window]
-    # For `near` the hit itself is not context: "Adler" does not stand near
-    # "Adler". For `not_near` it is: a `not_near` word the hit is part of
-    # ("Adlerhorst" for a term that may sit inside words) rules it out.
-    if term.not_near:
-        whole = before + text[start:end] + after
-        if any(_skeleton_of(w)[0] in whole for w in term.not_near):
-            return False
-    around = before + " " + after
-    return not term.near or any(_skeleton_of(w)[0] in around for w in term.near)
+    text, start, end = item.stream.text, item.start, item.end
+    around = text[max(0, start - term.window) : start] + " " + text[end : end + term.window]
+    return any(_skeleton_of(w)[0] in around for w in term.near)
+
+
+def _not_near_ok(term: Term, item: _Found) -> bool:
+    """`not_near`: none of its words within `window` letters of the hit — or
+    around it: a `not_near` word the hit is part of ("Adlerhorst" for a term
+    that may sit inside words) rules it out too. One inside the hit's own
+    letters ("Kran" in "Kranich") does not."""
+    if not term.not_near:
+        return True
+    text, start, end = item.stream.text, item.start, item.end
+    lo = max(0, start - term.window)
+    whole = text[lo : end + term.window]
+    inside = (start - lo, end - lo)
+    for word in term.not_near:
+        needle = _skeleton_of(word)[0]
+        at = whole.find(needle)
+        while at >= 0:
+            if at < inside[0] or at + len(needle) > inside[1]:
+                return False
+            at = whole.find(needle, at + 1)
+    return True

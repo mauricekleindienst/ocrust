@@ -168,7 +168,7 @@ for path in Path("archive").rglob("*.pdf"):
         continue
     try:
         pdf, report = ocr.ocr_pdf(path)
-    except (IOError, ValueError) as exc:
+    except (OSError, ValueError, ocrust.OcrustError) as exc:
         print(f"{path}: {exc}")
         continue
     if report["pages_with_layer"]:

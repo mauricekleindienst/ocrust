@@ -2,11 +2,12 @@
 
 ## 0.2.7 — 2026-09-24
 
-Twenty-two bugs an independent review found in 0.2.6, every one reproduced
-before it was fixed and each with a test that fails against 0.2.6. Term search
-accuracy on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
+Bugs found in 0.2.6 by an independent review, in rounds: each round's findings
+were reproduced, fixed with a test that fails without the fix, and handed back
+to be checked — including the fixes of the round before. Term-search accuracy
+on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
 
-235 Rust unit tests, 10 Rust end-to-end tests, 335 Python tests.
+236 Rust unit tests, 10 Rust end-to-end tests, 349 Python tests.
 
 ### Fixed
 
@@ -16,29 +17,45 @@ accuracy on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
   `--pages`, a single file or standard input, `ocrust scan` of a batch, and
   `Ocr.scan_each` with `pages` stopped at the first such file. Every engine
   error of that kind is now an `OcrustError`, from Rust, so the file is
-  reported unreadable and the batch goes on.
+  reported unreadable and the batch goes on. The documented batch loops catch
+  `OcrustError` beside `OSError` and `ValueError`.
 - **`--resume` corrupted its own report.** It appended to the half-written last
   line an interruption leaves, gluing the next record onto it. The fragment is
-  now cut off and its file read again. A file that is not a report of ocrust
-  is refused and left untouched.
+  now cut off and its file read again; a last record that is whole but lacks
+  its line end is kept. A file that is not a report of ocrust is refused and
+  left untouched.
 - **A resumed run's exit status ignored the report.** Files the earlier run had
-  found something in, or could not read, now count: a gate over a resumable run
-  no longer passes on the second run.
-- **A term was found inside a longer word.** With the default `fuzzy`, `Adler`
-  was found in `Radler`, `Sadler` and `Adlers` — a letter too many at the edge
-  is one edit — although the documentation promises the opposite. A letter too
-  many at the edge of a whole-word hit now rules it out; one inside the word
-  (`Opperation`) still counts as a misreading.
+  found something in, or could not read, now count.
+- **The layout joined a suspended hyphen**: "Vor- / und Nachnamen" became
+  "Vorund Nachnamen", "Sicherheits- / und Brandschutz" "Sicherheitsund", in
+  every output format. A line end hyphen followed by und, oder, bzw., sowie,
+  bis, noch, and, or … is kept.
+- **A term was found in another word.** With the default `fuzzy`, `Adler` was
+  found in `Radler`, `Sadler` and `Adlers`, `Radler` in `Adler`,
+  `Hafenstraße 120` in `Hafenstraße 12` — one edit each — although the
+  documentation promises whole words. A letter too many or too few at an edge,
+  that no reading can place inside the word, now rules the hit out; for a
+  number any digit too many or too few at its edge does. A misreading inside
+  the word (`Opperation`) still counts.
+- **A mark beside a word hid it**: `ORKA™` and `Sentinel X4™` were not found, since
+  the Unicode fold turned the mark into letters glued to the word. Footnote
+  marks, fractions, ™ and ® now stand beside words, and a digit glued to a
+  word's end (`Adler1`) may end it.
+- **A regex ignored `whole_words`**: `KD-\d{6}` was found in `KD-1234567` and
+  `XKD-123456`.
 - **`case = true` let spellings and edits through**: `MUELLER` and `mueller`
   were hits for `Müller`, `ADLLER` for `Adler`. Case is now checked letter by
-  letter along the alignment.
+  letter along the alignment; an umlaut written decomposed (`u` + U+0308)
+  counts as the umlaut.
 - **`near` and `not_near` were judged in one reading order only**, the one the
   duplicate check kept; on a two-column page the order that puts `Codename`
-  above `Falke` was thrown away. Each reading order is judged on its own now.
-  `not_near` also sees the word the hit is part of.
+  above `Falke` was thrown away. `near` now holds if either order puts the word
+  beside the term, and `not_near` rules a hit out if either does. `not_near`
+  also sees the word the hit is part of, but not the hit's own letters.
 - **A word hyphenated at a line end**, which the layout joins into one line, was
-  reported `exact` with a box around its second half only — also in
-  `Document.search`. It is `hyphenated` now, with a box on each line.
+  reported `exact` with a box around its second half only. It is `hyphenated`
+  now, with a box on each line; `Document.search` matches carry the same in
+  the new `Match.boxes`.
 - **A regex missed a number broken after its own dash** (`KD-` / `123456`).
 - **A malformed profile crashed** with a traceback and exit 1 instead of saying
   what is wrong: `[term]` for `[[term]]`, a list of strings for `term`, a JSON
@@ -50,18 +67,27 @@ accuracy on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
 - **`fuzzy = N` allowed fewer edits than documented**: "never more than a
   third" was "less than a third", so `fuzzy = 1` did nothing for a three-letter
   term.
-- **`ocrust find --markings` did not default to `--fail-on any`** as documented,
-  and **a grade gate without `--markings`** (`--fail-on geheim`) could never trip;
-  it turns markings on now.
+- **`ocrust find --markings` did not default to `--fail-on any`** as documented.
+  **A grade gate without `--markings`** (`--fail-on geheim`) could never trip;
+  it turns markings on now. **A severity gate without terms** (`ocrust vs
+  --fail-on high`) could never trip either; it is refused.
+- **`-o` naming one of the inputs destroyed it** before it was read, in `ocrust
+  find` and `ocrust scan`; it is refused.
+- **`-o` through a link replaced the link**, and `-o /dev/stdout` or a named pipe
+  was replaced by a file; the report is written through them now.
 - **`-o` naming a folder**, or a report that cannot be written, failed with a
   traceback after the whole scan; it is refused before scanning.
 - **A shard with no files** left no report for `-f json` and `-f csv`.
-- **Bad numbers** — `--workers -1`, `--max-pixels -1`, `--pages ,` — failed per
-  file with exit 1, and `--threads 100000` was accepted and grew the process to
-  gigabytes; all are exit 2 with the range now.
+- **Bad numbers** — `--workers -1`, `--max-pixels -1` or larger than any
+  image, `--pages ,` — failed per file with exit 1, and `--threads 100000` was
+  accepted and grew the process to gigabytes; all are exit 2 with the range now.
 - `ss` read for `ß` was reported `exact`; it is a `spelling`.
-- `Ocr.scan_each("folder")` read the path as a sequence of characters, and a
-  generator of sources was read to its end before the first result.
+- A phrase with `½` or `℃` in it was not found in identical text, and `case =
+  true` was thrown off by such a character.
+- `Ocr.scan_each` and `scan_many` read one path given as a string as a sequence
+  of characters, and one numpy image as a sequence of rows; a generator of
+  sources was read to its end before the first result; paths given as strings
+  came back as `Path` objects.
 - An inline `# comment` in a phrase list became part of the phrase.
 - A phrase joined across two columns the layout read as one line was `exact`;
   it is `split`.

@@ -202,6 +202,15 @@ def _as_exception(payload: dict[str, Any]) -> Exception:
     return OcrustError(message)
 
 
+def _is_image(obj: Any) -> bool:
+    """Whether `obj` is one image — a PIL image or a numpy array — rather than
+    a sequence of sources."""
+    if hasattr(obj, "convert") and hasattr(obj, "size") and hasattr(obj, "tobytes"):
+        return True
+    shape = getattr(obj, "shape", None)
+    return shape is not None and hasattr(obj, "dtype") and len(shape) in (2, 3)
+
+
 def _expand_sources(sources: Iterable[Any]) -> list[Any]:
     """Expands directories and glob patterns, keeping everything else as is."""
     return list(_iter_sources(sources))
@@ -217,7 +226,7 @@ def _iter_sources(sources: Iterable[Any]) -> Iterator[Any]:
     patterns should not read the same file twice. One path, one bytes object
     or one image is one source, not a sequence of characters.
     """
-    if isinstance(sources, (str, bytes, bytearray, memoryview, os.PathLike)):
+    if isinstance(sources, (str, bytes, bytearray, memoryview, os.PathLike)) or _is_image(sources):
         sources = [sources]
     expanded: set[Path] = set()
 
@@ -243,7 +252,7 @@ def _iter_sources(sources: Iterable[Any]) -> Iterator[Any]:
         elif not path.exists() and any(ch in str(path) for ch in "*?["):
             yield from fresh(_glob(path))
         else:
-            yield path
+            yield source
 
 
 class Ocr:
@@ -260,7 +269,8 @@ class Ocr:
         device: ``"cpu"`` (default), ``"auto"``, ``"cuda"``, ``"cuda:1"``,
             ``"coreml"`` or ``"directml"``. Accelerators need a matching build.
         threads: Threads per inference operator. ``None`` lets the runtime decide.
-        page_workers: Pages scanned in parallel. ``None`` means one per core.
+        page_workers: Pages scanned in parallel. ``None`` means one: all cores
+            work on one page at a time. The CLI uses one per core for a batch.
         pdf_dpi: Rasterization resolution for PDF pages (default 200).
         password: Password for encrypted PDFs. PDFs protected by an owner
             password alone open without one. A text layer added to a

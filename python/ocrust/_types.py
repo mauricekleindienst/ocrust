@@ -214,6 +214,10 @@ class Match:
     box: Box
     #: The line the match was found in.
     line: Line
+    #: One box per row of print the match covers: two for a word the layout
+    #: joined across a line end ("Brand-" / "meldezentrale"), whose `box`
+    #: spans both rows.
+    boxes: tuple[Box, ...] = ()
 
     def as_tuple(self) -> tuple[int, float, float, float, float]:
         return (self.page, *self.box.as_tuple())
@@ -388,12 +392,14 @@ class Document:
         for page in self.pages:
             for line in page.lines:
                 for hit in compiled.finditer(line.text):
+                    rows = tuple(_boxes_for_span(line, hit.start(), hit.end()))
                     found.append(
                         Match(
                             text=hit.group(0),
                             page=page.index,
                             box=_box_for_span(line, hit.start(), hit.end()),
                             line=line,
+                            boxes=rows,
                         )
                     )
         return tuple(found)

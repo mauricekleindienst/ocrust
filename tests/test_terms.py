@@ -258,10 +258,21 @@ def test_a_longer_word_is_not_the_term_misread():
     # One edit is within the budget of "Adler", but a letter too many at the
     # edge makes another word, not a misreading of this one.
     profile = terms.parse({"term": [{"match": "Adler"}, {"match": "Operation Silberfuchs"}]})
-    for line in ("Der Radler zahlt bar.", "Die Sadler GmbH", "des Adlers Horst", "Adlerr"):
+    for line in ("Der Radler zahlt bar.", "Die Sadler GmbH", "des Adlers Horst"):
         assert [h.text for h in _doc([line]).find(profile)] == [], line
-    assert [h.text for h in _doc(["Die Opperation Silberfuchs"]).find(profile)] == [
-        "Opperation Silberfuchs"
+    # An extra letter that can be read inside the word is a misreading: the
+    # doubled r of "Adlerr", the doubled p of "Opperation".
+    for line, text in (
+        ("Der Adlerr", "Adlerr"),
+        ("Die Opperation Silberfuchs", "Opperation Silberfuchs"),
+    ):
+        assert [h.text for h in _doc([line]).find(profile)] == [text]
+    # And a letter or digit missing at an edge makes another word or number.
+    shorter = terms.parse({"term": [{"match": "Radler"}, {"match": "Hafenstraße 120"}]})
+    for line in ("Der Adler kreist", "Hafenstraße 12", "Hafenstraße 1200"):
+        assert not _doc([line]).find(shorter).hits, line
+    assert [h.text for h in _doc(["Gez. M. Schöllhom"]).find(terms.load(["M. Schöllhorn"]))] == [
+        "M. Schöllhom"
     ]
 
 
@@ -385,6 +396,87 @@ def test_a_box_drawn_backwards_does_not_hang_the_column_order():
     )
     report = Document(source="t", pages=(page,), elapsed_ms=0.0).find(terms.load(["Adler"]))
     assert report.terms == {"Adler": 1}
+
+
+def test_a_footnote_or_trademark_beside_a_term_is_not_part_of_it():
+    profile = terms.parse({"term": [{"match": "Projekt Adler"}, {"match": "ORKA"}]})
+    for line, text in (
+        ("siehe Projekt Adler¹ unten", "Projekt Adler"),
+        ("siehe Projekt Adler1 unten", "Projekt Adler"),  # the ¹ read as a 1
+        ("Wir nutzen ORKA™ seit 2020", "ORKA"),
+    ):
+        assert [h.text for h in _doc([line]).find(profile)] == [text], line
+
+
+def test_not_near_does_not_look_inside_the_hit():
+    profile = terms.parse({"term": [{"match": "Kranich", "fuzzy": 0, "not_near": ["Kran"]}]})
+    assert [h.text for h in _doc(["Das Projekt Kranich startet"]).find(profile)] == ["Kranich"]
+    assert not _doc(["Der Baukran neben Kranich"]).find(profile).hits
+
+
+def test_not_near_vetoes_in_either_reading_order():
+    page = _two_columns(
+        [
+            ("Der Falke", "Die Kantine bleibt am Freitag wegen Umbau geschlossen"),
+            ("Vogelschutz im Park.", "und Anmeldungen nimmt das Sekretariat entgegen"),
+        ]
+    )
+    profile = terms.parse(
+        {"term": [{"match": "Falke", "fuzzy": 0, "not_near": ["Vogelschutz"], "window": 20}]}
+    )
+    assert not Document(source="t", pages=(page,), elapsed_ms=0.0).find(profile).hits
+
+
+def test_a_regex_respects_whole_words():
+    hits = _found(["KD-1234567 und XKD-123456 und KD-123456."])
+    assert [h[1] for h in hits if h[0] == "Kunde"] == ["KD-123456"]
+    loose = terms.parse({"term": [{"regex": r"KD-\d{6}", "whole_words": False}]})
+    assert len(_doc(["KD-1234567"]).find(loose).hits) == 1
+
+
+def test_a_regex_over_a_hyphenated_word_and_a_broken_number():
+    profile = terms.parse({"term": [{"name": "K", "regex": r"Kundennummer KD-\d{6}"}]})
+    hits = _doc(["Ihre Kunden-", "nummer KD-12", "3456 bitte"]).find(profile)
+    assert [h.text for h in hits] == ["Kunden\nnummer KD-12\n3456"]
+
+
+def test_symbols_in_a_phrase_do_not_shift_the_case_check():
+    profile = terms.parse({"term": [{"match": "Temperatur ℃ Max", "case": True}]})
+    assert len(_doc(["Temperatur ℃ Max"]).find(profile).hits) == 1
+    rooms = terms.parse({"term": [{"match": "3½ Zimmer"}]})
+    assert [h.text for h in _doc(["Die 3½ Zimmer Wohnung"]).find(rooms)] == ["3½ Zimmer"]
+
+
+def test_an_umlaut_written_decomposed():
+    profile = terms.parse({"term": [{"match": "Müller", "case": True}]})
+    assert len(_doc(["Herr Mu\u0308ller kam"]).find(profile).hits) == 1
+
+
+def test_search_gives_a_box_per_row_for_a_joined_word():
+    from ocrust import Word
+
+    words = (
+        Word("Brand-", Box(850, 100, 920, 130), 0.99),
+        Word("meldezentrale", Box(206, 140, 362, 170), 0.99),
+    )
+    line = Line(
+        text="Brandmeldezentrale",
+        box=Box(206, 100, 920, 170),
+        confidence=0.99,
+        angle=0.0,
+        words=words,
+    )
+    page = Page(
+        index=0,
+        width=1654,
+        height=2338,
+        rotation=0.0,
+        origin="image",
+        blocks=(Block(kind="paragraph", box=line.box, lines=(line,)),),
+        elapsed_ms=0.0,
+    )
+    (match,) = Document(source="t", pages=(page,), elapsed_ms=0.0).search("Brandmeldezentrale")
+    assert [b.as_tuple() for b in match.boxes] == [(850, 100, 920, 130), (206, 140, 362, 170)]
 
 
 def test_every_hit_has_a_box_per_line():
@@ -706,3 +798,52 @@ def test_scan_each_does_not_read_a_generator_ahead(engine, letters):
 
     first = next(engine.scan_each(paths(), chunk=1))
     assert first[0] == letters / "a_brief.pdf"
+
+
+def test_a_severity_gate_needs_terms(letters, capsys):
+    code = main(["vs", str(letters / "a_brief.pdf"), "--fail-on", "high", "-q"])
+    assert code == 2
+    assert "term severity" in capsys.readouterr().err
+
+
+def test_the_report_may_not_be_an_input(letters, tmp_path, capsys):
+    copy = tmp_path / "a.pdf"
+    copy.write_bytes((letters / "a_brief.pdf").read_bytes())
+    before = copy.read_bytes()
+    assert main(["find", str(tmp_path), "--term", "Adler", "-f", "jsonl", "-o", str(copy)]) == 2
+    assert main(["scan", str(copy), "-o", str(copy)]) == 2
+    assert copy.read_bytes() == before
+
+
+def test_resume_keeps_a_last_record_that_only_lacks_its_line_end(engine, letters, tmp_path):
+    report = tmp_path / "hits.jsonl"
+    brief = str(letters / "a_brief.pdf")
+    args = ["--term", "Adler", "-f", "jsonl", "-o", str(report), "-q"]
+    main(["find", brief, *args])
+    report.write_text(report.read_text(encoding="utf-8").rstrip("\n"), encoding="utf-8")
+    main(["find", str(letters), *args, "--resume"])
+    sources = [json.loads(line)["source"] for line in report.read_text().splitlines()]
+    assert sources.count(brief) == 1 and len(sources) == 2
+
+
+def test_a_report_is_written_through_a_link(tmp_path):
+    from ocrust.cli import _write
+
+    real = tmp_path / "real.txt"
+    real.write_text("alt", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    _write(link, "neu")
+    assert link.is_symlink()
+    assert real.read_text(encoding="utf-8") == "neu"
+
+
+def test_scan_each_takes_one_image_as_one_source(engine):
+    np = pytest.importorskip("numpy")
+    image = np.full((40, 60, 3), 255, dtype=np.uint8)
+    assert len(list(engine.scan_each(image))) == 1
+
+
+def test_scan_each_gives_each_source_back_as_given(engine, letters):
+    given = [str(letters / "a_brief.pdf"), str(letters / "b_rechnung.pdf")]
+    assert [source for source, _ in engine.scan_each(given)] == given

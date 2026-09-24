@@ -505,7 +505,7 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         reader.add_argument(
             "--max-pixels",
-            type=_whole(0),
+            type=_whole(0, 10**15),
             metavar="N",
             help="refuse images larger than N pixels, a decompression-bomb guard "
             "(default: about 179 million; 0 removes it)",
@@ -644,6 +644,19 @@ def _write(target: Path, data: bytes | str, *, retries: int = 2, delay: float = 
     writes hundreds of small files, and one dropped SMB connection would
     otherwise end the run. Folders a mirrored batch needs are created here.
     """
+    if target.exists() and not target.is_file():
+        # A device or a pipe (`-o /dev/stdout`, a FIFO): there is nothing to
+        # replace atomically, and replacing it would be wrong. Write into it.
+        if isinstance(data, str):
+            with target.open("w", encoding="utf-8") as handle:
+                handle.write(data)
+        else:
+            with target.open("wb") as handle:
+                handle.write(data)
+        return
+    if target.is_symlink():
+        # Write where the link points; the link stays a link.
+        target = target.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(f".{target.name}.{os.getpid()}.part")
     for attempt in range(retries + 1):
@@ -833,11 +846,29 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     inputs = [path for path in inputs if path not in blocked]
     if not inputs:
         return 1
+    targets = [destination.target_for(path, args.format) for path in inputs]
+    overwritten = _overwrites_input([t for t in targets if t is not None], inputs)
+    if overwritten is not None:
+        _fail(f"{overwritten} is an input; writing to it would destroy it before it is read")
+        return 2
 
     args._resolved_workers = _workers_for(args, len(inputs))
     engine = _engine_from_args(args)
     status = _scan_batch(args, engine, inputs, pages, destination)
     return max(status, 1) if blocked else status
+
+
+def _overwrites_input(targets: Sequence[Path], inputs: Sequence[Path]) -> Path | None:
+    """The first output that is one of the inputs, if any."""
+
+    def key(path: Path) -> str:
+        try:
+            return os.path.normcase(str(path.resolve()))
+        except OSError:  # pragma: no cover - an unreachable share
+            return os.path.normcase(str(path))
+
+    read = {key(p) for p in inputs if str(p) != STDIN}
+    return next((t for t in targets if key(t) in read), None)
 
 
 class _Destination:
@@ -1773,7 +1804,20 @@ def _already_done(report: Path) -> dict[str, dict[str, Any]]:
             done[str(record["source"])] = record
     if (lines and not done) or (fragment.strip() and not fragment.lstrip().startswith("{")):
         raise _bad_argument(f"--resume: {report} is not a JSON Lines report of ocrust")
-    if fragment:
+    try:
+        last = json.loads(fragment) if fragment.strip() else None
+    except json.JSONDecodeError:
+        last = None
+    if isinstance(last, dict) and "source" in last:
+        # A whole record that only lacks its line end: keep it, end the line.
+        done[str(last["source"])] = last
+        try:
+            with report.open("ab") as fh:
+                fh.write(b"\n")
+        except OSError as exc:
+            reason = exc.strerror or exc
+            raise _bad_argument(f"--resume: cannot repair {report}: {reason}") from None
+    elif fragment:
         keep = len((complete + newline).encode("utf-8"))
         try:
             with report.open("r+b") as fh:
@@ -2001,6 +2045,11 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
     if not marking and profile is None:
         _fail("nothing to look for: give --terms FILE or --term PHRASE (or --markings)")
         return 2
+    if profile is None:
+        severity = next((g.spec for g in requested_gates if g.severity is not None), None)
+        if severity is not None:
+            _fail(f"--fail-on {severity} is a term severity: give --terms FILE or --term PHRASE")
+            return 2
     gates = _gates(args, marking, profile, command)
     if args.output is not None:
         # Found out now, not after an hour of scanning.
@@ -2023,6 +2072,9 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
     if missing:
         for path, reason in missing:
             _fail(f"{path}: {reason}")
+        return 2
+    if args.output is not None and _overwrites_input([args.output], inputs) is not None:
+        _fail(f"-o {args.output} is an input; writing the report would destroy it")
         return 2
     if shard is not None:
         roots = _walk_roots(requested)

@@ -165,11 +165,12 @@ doc.search("EUR", whole_words=True)
 doc.search("Grüße", case=True)
 ```
 
-`search` returns a tuple of `Match(text, page, box, line)`. `page` is the page's
-own `index`, so a hit still names the right page of the source document when only
-some pages were scanned. The box is the union of the *words* the hit covers, which
-is what makes highlighting possible; without word boxes (`word_boxes=False`) it is
-the line's box. Matching is case-insensitive by default, because OCR case is not
+`search` returns a tuple of `Match(text, page, box, line, boxes)`. `page` is the
+page's own `index`, so a hit still names the right page of the source document
+when only some pages were scanned. The box is the union of the *words* the hit
+covers, which is what makes highlighting possible; without word boxes
+(`word_boxes=False`) it is the line's box. `boxes` has one box per row of print:
+two for a word hyphenated at a line end, which the layout joins into one line. Matching is case-insensitive by default, because OCR case is not
 reliable enough to search on. The query is normalized to composed Unicode first,
 so `Grüße` typed on a Mac — where `ü` often arrives as `u` plus a combining
 diaeresis — still finds the text.
@@ -228,7 +229,7 @@ Line(text, box, confidence, angle, margin, words, polygon, segments)
 Segment(text, box, confidence)   # a detector box, before it became part of a line
 Word(text, box, confidence)
 Box(x0, y0, x1, y1)  .width  .height  .as_tuple()
-Match(text, page, box, line)
+Match(text, page, box, line, boxes)
 ```
 
 All coordinates are pixels in the **preprocessed** page image, whose size is
@@ -313,14 +314,16 @@ except ocrust.OcrustError as exc:
     print(exc)   # invalid configuration: the recognition model cannot write Russian …
 ```
 
-Unreadable files raise `IOError` or `ValueError`, so a batch loop can tell "this
-file is broken" from "the engine is misconfigured":
+A file that cannot be read raises `OSError` (it cannot be opened), `ValueError`
+(it is not a document ocrust can decode) or `OcrustError` (it opened, but a page
+could not be read — a damaged PDF, say). The engine's own configuration fails
+when the `Ocr` is built, so a loop over files can catch all three:
 
 ```python
 for path in paths:
     try:
         print(ocrust.read(path))
-    except (IOError, ValueError) as exc:
+    except (OSError, ValueError, ocrust.OcrustError) as exc:
         print(f"{path}: skipped ({exc})")
 ```
 

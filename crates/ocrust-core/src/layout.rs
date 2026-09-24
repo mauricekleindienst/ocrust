@@ -767,6 +767,28 @@ fn classify_block(lines: &[Line], text_height: f32, cfg: &LayoutConfig) -> Block
     BlockKind::Paragraph
 }
 
+/// Words that follow a suspended hyphen: "Vor- und Nachname", "Ein- oder
+/// Ausgang", "pre- and post-processing". A line that ends in a hyphen and goes
+/// on with one of these has no word broken across it.
+const AFTER_SUSPENDED_HYPHEN: &[&str] = &[
+    "und",
+    "oder",
+    "bzw",
+    "sowie",
+    "bis",
+    "noch",
+    "resp",
+    "respektive",
+    "wie",
+    "als",
+    "u",
+    "o",
+    "and",
+    "or",
+    "nor",
+    "to",
+];
+
 /// Joins words broken by a hyphen at a line end.
 fn dehyphenate(lines: &mut Vec<Line>) {
     let mut i = 0;
@@ -775,13 +797,15 @@ fn dehyphenate(lines: &mut Vec<Line>) {
             .text
             .trim_end()
             .ends_with(['-', '\u{2010}', '\u{00ad}']);
-        let next_starts_lower = lines[i + 1]
-            .text
-            .trim_start()
+        let next = lines[i + 1].text.trim_start();
+        let next_starts_lower = next.chars().next().is_some_and(|c| c.is_lowercase());
+        let first_word: String = next.chars().take_while(|c| c.is_alphabetic()).collect();
+        let suspended = next[first_word.len()..]
             .chars()
             .next()
-            .is_some_and(|c| c.is_lowercase());
-        if ends_hyphen && next_starts_lower {
+            .is_none_or(|c| !c.is_alphanumeric())
+            && AFTER_SUSPENDED_HYPHEN.contains(&first_word.as_str());
+        if ends_hyphen && next_starts_lower && !suspended {
             let tail = lines.remove(i + 1);
             let head = &mut lines[i];
             let stem = head.text.trim_end();
@@ -1257,6 +1281,24 @@ mod tests {
         ];
         let blocks = group_blocks(lines, &LayoutConfig::default());
         assert_eq!(blocks[0].text(), "Zusammenfassung folgt");
+    }
+
+    #[test]
+    fn a_suspended_hyphen_is_not_a_broken_word() {
+        for (head, tail, joined) in [
+            ("Ihren Vor-", "und Nachnamen", "Ihren Vor-\nund Nachnamen"),
+            ("Ein-", "oder Ausgang", "Ein-\noder Ausgang"),
+            ("pre-", "and post-processing", "pre-\nand post-processing"),
+            // "und" as the start of a longer word is a broken word after all
+            ("Verb-", "undenkbar", "Verbundenkbar"),
+        ] {
+            let lines = vec![
+                line_at(head, 0.0, 0.0, 100.0, 10.0),
+                line_at(tail, 0.0, 12.0, 100.0, 22.0),
+            ];
+            let blocks = group_blocks(lines, &LayoutConfig::default());
+            assert_eq!(blocks[0].text(), joined);
+        }
     }
 
     #[test]
