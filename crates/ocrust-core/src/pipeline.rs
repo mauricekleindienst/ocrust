@@ -448,6 +448,7 @@ impl Engine {
                 index,
                 image,
                 origin: crate::doc::PageOrigin::PdfPage,
+                text: None,
             };
             self.scan_page_inner(raw, page_options.clone())
         })
@@ -505,7 +506,7 @@ impl Engine {
         let mut doc = Document::new(label);
         let mut encoded = Vec::new();
         for source in sources {
-            ingest::open(source, &self.config.ingest)?.for_each_page(&mut |raw| {
+            ingest::open(source, &self.pixel_ingest())?.for_each_page(&mut |raw| {
                 let options = PageOptions {
                     // Needed here regardless of how the engine is configured.
                     keep_image: true,
@@ -546,7 +547,7 @@ impl Engine {
         let mut writer = crate::export::tiff::Writer::new(opts)?;
         // Each page is encoded and let go before the next is read, so a 100-page
         // conversion costs one page of pixels rather than a hundred.
-        ingest::open(source, &self.config.ingest)?.for_each_page(&mut |raw| {
+        ingest::open(source, &self.pixel_ingest())?.for_each_page(&mut |raw| {
             let options = PageOptions {
                 // Needed here regardless of how the engine is configured.
                 keep_image: true,
@@ -561,6 +562,44 @@ impl Engine {
         })?;
         doc.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok((writer.finish()?, doc))
+    }
+
+    /// The ingest settings for a conversion that needs every page's pixels —
+    /// a searchable PDF, a TIFF — whatever the engine says about text layers.
+    fn pixel_ingest(&self) -> IngestConfig {
+        IngestConfig {
+            #[cfg(feature = "pdf")]
+            pdf_text: crate::ingest::pdftext::PdfText::Never,
+            ..self.config.ingest.clone()
+        }
+    }
+
+    /// A page read from its PDF text layer: the same layout as a recognized
+    /// page, from lines that are exact rather than recognized.
+    fn text_page(&self, index: usize, text: crate::ingest::TextPage, started: Instant) -> Page {
+        let ordered = layout::reading_order(text.lines, &self.config.layout);
+        let blocks = layout::group_exact_blocks(ordered, &self.config.layout);
+        let signals: Vec<crate::quality::LineSignals> = blocks
+            .iter()
+            .flat_map(|block| block.lines.iter())
+            .map(|line| crate::quality::LineSignals {
+                chars: line.text.chars().count(),
+                confidence: line.confidence,
+                margin: line.margin,
+                height_ratio: line.bbox.height() / text.height.max(1) as f32,
+            })
+            .collect();
+        Page {
+            quality: crate::quality::page_quality(&signals),
+            index,
+            width: text.width,
+            height: text.height,
+            rotation: 0.0,
+            origin: crate::doc::PageOrigin::PdfText,
+            blocks,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            image: None,
+        }
     }
 
     /// Rotates a sideways page upright, when the box geometry says so.
@@ -600,6 +639,9 @@ impl Engine {
     /// Runs the full per-page pipeline with per-call overrides.
     fn scan_page_inner(&self, raw: RawPage, options: PageOptions) -> Result<Page> {
         let started = Instant::now();
+        if let Some(text) = raw.text {
+            return Ok(self.text_page(raw.index, text, started));
+        }
         let prepared = prepare(raw.image, &options.preprocess);
         let mut image = prepared.image;
         let mut page_rotation = prepared.rotation;

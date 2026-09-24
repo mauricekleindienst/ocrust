@@ -100,6 +100,7 @@ impl PyEngine {
         languages = None,
         read_stamps = false,
         tick_boxes = false,
+        pdf_text = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -132,8 +133,17 @@ impl PyEngine {
         languages: Option<Vec<String>>,
         read_stamps: bool,
         tick_boxes: bool,
+        pdf_text: Option<&str>,
     ) -> PyResult<Self> {
         let mut config = EngineConfig::new();
+        if let Some(mode) = pdf_text {
+            config.ingest.pdf_text = ocrust_core::ingest::pdftext::PdfText::parse(mode)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "pdf_text {mode:?}: use \"never\", \"auto\" or \"always\""
+                    ))
+                })?;
+        }
         config.models.directory = models_dir;
         config.models.detection = detection_model;
         config.models.recognition = recognition_model;

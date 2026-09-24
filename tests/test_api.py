@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -445,6 +446,49 @@ def test_tables_can_be_turned_off(table_pdf):
     assert all(block.kind != "table" for block in doc.pages[0].blocks)
     # The text is still all there; only the grid is not read.
     assert "Widget A" in doc.text
+
+
+def test_a_born_digital_pdf_is_read_from_its_own_text(table_pdf, german_pdf_bytes):
+    """`pdf_text="auto"`: the text a PDF carries, exactly, and no recognition."""
+    exact = ocrust.Ocr(models_dir=os.environ.get("OCRUST_MODELS_DIR"), pdf_text="auto")
+    doc = exact.scan(table_pdf)
+    assert [page.origin for page in doc.pages] == ["pdf_text"]
+    table = doc.tables[0]
+    assert table.as_rows() == [
+        ["Position", "Menge", "Preis", "Summe"],
+        ["Widget A", "12", "49,90", "598,80"],
+        ["Widget B", "3", "233,70", "701,10"],
+        ["Kabel C", "7", "12,50", "87,50"],
+    ]
+    assert all(line.confidence == 1.0 for line in doc.lines)
+    # Umlauts, ß and the euro sign come from the font's encoding, not a guess.
+    german = exact.scan(german_pdf_bytes)
+    assert german.pages[0].origin == "pdf_text"
+    lines = [line.text for line in german.lines]
+    assert lines == [
+        "Grüße aus München",
+        "Beträge: 1.299,90 EUR",
+        "Français: déjà vu, ça coûte",
+        "Blåbær på Fyn",
+    ]
+
+
+def test_a_scan_with_a_text_layer_is_recognized_again_in_auto(engine, invoice_pdf):
+    """An OCR layer under a picture is someone else's reading; auto redoes it."""
+    layered = engine.searchable_pdf(invoice_pdf)
+    models = os.environ.get("OCRUST_MODELS_DIR")
+    auto = ocrust.Ocr(models_dir=models, pdf_text="auto").scan(layered)
+    assert auto.pages[0].origin == "pdf_page"
+    # `always` takes the layer as it is, invisible or not.
+    always = ocrust.Ocr(models_dir=models, pdf_text="always").scan(layered)
+    assert always.pages[0].origin == "pdf_text"
+    assert "INVOICE" in always.text
+
+
+def test_pdf_text_is_off_unless_asked_for(engine, table_pdf):
+    assert engine.scan(table_pdf).pages[0].origin == "pdf_page"
+    with pytest.raises(ocrust.OcrustError, match="pdf_text"):
+        ocrust.Ocr(models_dir=os.environ.get("OCRUST_MODELS_DIR"), pdf_text="sometimes")
 
 
 def test_a_merged_row_keeps_the_boxes_it_was_merged_from(engine, table_pdf):

@@ -11,7 +11,8 @@ use image::RgbImage;
 use crate::doc::PageOrigin;
 use crate::error::{Error, Result};
 
-use super::{IngestConfig, Password, RawPage};
+use super::pdftext::{self, PdfText};
+use super::{IngestConfig, Password, RawPage, TextPage};
 
 /// PDF user-space unit: 72 points per inch.
 const POINTS_PER_INCH: f32 = 72.0;
@@ -25,6 +26,7 @@ pub struct Renderer {
     pdf: hayro::hayro_syntax::Pdf,
     dpi: f32,
     max_side: u32,
+    text: PdfText,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -47,7 +49,74 @@ impl Renderer {
             pdf,
             dpi: cfg.pdf_dpi,
             max_side: cfg.pdf_max_side,
+            text: cfg.pdf_text,
         })
+    }
+
+    /// Hands each of `indices` to `sink` as a page to scan: read from its text
+    /// layer when that layer can stand for the page (see [`PdfText`]),
+    /// rendered to pixels otherwise.
+    pub fn read_each(
+        &self,
+        indices: &[usize],
+        sink: &mut dyn FnMut(RawPage) -> Result<()>,
+    ) -> Result<()> {
+        if self.text == PdfText::Never {
+            return self.render_each(indices, &mut |index, image| {
+                sink(RawPage {
+                    index,
+                    image,
+                    origin: PageOrigin::PdfPage,
+                    text: None,
+                })
+            });
+        }
+        let pages = self.pdf.pages();
+        let cache = RenderCache::new();
+        let fonts = hayro::hayro_interpret::InterpreterCache::new();
+        for &index in indices {
+            let page = pages
+                .get(index)
+                .ok_or_else(|| Error::Pdf(format!("the document has no page {}", index + 1)))?;
+            let scale = self.page_scale(page, index)?;
+            let layer = pdftext::read(page, &fonts, scale);
+            if layer.usable(self.text) {
+                let (width, height) = layer.size();
+                sink(RawPage {
+                    index,
+                    image: image::RgbImage::new(0, 0),
+                    origin: PageOrigin::PdfText,
+                    text: Some(TextPage {
+                        lines: layer.lines(self.text == PdfText::Always),
+                        width,
+                        height,
+                    }),
+                })?;
+                continue;
+            }
+            let image = render_page(page, index, &cache, scale)?;
+            sink(RawPage {
+                index,
+                image,
+                origin: PageOrigin::PdfPage,
+                text: None,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Pixels per point for `page`, or why it cannot be rendered.
+    fn page_scale(&self, page: &hayro::hayro_syntax::page::Page<'_>, index: usize) -> Result<f32> {
+        let media = page.media_box();
+        let w_pt = (media.x1 - media.x0) as f32;
+        let h_pt = (media.y1 - media.y0) as f32;
+        if !(w_pt > 0.0 && h_pt > 0.0) {
+            return Err(Error::Pdf(format!(
+                "page {} has an empty media box",
+                index + 1
+            )));
+        }
+        Ok(render_scale(w_pt, h_pt, self.dpi, self.max_side))
     }
 
     pub fn page_count(&self) -> usize {
@@ -74,45 +143,44 @@ impl Renderer {
             let page = pages
                 .get(index)
                 .ok_or_else(|| Error::Pdf(format!("the document has no page {}", index + 1)))?;
-            let media = page.media_box();
-            let w_pt = (media.x1 - media.x0) as f32;
-            let h_pt = (media.y1 - media.y0) as f32;
-            if !(w_pt > 0.0 && h_pt > 0.0) {
-                return Err(Error::Pdf(format!(
-                    "page {} has an empty media box",
-                    index + 1
-                )));
-            }
-
-            let scale = render_scale(w_pt, h_pt, self.dpi, self.max_side);
-            let settings = RenderSettings {
-                x_scale: scale,
-                y_scale: scale,
-                // hayro defaults to a transparent background; documents need
-                // white so that dropping the alpha channel does not turn the
-                // page black.
-                bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-                ..Default::default()
-            };
-            let pixmap = hayro::render(
-                page,
-                &cache,
-                &hayro::hayro_interpret::InterpreterSettings::default(),
-                &settings,
-            );
-
-            let (width, height) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
-            let rgb = drop_alpha(pixmap.data_as_u8_slice());
-            // The pixmap is four bytes a pixel and the image three; dropping it
-            // here keeps the page's transient cost to seven rather than ten.
-            drop(pixmap);
-            let image = RgbImage::from_raw(width, height, rgb).ok_or_else(|| {
-                Error::Pdf(format!("page {} produced an invalid pixmap", index + 1))
-            })?;
+            let scale = self.page_scale(page, index)?;
+            let image = render_page(page, index, &cache, scale)?;
             sink(index, image)?;
         }
         Ok(())
     }
+}
+
+/// Rasterizes one page at `scale` pixels per point, on white.
+fn render_page<'a>(
+    page: &'a hayro::hayro_syntax::page::Page<'a>,
+    index: usize,
+    cache: &RenderCache<'a>,
+    scale: f32,
+) -> Result<RgbImage> {
+    let settings = RenderSettings {
+        x_scale: scale,
+        y_scale: scale,
+        // hayro defaults to a transparent background; documents need
+        // white so that dropping the alpha channel does not turn the
+        // page black.
+        bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+        ..Default::default()
+    };
+    let pixmap = hayro::render(
+        page,
+        cache,
+        &hayro::hayro_interpret::InterpreterSettings::default(),
+        &settings,
+    );
+
+    let (width, height) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
+    let rgb = drop_alpha(pixmap.data_as_u8_slice());
+    // The pixmap is four bytes a pixel and the image three; dropping it
+    // here keeps the page's transient cost to seven rather than ten.
+    drop(pixmap);
+    RgbImage::from_raw(width, height, rgb)
+        .ok_or_else(|| Error::Pdf(format!("page {} produced an invalid pixmap", index + 1)))
 }
 
 /// Copies RGBA pixels into a tight RGB buffer.
@@ -141,6 +209,7 @@ pub fn load(data: &[u8], cfg: &IngestConfig) -> Result<Vec<RawPage>> {
             index,
             image,
             origin: PageOrigin::PdfPage,
+            text: None,
         });
         Ok(())
     })?;

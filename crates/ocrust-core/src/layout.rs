@@ -617,18 +617,44 @@ fn cmp_f32(a: f32, b: f32) -> std::cmp::Ordering {
 
 /// Groups ordered lines into blocks and classifies them.
 pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
+    group(lines, cfg, false)
+}
+
+/// [`group_blocks`] for lines read from a PDF's own text rather than
+/// recognized: each word's box closes up to its neighbours', and a line's
+/// cells are already cut into its segments, where no space glyph sat between
+/// them. The gaps between those segments are the page's gutters, however
+/// narrow — a browser sets a table's cells scarcely further apart than its
+/// words — so they, not the word spaces, set the width a column needs.
+pub(crate) fn group_exact_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
+    group(lines, cfg, true)
+}
+
+fn group(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Block> {
     if lines.is_empty() {
         return Vec::new();
     }
     let scale = median_height(&lines);
     let text_height = median_text_height(&lines);
+    let leading = if exact { usual_leading(&lines) } else { None };
 
     // Tables are looked for over the whole page, not inside each block. The
     // blocks come from vertical gaps, and a ruled form's rows are spaced widely
     // enough that the gap rule cuts its table in two; a word space, meanwhile, is
     // a property of the page rather than of one block.
     let tables = if cfg.detect_tables {
-        let gutter = crate::table::gutter_width(&lines, text_height);
+        let narrowest_cell_gap = lines
+            .iter()
+            .flat_map(|line| line.segments.windows(2))
+            .map(|pair| pair[1].bbox.x0 - pair[0].bbox.x1)
+            .filter(|gap| *gap > 0.0)
+            .reduce(f32::min);
+        let gutter = match narrowest_cell_gap {
+            // Half of it: two columns are two wherever white separates them,
+            // and a column's own ragged edge never opens that wide a gap.
+            Some(gap) if exact => (gap / 2.0).max(1.0),
+            _ => crate::table::gutter_width(&lines, text_height),
+        };
         crate::table::find(&lines, text_height, gutter)
     } else {
         Vec::new()
@@ -655,7 +681,7 @@ pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
         let after = lines.split_off(found.end);
         let table_lines = lines.split_off(found.start);
         if !after.is_empty() {
-            blocks.extend(paragraphs(after, scale, text_height, cfg));
+            blocks.extend(paragraphs(after, scale, text_height, leading, cfg));
         }
         blocks.push(Block {
             kind: BlockKind::Table,
@@ -667,14 +693,61 @@ pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
     }
     debug_assert!(lines.len() == tail);
     if !lines.is_empty() {
-        blocks.extend(paragraphs(lines, scale, text_height, cfg));
+        blocks.extend(paragraphs(lines, scale, text_height, leading, cfg));
     }
     blocks.reverse();
     blocks
 }
 
+/// Extra space between two lines, in line heights, that ends a paragraph on
+/// a page read from its own text: half a line less a little. A word processor
+/// sets six to eight points after an eleven-point paragraph, a browser a
+/// whole line; the lines inside one differ from each other by nothing.
+const EXACT_PARAGRAPH_SPACE: f32 = 0.4;
+/// A change of size, as a share of the taller line, that ends a paragraph on
+/// a page read from its own text: a heading set right above its text, with
+/// no space after it, is still a heading. Boxes there are exact, so a fifth
+/// is a change of font size, not a descender.
+const EXACT_SIZE_STEP: f32 = 0.2;
+
+/// How far apart, in line heights, the lines of a paragraph usually sit on a
+/// page read from its own text, or `None` with too few lines to tell.
+///
+/// The quarter point of the gaps between neighbouring lines of one size in
+/// one column: most such pairs are two lines of one paragraph, and the
+/// quarter point stays among them on a page of short paragraphs too.
+fn usual_leading(lines: &[Line]) -> Option<f32> {
+    let mut gaps: Vec<f32> = lines
+        .windows(2)
+        .filter_map(|pair| {
+            let (a, b) = (&pair[0].bbox, &pair[1].bbox);
+            let (ha, hb) = (a.height(), b.height());
+            let height = ha.min(hb).max(1.0);
+            let same_size = (ha - hb).abs() <= EXACT_SIZE_STEP * ha.max(hb);
+            let shares_column = b.horizontal_overlap(a) > 0.25 * a.width().min(b.width());
+            let gap = (b.y0 - a.y1) / height;
+            (same_size && shares_column && gap > -0.5 && gap < 1.5).then_some(gap)
+        })
+        .collect();
+    if gaps.len() < 3 {
+        return None;
+    }
+    gaps.sort_by(|a, b| cmp_f32(*a, *b));
+    Some(gaps[(gaps.len() - 1) / 4])
+}
+
 /// Groups lines into paragraphs, headings and list items by their vertical gaps.
-fn paragraphs(lines: Vec<Line>, scale: f32, text_height: f32, cfg: &LayoutConfig) -> Vec<Block> {
+///
+/// `leading` is [`usual_leading`] on a page read from its own text: there a
+/// paragraph ends where the lines open up by more than their usual spacing,
+/// or change size, whatever the gap measures in absolute terms.
+fn paragraphs(
+    lines: Vec<Line>,
+    scale: f32,
+    text_height: f32,
+    leading: Option<f32>,
+    cfg: &LayoutConfig,
+) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     let mut current: Vec<Line> = Vec::new();
 
@@ -685,7 +758,13 @@ fn paragraphs(lines: Vec<Line>, scale: f32, text_height: f32, cfg: &LayoutConfig
                 let gap = line.bbox.y0 - prev.bbox.y1;
                 let shares_column = line.bbox.horizontal_overlap(&prev.bbox)
                     > 0.25 * prev.bbox.width().min(line.bbox.width());
-                gap > scale * cfg.line_gap_factor || !shares_column
+                let set_apart = leading.is_some_and(|leading| {
+                    let (h0, h1) = (prev.bbox.height(), line.bbox.height());
+                    let height = h0.min(h1).max(1.0);
+                    gap / height - leading > EXACT_PARAGRAPH_SPACE
+                        || (h0 - h1).abs() > EXACT_SIZE_STEP * h0.max(h1)
+                });
+                gap > scale * cfg.line_gap_factor || !shares_column || set_apart
             }
         };
         if starts_new {
@@ -946,6 +1025,107 @@ mod tests {
 
     fn texts(lines: &[Line]) -> Vec<&str> {
         lines.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_page_read_from_its_text_breaks_paragraphs_at_extra_space() {
+        // Twelve-pixel lines at a fourteen-pixel pitch; seven pixels more
+        // after the first paragraph — far less than a line, as a word
+        // processor sets it — and a heading of a larger size set right
+        // above the text it heads.
+        let lines = vec![
+            line_at("Erster Absatz, erste Zeile", 0.0, 0.0, 300.0, 12.0),
+            line_at("und seine zweite Zeile", 0.0, 14.0, 280.0, 26.0),
+            line_at("und seine dritte.", 0.0, 28.0, 200.0, 40.0),
+            line_at("Zweiter Absatz, erste Zeile", 0.0, 49.0, 300.0, 61.0),
+            line_at("und seine zweite.", 0.0, 63.0, 200.0, 75.0),
+            line_at("Überschrift", 0.0, 84.0, 200.0, 102.0),
+            line_at("Text unter ihr", 0.0, 103.0, 200.0, 115.0),
+            line_at("in zwei Zeilen.", 0.0, 117.0, 200.0, 129.0),
+        ];
+        let cfg = LayoutConfig::default();
+        let starts = |blocks: &[Block]| -> Vec<String> {
+            blocks.iter().map(|b| b.lines[0].text.clone()).collect()
+        };
+        let exact = group_exact_blocks(lines.clone(), &cfg);
+        assert_eq!(
+            starts(&exact),
+            [
+                "Erster Absatz, erste Zeile",
+                "Zweiter Absatz, erste Zeile",
+                "Überschrift",
+                "Text unter ihr",
+            ]
+        );
+        // Recognized boxes vary too much for that: there only a gap of most
+        // of a line counts, and none of these is one.
+        assert_eq!(group_blocks(lines, &cfg).len(), 1);
+    }
+
+    #[test]
+    fn a_page_read_from_its_text_takes_its_gutters_from_its_cells() {
+        // Cells a third of a line apart, as a browser sets a bordered table:
+        // narrower than any gutter a recognized page would be allowed.
+        let row = |y: f32, cells: &[(&str, f32, f32)]| {
+            let mut line = line_at(
+                &cells.iter().map(|c| c.0).collect::<Vec<_>>().join(" "),
+                cells[0].1,
+                y,
+                cells[cells.len() - 1].2,
+                y + 12.0,
+            );
+            for &(text, x0, x1) in cells {
+                let bbox = Rect::new(x0, y, x1, y + 12.0);
+                line.words.push(crate::doc::Word {
+                    text: text.into(),
+                    bbox,
+                    confidence: 1.0,
+                });
+                line.segments.push(crate::doc::Segment {
+                    text: text.into(),
+                    bbox,
+                    confidence: 1.0,
+                });
+            }
+            line
+        };
+        let lines = vec![
+            row(
+                0.0,
+                &[
+                    ("Gewerk", 10.0, 60.0),
+                    ("Budget", 80.0, 130.0),
+                    ("Ist", 160.0, 180.0),
+                ],
+            ),
+            row(
+                15.0,
+                &[
+                    ("Elektro", 0.0, 50.0),
+                    ("120.000", 70.0, 130.0),
+                    ("98.500", 134.0, 180.0),
+                ],
+            ),
+            row(
+                30.0,
+                &[
+                    ("Trockenbau", 0.0, 66.0),
+                    ("45.000", 70.0, 118.0),
+                    ("47.200", 134.0, 180.0),
+                ],
+            ),
+        ];
+        let cfg = LayoutConfig::default();
+        let exact = group_exact_blocks(lines.clone(), &cfg);
+        let table = exact[0].table.as_ref().expect("a table");
+        assert_eq!((table.rows, table.columns), (3, 3));
+        let last: Vec<&str> = table
+            .cells
+            .iter()
+            .filter(|c| c.column == 2)
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(last, ["Ist", "98.500", "47.200"]);
     }
 
     #[test]

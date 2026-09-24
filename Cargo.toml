@@ -15,6 +15,7 @@ authors = ["ocrust contributors"]
 ocrust-core = { version = "0.2.7", path = "crates/ocrust-core", default-features = false }
 
 hayro = "0.7"
+kurbo = "0.13"
 image = "0.25"
 imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
 log = "0.4"

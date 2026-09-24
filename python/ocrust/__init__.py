@@ -312,6 +312,14 @@ class Ocr:
             each arrives as a block of kind ``"tick_box"`` reading ``☒`` or
             ``☐``. The recognizer reads the words beside a box but hardly
             ever the box, so "☐ offen ☒ VS-NfD" otherwise loses the choice.
+        pdf_text: Whether a PDF page's own text is read instead of
+            recognizing the page: ``"never"`` (the default), ``"auto"`` — the
+            text layer where it can stand for the page: visible text, mapped
+            to Unicode, on a page that is not mostly a picture; every other
+            page recognized — or ``"always"``, any text layer with readable
+            characters, an invisible OCR layer included. A page read from its
+            text layer has the origin ``"pdf_text"``, exact characters, and
+            costs milliseconds instead of a second.
         lang: Languages the documents are in (``"de"``, ``["de", "fr"]``,
             ``"de,fr"``). Building the engine fails when the recognition model
             cannot spell one of them, because a model that silently drops ``ö``
@@ -350,6 +358,7 @@ class Ocr:
         lang: str | Sequence[str] | None = None,
         read_stamps: bool = False,
         tick_boxes: bool = False,
+        pdf_text: str = "never",
     ) -> None:
         if isinstance(lang, str):
             languages = [part.strip() for part in lang.replace(",", " ").split() if part.strip()]
@@ -390,6 +399,7 @@ class Ocr:
             "languages": languages,
             "read_stamps": read_stamps,
             "tick_boxes": tick_boxes,
+            "pdf_text": pdf_text,
         }
         self._keeps_images = keep_page_images
         self._pdf_engine_cache: Any = None

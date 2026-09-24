@@ -38,6 +38,8 @@ pub enum PageOrigin {
     PdfPage,
     /// One frame of a multi-page TIFF.
     TiffFrame,
+    /// A PDF page read from its own text layer, not recognized.
+    PdfText,
 }
 
 /// A single word with its own box.

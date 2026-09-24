@@ -6,6 +6,8 @@
 
 #[cfg(feature = "pdf")]
 pub mod pdf;
+#[cfg(feature = "pdf")]
+pub mod pdftext;
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -53,12 +55,23 @@ impl Source {
     }
 }
 
-/// One page of pixels ready for preprocessing.
+/// One page of pixels ready for preprocessing — or, for a PDF page read from
+/// its text layer, the lines of that layer and no pixels at all.
 #[derive(Debug, Clone)]
 pub struct RawPage {
     pub index: usize,
     pub image: RgbImage,
     pub origin: PageOrigin,
+    /// The page's own text, when it is read instead of recognized.
+    pub text: Option<TextPage>,
+}
+
+/// A page's text layer, as lines placed in the pixels of the rendered page.
+#[derive(Debug, Clone)]
+pub struct TextPage {
+    pub lines: Vec<crate::doc::Line>,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// How to rasterize vector input.
@@ -93,6 +106,10 @@ pub struct IngestConfig {
     /// Password for encrypted PDFs. `None` opens only those that need none —
     /// which includes every PDF protected by an owner password alone.
     pub pdf_password: Option<Password>,
+    /// Whether a PDF page's own text layer is read instead of recognizing the
+    /// page. [`PdfText::Never`] by default.
+    #[cfg(feature = "pdf")]
+    pub pdf_text: pdftext::PdfText,
 }
 
 /// Default for [`IngestConfig::max_pixels`]: Pillow's `DecompressionBombError`
@@ -120,6 +137,8 @@ impl Default for IngestConfig {
             retry_delay_ms: 150,
             max_pixels: DEFAULT_MAX_PIXELS,
             pdf_password: None,
+            #[cfg(feature = "pdf")]
+            pdf_text: pdftext::PdfText::Never,
         }
     }
 }
@@ -330,6 +349,7 @@ impl Reader {
                         index,
                         image,
                         origin: PageOrigin::Image,
+                        text: None,
                     })?;
                 }
                 Ok(())
@@ -341,18 +361,13 @@ impl Reader {
                         index,
                         image,
                         origin: PageOrigin::Image,
+                        text: None,
                     })?;
                 }
                 Ok(())
             }
             #[cfg(feature = "pdf")]
-            Inner::Pdf(renderer) => renderer.render_each(indices, &mut |index, image| {
-                sink(RawPage {
-                    index,
-                    image,
-                    origin: PageOrigin::PdfPage,
-                })
-            }),
+            Inner::Pdf(renderer) => renderer.read_each(indices, sink),
             Inner::Tiff(frames) => {
                 for &index in indices.iter() {
                     let image = frames.frame(index).map_err(labelled)?;
@@ -360,6 +375,7 @@ impl Reader {
                         index,
                         image,
                         origin: PageOrigin::TiffFrame,
+                        text: None,
                     })?;
                 }
                 Ok(())
