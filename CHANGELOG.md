@@ -7,7 +7,7 @@ were reproduced, fixed with a test that fails without the fix, and handed back
 to be checked — including the fixes of the round before. Term-search accuracy
 on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
 
-236 Rust unit tests, 10 Rust end-to-end tests, 363 Python tests.
+236 Rust unit tests, 10 Rust end-to-end tests, 366 Python tests.
 
 ### Fixed
 
@@ -47,7 +47,12 @@ on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
   `XKD-123456`. A footnote mark after a match does not count as more word.
 - **A reader that left early changed the verdict**: `ocrust find … | head -1`
   exited 0 when a file had tripped the gate, so a `set -o pipefail` gate
-  passed. The exit status is what was found.
+  passed — also when only standard error was cut off (`2>&1 | head`). The
+  exit status is what was found.
+- **An output that could not be written** ended `ocrust scan`, `pdf`, `ocr` and
+  `tiff` with a traceback after all the OCR was done, and ended a `scan` batch.
+  It is one line now: exit 2, or in a `scan` batch that file's failure while
+  the rest go on. `tiff --sidecar` with a stream as `-o` is refused.
 - **`case = true` let spellings and edits through**: `MUELLER` and `mueller`
   were hits for `Müller`, `ADLLER` for `Adler`. Case is now checked letter by
   letter along the alignment; an umlaut written decomposed (`u` + U+0308)

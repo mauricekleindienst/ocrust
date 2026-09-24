@@ -963,3 +963,32 @@ def test_several_files_into_one_plain_file_is_refused(letters, tmp_path):
     target = tmp_path / "ausgabe"
     target.write_text("", encoding="utf-8")
     assert main(["scan", str(letters), "-o", str(target), "-q"]) == 2
+
+
+def test_a_closed_stderr_does_not_change_the_verdict(engine, letters, monkeypatch):
+    class Gone(io.StringIO):
+        def write(self, text):
+            raise BrokenPipeError
+
+        def fileno(self):
+            raise io.UnsupportedOperation
+
+    monkeypatch.setattr("sys.stderr", Gone())
+    brief = str(letters / "a_brief.pdf")
+    assert main(["find", brief, "--term", "Projekt Adler", "-f", "json", "-o", os.devnull]) == 3
+
+
+def test_an_output_that_cannot_be_written_is_one_line(engine, letters, tmp_path, capsys):
+    blocker = tmp_path / "datei"
+    blocker.write_text("", encoding="utf-8")
+    brief = str(letters / "a_brief.pdf")
+    assert main(["ocr", brief, "-o", str(blocker / "x.pdf"), "-q"]) == 2
+    assert main(["scan", brief, "-o", str(blocker / "x.txt"), "-q"]) == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and err.count(str(blocker)) == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="/dev/stdout is POSIX")
+def test_a_sidecar_needs_a_file_beside_it(letters):
+    args = ["tiff", str(letters / "a_brief.pdf"), "-o", "/dev/stdout", "--sidecar", "text"]
+    assert main(args) == 2

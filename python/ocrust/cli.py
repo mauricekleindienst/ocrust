@@ -154,12 +154,22 @@ def _fail(message: str) -> None:
     knows, the places it looked for a model — and a 350-column line is not a
     message, it is a wall.
     """
-    print(f"{_paint('ocrust:', 'red', 'bold')} {_wrap(message, 8)}", file=sys.stderr)
+    _tell(f"{_paint('ocrust:', 'red', 'bold')} {_wrap(message, 8)}")
 
 
 def _note(message: str) -> None:
     """A quiet aside: part of the report, not the result."""
-    print(_paint(message, "dim"), file=sys.stderr)
+    _tell(_paint(message, "dim"))
+
+
+def _tell(text: str) -> None:
+    """A line on stderr that a closed pipe cannot turn into a crash: when
+    `2>&1 | head` has stopped reading, the message is lost, and the exit
+    status the command decided is not."""
+    try:
+        print(text, file=sys.stderr)
+    except BrokenPipeError:
+        _silence(sys.stderr)
 
 
 def _duration(ms: float) -> str:
@@ -703,6 +713,16 @@ def _write(target: Path, data: bytes | str, *, retries: int = 2, delay: float = 
             time.sleep(delay * (2**attempt))
 
 
+def _save(target: Path, data: bytes | str, args: argparse.Namespace) -> bool:
+    """`_write`, with a failure said in one line instead of a traceback."""
+    try:
+        _write(target, data, retries=_io_retries(args))
+    except OSError as exc:
+        _fail(f"{target}: {exc.strerror or exc}")
+        return False
+    return True
+
+
 def _discard(path: Path) -> None:
     """Removes a temporary file if it is there; its absence is the goal."""
     with contextlib.suppress(OSError):
@@ -1109,7 +1129,9 @@ def _scan_batch(
             if not rendered.endswith("\n"):
                 sys.stdout.write("\n")
         else:
-            _write(target, rendered, retries=_io_retries(args))
+            if not _save(target, rendered, args):
+                failures += 1
+                continue
             if not args.quiet:
                 print(_arrow(path, target), file=sys.stderr)
 
@@ -1598,7 +1620,8 @@ def _cmd_pdf(args: argparse.Namespace) -> int:
         _fail(str(exc))
         return 1
     target = args.output or inputs[0].with_suffix(".ocr.pdf")
-    _write(target, data, retries=_io_retries(args))
+    if not _save(target, data, args):
+        return 2
     if not args.quiet:
         first = inputs[0] if len(inputs) == 1 else Path(f"{len(inputs)} inputs")
         print(_arrow(first, target), file=sys.stderr)
@@ -1654,7 +1677,8 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
         return 1
 
     target = args.output or args.input.with_suffix(".ocr.pdf")
-    _write(target, pdf, retries=_io_retries(args))
+    if not _save(target, pdf, args):
+        return 2
     if not args.quiet:
         print(_arrow(args.input, target), file=sys.stderr)
         print(
@@ -1683,6 +1707,9 @@ def _cmd_tiff(args: argparse.Namespace) -> int:
     if not args.input.exists():
         _fail(f"no such file: {args.input}")
         return 2
+    if args.sidecar and args.output is not None and _special_file(args.output):
+        _fail(f"--sidecar is written beside the TIFF; -o {args.output} is a stream, not a file")
+        return 2
     engine = Ocr(models_dir=args.models, pdf_dpi=args.dpi, lang=args.lang, **_guards(args))
     try:
         data, doc = engine.to_tiff(args.input, gray=args.gray, compression=args.compression)
@@ -1690,13 +1717,15 @@ def _cmd_tiff(args: argparse.Namespace) -> int:
         _fail(str(exc))
         return 1
     target = args.output or args.input.with_suffix(".ocr.tiff")
-    _write(target, data, retries=_io_retries(args))
+    if not _save(target, data, args):
+        return 2
     if not args.quiet:
         print(_arrow(args.input, target), file=sys.stderr)
         print(f"  {_count(len(doc.pages), 'page')}, {_size(len(data))}", file=sys.stderr)
     if args.sidecar:
         sidecar = target.with_suffix("." + _EXTENSIONS[args.sidecar])
-        _write(sidecar, doc.render(args.sidecar), retries=_io_retries(args))
+        if not _save(sidecar, doc.render(args.sidecar), args):
+            return 2
         if not args.quiet:
             print(_arrow(args.input, sidecar), file=sys.stderr)
     return 0
@@ -2316,7 +2345,7 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
         )
         if args.output:
             parts.append(f"report -> {args.output}")
-        print(_paint("done:", "rust", "bold") + " " + ", ".join(parts), file=sys.stderr)
+        _tell(_paint("done:", "rust", "bold") + " " + ", ".join(parts))
 
     if tripped or earlier_tripped:
         return _MARKED
@@ -2487,11 +2516,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _silence_stdout() -> None:
-    """Points a stdout whose reader left at the void: Python still holds it and
-    would print "Exception ignored" while flushing it at exit. A stdout without
+    _silence(sys.stdout)
+
+
+def _silence(stream: Any) -> None:
+    """Points a stream whose reader left at the void: Python still holds it and
+    would print "Exception ignored" while flushing it at exit. A stream without
     a file descriptor (a test harness, say) has nothing to redirect."""
-    with contextlib.suppress(OSError, ValueError):
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
 
 
 def _dispatch(args: argparse.Namespace) -> int:
