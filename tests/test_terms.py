@@ -992,3 +992,17 @@ def test_an_output_that_cannot_be_written_is_one_line(engine, letters, tmp_path,
 def test_a_sidecar_needs_a_file_beside_it(letters):
     args = ["tiff", str(letters / "a_brief.pdf"), "-o", "/dev/stdout", "--sidecar", "text"]
     assert main(args) == 2
+
+
+def test_a_closed_stderr_does_not_end_a_scan_batch(engine, letters, tmp_path, monkeypatch):
+    class Gone(io.StringIO):
+        def write(self, text):
+            raise BrokenPipeError
+
+        def fileno(self):
+            raise io.UnsupportedOperation
+
+    monkeypatch.setattr("sys.stderr", Gone())
+    out = tmp_path / "out"
+    assert main(["scan", str(letters), "-o", str(out)]) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["a_brief.txt", "b_rechnung.txt"]

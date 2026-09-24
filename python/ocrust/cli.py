@@ -162,12 +162,13 @@ def _note(message: str) -> None:
     _tell(_paint(message, "dim"))
 
 
-def _tell(text: str) -> None:
+def _tell(text: str = "", end: str = "\n", flush: bool = False) -> None:
     """A line on stderr that a closed pipe cannot turn into a crash: when
-    `2>&1 | head` has stopped reading, the message is lost, and the exit
-    status the command decided is not."""
+    `2>&1 | head` has stopped reading, the message is lost, and the batch and
+    the exit status the command decided are not. Every message of the command
+    line goes through here."""
     try:
-        print(text, file=sys.stderr)
+        print(text, end=end, file=sys.stderr, flush=flush)
     except BrokenPipeError:
         _silence(sys.stderr)
 
@@ -1086,10 +1087,10 @@ def _scan_batch(
         text = f"page {page + 1}/{total}, {lines} line(s)"
         if live:
             # Rewrite one line in place, and clear whatever was longer before it.
-            print(f"\r  {_paint(text, 'dim')}\033[K", end="", file=sys.stderr, flush=True)
+            _tell(f"\r  {_paint(text, 'dim')}\033[K", end="", flush=True)
         else:
             # A log or a pipe: `\r` would run the whole run together on one line.
-            print(f"  {text}", file=sys.stderr, flush=True)
+            _tell(f"  {text}", flush=True)
 
     progress = report if getattr(args, "progress", False) else None
 
@@ -1101,7 +1102,7 @@ def _scan_batch(
         if args.skip_existing and target is not None and target.exists():
             skipped += 1
             if not args.quiet:
-                print(f"  {_paint(f'{path}: already written', 'dim')}", file=sys.stderr)
+                _tell(f"  {_paint(f'{path}: already written', 'dim')}")
             continue
 
         try:
@@ -1121,7 +1122,7 @@ def _scan_batch(
 
         if progress is not None:
             # Leave the line to the summary that follows.
-            print("\r\033[K" if live else "", end="" if live else "\n", file=sys.stderr)
+            _tell("\r\033[K" if live else "", end="" if live else "\n")
 
         rendered = doc.render(args.format)
         if target is None:
@@ -1133,7 +1134,7 @@ def _scan_batch(
                 failures += 1
                 continue
             if not args.quiet:
-                print(_arrow(path, target), file=sys.stderr)
+                _tell(_arrow(path, target))
 
         total_pages += len(doc.pages)
         total_lines += len(doc.lines)
@@ -1151,7 +1152,7 @@ def _scan_batch(
                 body = f"{page_count}, {line_count}, {elapsed}"
             else:
                 body = f"{page_count}, no text found, {elapsed}"
-            print(f"  {body}", file=sys.stderr)
+            _tell(f"  {body}")
 
     if summarize and not args.quiet and len(inputs) > 1:
         done = len(inputs) - failures - skipped
@@ -1163,7 +1164,7 @@ def _scan_batch(
             total += f", {skipped} already written"
         if failures:
             total += f", {_paint(_count(failures, 'failure'), 'red')}"
-        print(_paint("done:", "rust", "bold") + " " + total, file=sys.stderr)
+        _tell(_paint("done:", "rust", "bold") + " " + total)
     return 1 if failures else 0
 
 
@@ -1263,7 +1264,7 @@ def _scan_watching(
             time.sleep(interval)
     except KeyboardInterrupt:
         if not args.quiet:
-            print(file=sys.stderr)
+            _tell()
             _note(f"stopped after {_count(len(done), 'file')}")
         return 1 if anything_failed else 0
 
@@ -1624,8 +1625,8 @@ def _cmd_pdf(args: argparse.Namespace) -> int:
         return 2
     if not args.quiet:
         first = inputs[0] if len(inputs) == 1 else Path(f"{len(inputs)} inputs")
-        print(_arrow(first, target), file=sys.stderr)
-        print(f"  {pages} page(s), {_size(len(data))}", file=sys.stderr)
+        _tell(_arrow(first, target))
+        _tell(f"  {pages} page(s), {_size(len(data))}")
     return 0
 
 
@@ -1635,10 +1636,9 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
         return 2
     data = args.input.read_bytes()
     if not data.startswith(b"%PDF"):
-        print(
+        _tell(
             f"ocrust: {args.input} is not a PDF; use `ocrust pdf` to build a searchable "
             "PDF from an image",
-            file=sys.stderr,
         )
         return 2
 
@@ -1680,25 +1680,22 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
     if not _save(target, pdf, args):
         return 2
     if not args.quiet:
-        print(_arrow(args.input, target), file=sys.stderr)
-        print(
+        _tell(_arrow(args.input, target))
+        _tell(
             f"  {report['pages_with_layer']} of {_count(report['pages'], 'page')} layered, "
             f"{report['pages_skipped']} skipped, {_count(report['lines'], 'line')}",
-            file=sys.stderr,
         )
         if report["pages_skipped"] == report["pages"] and report["pages"]:
             _note("  every page already had text: --force writes a layer anyway")
     if _password(args) and not args.quiet:
-        print(
+        _tell(
             "note: the output is written without password protection; "
             "encrypt it again if it has to stay locked",
-            file=sys.stderr,
         )
     if report["unmappable_chars"]:
-        print(
+        _tell(
             f"note: {report['unmappable_chars']} character(s) are outside WinAnsi and were "
             "written as '?' in the text layer (the visible page is unchanged)",
-            file=sys.stderr,
         )
     return 0
 
@@ -1720,14 +1717,14 @@ def _cmd_tiff(args: argparse.Namespace) -> int:
     if not _save(target, data, args):
         return 2
     if not args.quiet:
-        print(_arrow(args.input, target), file=sys.stderr)
-        print(f"  {_count(len(doc.pages), 'page')}, {_size(len(data))}", file=sys.stderr)
+        _tell(_arrow(args.input, target))
+        _tell(f"  {_count(len(doc.pages), 'page')}, {_size(len(data))}")
     if args.sidecar:
         sidecar = target.with_suffix("." + _EXTENSIONS[args.sidecar])
         if not _save(sidecar, doc.render(args.sidecar), args):
             return 2
         if not args.quiet:
-            print(_arrow(args.input, sidecar), file=sys.stderr)
+            _tell(_arrow(args.input, sidecar))
     return 0
 
 
@@ -2506,7 +2503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _fail(str(exc))
         return 1
     except KeyboardInterrupt:
-        print(file=sys.stderr)
+        _tell()
         _fail("interrupted")
         return 130
     except BrokenPipeError:
