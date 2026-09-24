@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 
 import pytest
 
@@ -402,16 +403,55 @@ def test_a_footnote_or_trademark_beside_a_term_is_not_part_of_it():
     profile = terms.parse({"term": [{"match": "Projekt Adler"}, {"match": "ORKA"}]})
     for line, text in (
         ("siehe Projekt Adler¹ unten", "Projekt Adler"),
-        ("siehe Projekt Adler1 unten", "Projekt Adler"),  # the ¹ read as a 1
         ("Wir nutzen ORKA™ seit 2020", "ORKA"),
     ):
         assert [h.text for h in _doc([line]).find(profile)] == [text], line
+
+
+def test_a_raised_digit_is_a_digit_set_apart():
+    profile = terms.parse({"term": [{"match": "120 m2"}, {"match": "CO₂"}]})
+    hits = _doc(["Fläche 120 m², Ausstoß CO2"]).find(profile)
+    assert [(h.text, h.how) for h in hits] == [("120 m²", ("exact",)), ("CO2", ("exact",))]
+    # CO₂ is not the Co. of a company name.
+    assert not _doc(["Müller & Co. KG"]).find(profile).hits
+
+
+def test_letters_and_digits_written_together_are_one_word():
+    profile = terms.parse(
+        {
+            "term": [
+                {"match": "Hafenstraße 12"},
+                {"match": "FS-220", "fuzzy": 0},
+                {"match": "VEGA", "fuzzy": 0},
+                {"match": "Adler"},
+            ]
+        }
+    )
+    for line in ("Hafenstraße 12a", "FS-220B", "VEGA2", "Adler1"):
+        assert not _doc([line]).find(profile).hits, line
+
+
+def test_a_long_term_that_lost_an_edge_letter_is_still_found():
+    profile = terms.parse({"term": [{"match": "Geheimhaltungsvereinbarung"}]})
+    assert len(_doc(["Die eheimhaltungsvereinbarung liegt bei"]).find(profile).hits) == 1
 
 
 def test_not_near_does_not_look_inside_the_hit():
     profile = terms.parse({"term": [{"match": "Kranich", "fuzzy": 0, "not_near": ["Kran"]}]})
     assert [h.text for h in _doc(["Das Projekt Kranich startet"]).find(profile)] == ["Kranich"]
     assert not _doc(["Der Baukran neben Kranich"]).find(profile).hits
+
+
+def test_not_near_is_not_spelled_across_a_gap_at_the_hit():
+    # "der Adler" reads DERADLER, which holds RADLER; the space says otherwise.
+    profile = terms.parse({"term": [{"match": "Adler", "not_near": ["Radler"]}]})
+    for line in ("Der Adler fliegt", "Herr Adler kam"):
+        assert [h.text for h in _doc([line]).find(profile)] == ["Adler"], line
+    inside = terms.parse(
+        {"term": [{"match": "Adler", "whole_words": False, "not_near": ["Adlerhorst"]}]}
+    )
+    assert [h.text for h in _doc(["Adler horstet"]).find(inside)] == ["Adler"]
+    assert not _doc(["Der Adlerhorst"]).find(inside).hits
 
 
 def test_not_near_vetoes_in_either_reading_order():
@@ -530,6 +570,8 @@ def test_profiles_load_from_toml_json_text_and_lists(tmp_path):
         ({"term": [{"match": "x", "markings": True}]}, "markings is a .settings. key"),
         ({"term": [{"match": "x", "category": ["a"]}]}, "category must be a string"),
         ({"term": [{"match": "x", "name": {"a": 1}}]}, "name must be a string"),
+        ({"term": [{"match": "x", "not_near": ["€"]}]}, "not_near '€' has no letters"),
+        ({"term": [{"match": "x", "near": ["§"]}]}, "near '§' has no letters"),
     ],
 )
 def test_a_bad_profile_says_what_is_wrong(data, message):
@@ -847,3 +889,35 @@ def test_scan_each_takes_one_image_as_one_source(engine):
 def test_scan_each_gives_each_source_back_as_given(engine, letters):
     given = [str(letters / "a_brief.pdf"), str(letters / "b_rechnung.pdf")]
     assert [source for source, _ in engine.scan_each(given)] == given
+
+
+@pytest.mark.skipif(os.name != "posix", reason="/dev/stdout is POSIX")
+def test_a_report_to_standard_output(engine, letters, capfd):
+    brief = str(letters / "a_brief.pdf")
+    assert main(["scan", brief, "-o", "/dev/stdout", "-q"]) == 0
+    assert "Weissmueller" in capfd.readouterr().out
+    main(["find", brief, "--term", "Adler", "-f", "jsonl", "-o", "/dev/stdout", "-q"])
+    assert json.loads(capfd.readouterr().out.splitlines()[0])["source"] == brief
+
+
+def test_a_hard_link_to_an_input_is_the_input(letters, tmp_path):
+    copy = tmp_path / "in" / "a.pdf"
+    copy.parent.mkdir()
+    copy.write_bytes((letters / "a_brief.pdf").read_bytes())
+    link = tmp_path / "report.jsonl"
+    try:
+        os.link(copy, link)
+    except OSError:  # pragma: no cover - a file system without hard links
+        pytest.skip("no hard links here")
+    before = copy.read_bytes()
+    args = ["find", str(copy.parent), "--term", "Adler", "-f", "jsonl", "-o", str(link), "-q"]
+    assert main(args) == 2
+    assert copy.read_bytes() == before
+
+
+def test_an_array_of_paths_is_not_an_image():
+    np = pytest.importorskip("numpy")
+    from ocrust import _is_image
+
+    assert _is_image(np.zeros((4, 4, 3), dtype=np.uint8))
+    assert not _is_image(np.array([["a.pdf"], ["b.pdf"]]))

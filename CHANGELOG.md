@@ -7,7 +7,7 @@ were reproduced, fixed with a test that fails without the fix, and handed back
 to be checked — including the fixes of the round before. Term-search accuracy
 on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
 
-236 Rust unit tests, 10 Rust end-to-end tests, 349 Python tests.
+236 Rust unit tests, 10 Rust end-to-end tests, 358 Python tests.
 
 ### Fixed
 
@@ -28,19 +28,21 @@ on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
   found something in, or could not read, now count.
 - **The layout joined a suspended hyphen**: "Vor- / und Nachnamen" became
   "Vorund Nachnamen", "Sicherheits- / und Brandschutz" "Sicherheitsund", in
-  every output format. A line end hyphen followed by und, oder, bzw., sowie,
-  bis, noch, and, or … is kept.
+  every output format. A line-end hyphen followed by und, oder, sowie, bis,
+  noch, wie, bzw., u. … and another word is kept; "Kon- / to 12345" is still
+  "Konto 12345".
 - **A term was found in another word.** With the default `fuzzy`, `Adler` was
   found in `Radler`, `Sadler` and `Adlers`, `Radler` in `Adler`,
   `Hafenstraße 120` in `Hafenstraße 12` — one edit each — although the
   documentation promises whole words. A letter too many or too few at an edge,
   that no reading can place inside the word, now rules the hit out; for a
   number any digit too many or too few at its edge does. A misreading inside
-  the word (`Opperation`) still counts.
-- **A mark beside a word hid it**: `ORKA™` and `Sentinel X4™` were not found, since
-  the Unicode fold turned the mark into letters glued to the word. Footnote
-  marks, fractions, ™ and ® now stand beside words, and a digit glued to a
-  word's end (`Adler1`) may end it.
+  the word (`Opperation`) still counts, and so does a first or last letter the
+  scan lost from a term longer than eight letters.
+- **A mark beside a word hid it**: `ORKA™` and `Sentinel X4™` were not found,
+  since the Unicode fold turned the mark into letters glued to the word. ™, ®
+  and ℃ now stand beside words; a raised or lowered digit is a digit set
+  apart, so `Adler¹` is `Adler` with a footnote and `m²` still reads `m2`.
 - **A regex ignored `whole_words`**: `KD-\d{6}` was found in `KD-1234567` and
   `XKD-123456`.
 - **`case = true` let spellings and edits through**: `MUELLER` and `mueller`
@@ -72,9 +74,11 @@ on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
   it turns markings on now. **A severity gate without terms** (`ocrust vs
   --fail-on high`) could never trip either; it is refused.
 - **`-o` naming one of the inputs destroyed it** before it was read, in `ocrust
-  find` and `ocrust scan`; it is refused.
+  find` and `ocrust scan` — also through a hard link; it is refused.
 - **`-o` through a link replaced the link**, and `-o /dev/stdout` or a named pipe
-  was replaced by a file; the report is written through them now.
+  was replaced by a file — or, in `ocrust scan`, taken for a folder. The report
+  is written through them now; standard output through the stream the process
+  already has, so a shell's `>>` is appended to, not truncated.
 - **`-o` naming a folder**, or a report that cannot be written, failed with a
   traceback after the whole scan; it is refused before scanning.
 - **A shard with no files** left no report for `-f json` and `-f csv`.
@@ -88,7 +92,9 @@ on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
   of characters, and one numpy image as a sequence of rows; a generator of
   sources was read to its end before the first result; paths given as strings
   came back as `Path` objects.
-- An inline `# comment` in a phrase list became part of the phrase.
+- An inline `# comment` in a phrase list became part of the phrase, and a
+  `near` or `not_near` word without a letter or digit (`€`) was found
+  everywhere; it is an error now.
 - A phrase joined across two columns the layout read as one line was `exact`;
   it is `split`.
 - A box drawn backwards made the column reading order loop for ever.

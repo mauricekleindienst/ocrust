@@ -644,14 +644,27 @@ def _write(target: Path, data: bytes | str, *, retries: int = 2, delay: float = 
     writes hundreds of small files, and one dropped SMB connection would
     otherwise end the run. Folders a mirrored batch needs are created here.
     """
-    if target.exists() and not target.is_file():
+    if _special_file(target):
         # A device or a pipe (`-o /dev/stdout`, a FIFO): there is nothing to
-        # replace atomically, and replacing it would be wrong. Write into it.
+        # replace atomically, and replacing it would be wrong. Standard output
+        # and error are written through the streams this process already has
+        # — reopening them would truncate a file the shell appends to, and
+        # may not be allowed at all; anything else is opened to append.
+        stream = _STANDARD_STREAMS.get(str(target))
+        if stream is not None:
+            handle = sys.stdout if stream == 1 else sys.stderr
+            if isinstance(data, str):
+                handle.write(data)
+            else:
+                handle.flush()
+                handle.buffer.write(data)
+            handle.flush()
+            return
         if isinstance(data, str):
-            with target.open("w", encoding="utf-8") as handle:
+            with target.open("a", encoding="utf-8") as handle:
                 handle.write(data)
         else:
-            with target.open("wb") as handle:
+            with target.open("ab") as handle:
                 handle.write(data)
         return
     if target.is_symlink():
@@ -858,8 +871,33 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     return max(status, 1) if blocked else status
 
 
+#: Paths that name this process's standard output (1) and error (2).
+_STANDARD_STREAMS = {
+    "/dev/stdout": 1,
+    "/dev/fd/1": 1,
+    "/proc/self/fd/1": 1,
+    "/dev/stderr": 2,
+    "/dev/fd/2": 2,
+    "/proc/self/fd/2": 2,
+}
+
+
+def _special_file(path: Path) -> bool:
+    """Whether `path` is a stream rather than a file to replace: a device or a
+    pipe, or anything under /dev or /proc — `/dev/stdout` is a regular file
+    when the shell sends standard output to one, and replacing that file
+    would lose what `>>` was appending to."""
+    if os.name == "posix" and str(path).startswith(("/dev/", "/proc/")):
+        return True
+    try:
+        return path.exists() and not path.is_file() and not path.is_dir()
+    except OSError:  # pragma: no cover - an unreachable share
+        return False
+
+
 def _overwrites_input(targets: Sequence[Path], inputs: Sequence[Path]) -> Path | None:
-    """The first output that is one of the inputs, if any."""
+    """The first output that is one of the inputs, if any — by path, or by
+    the file itself, which a hard link or a second mount also reaches."""
 
     def key(path: Path) -> str:
         try:
@@ -867,8 +905,22 @@ def _overwrites_input(targets: Sequence[Path], inputs: Sequence[Path]) -> Path |
         except OSError:  # pragma: no cover - an unreachable share
             return os.path.normcase(str(path))
 
-    read = {key(p) for p in inputs if str(p) != STDIN}
-    return next((t for t in targets if key(t) in read), None)
+    def identity(path: Path) -> tuple[int, int] | None:
+        try:
+            info = path.stat()
+        except OSError:
+            return None
+        return (info.st_dev, info.st_ino) if info.st_ino else None
+
+    sources = [p for p in inputs if str(p) != STDIN]
+    by_path = {key(p) for p in sources}
+    by_file = {i for i in (identity(p) for p in sources) if i is not None}
+    for target in targets:
+        if _special_file(target):
+            continue
+        if key(target) in by_path or identity(target) in by_file:
+            return target
+    return None
 
 
 class _Destination:
@@ -977,12 +1029,21 @@ def _destination(
 ) -> _Destination | None:
     """Resolves `--output` against the number of inputs, or reports why not."""
     many = inputs > 1 or bool(getattr(args, "watch", False))
+    if args.output is not None and _special_file(args.output):
+        # `-o /dev/stdout`, a named pipe: one stream, written into as it is.
+        if many:
+            _fail(f"-o {args.output}: several files need a folder to be written to")
+            return None
+        return _Destination(args.output, False, roots)
     if many and args.output and args.output.suffix:
         _fail("--output must be a directory when reading several files")
         return None
     # A path without a suffix is a directory: `-o out` writes out/<name>.<ext>,
     # so switching --format does not overwrite the previous run's output.
-    as_directory = bool(args.output) and (many or args.output.is_dir() or not args.output.suffix)
+    # An existing file without a suffix is a file, not a folder to create.
+    as_directory = bool(args.output) and (
+        many or args.output.is_dir() or (not args.output.suffix and not args.output.exists())
+    )
     if as_directory and args.output is not None:
         args.output.mkdir(parents=True, exist_ok=True)
     return _Destination(args.output, as_directory, roots)
@@ -2051,7 +2112,7 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
             _fail(f"--fail-on {severity} is a term severity: give --terms FILE or --term PHRASE")
             return 2
     gates = _gates(args, marking, profile, command)
-    if args.output is not None:
+    if args.output is not None and not _special_file(args.output):
         # Found out now, not after an hour of scanning.
         if args.output.is_dir():
             _fail(f"-o {args.output}: is a folder; give the report a file name")
@@ -2084,7 +2145,7 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
     # already tripped on, or could not read, count toward the exit status.
     earlier_tripped = earlier_unreadable = 0
     if args.resume:
-        if not streaming:
+        if not streaming or _special_file(args.output):
             _fail("--resume continues a JSON Lines report: use it with -f jsonl -o FILE")
             return 2
         done = _already_done(args.output)
@@ -2126,14 +2187,20 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
 
     buffer = io.StringIO()
     stream_file = None
-    if streaming:
+    standard = _STANDARD_STREAMS.get(str(args.output)) if streaming else None
+    if standard is not None:
+        stream_file = None
+        out: Any = sys.stdout if standard == 1 else sys.stderr
+    elif streaming:
         try:
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            stream_file = args.output.open("a" if args.resume else "w", encoding="utf-8")
+            # A device or a pipe is appended to, never truncated.
+            mode = "a" if args.resume or _special_file(args.output) else "w"
+            stream_file = args.output.open(mode, encoding="utf-8")
         except OSError as exc:
             _fail(f"{args.output}: {exc.strerror or exc}")
             return 2
-        out: Any = stream_file
+        out = stream_file
     else:
         out = buffer if args.output else sys.stdout
     writer = csv.DictWriter(out, fieldnames=_CSV_FIELDS) if args.format == "csv" else None
@@ -2193,7 +2260,7 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
                 print(json.dumps(record, ensure_ascii=False), file=out)
             elif args.format == "json":
                 records.append(record)
-            if out is sys.stdout or out is stream_file:
+            if out is sys.stdout or out is sys.stderr or out is stream_file:
                 out.flush()
     finally:
         if stream_file is not None:

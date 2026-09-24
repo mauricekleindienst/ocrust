@@ -208,7 +208,10 @@ def _is_image(obj: Any) -> bool:
     if hasattr(obj, "convert") and hasattr(obj, "size") and hasattr(obj, "tobytes"):
         return True
     shape = getattr(obj, "shape", None)
-    return shape is not None and hasattr(obj, "dtype") and len(shape) in (2, 3)
+    kind = getattr(getattr(obj, "dtype", None), "kind", None)
+    # Pixels are numbers; an array of paths (`df[["path"]].to_numpy()`) is not
+    # an image but a list of sources.
+    return shape is not None and kind in ("u", "i", "f", "b") and len(shape) in (2, 3)
 
 
 def _expand_sources(sources: Iterable[Any]) -> list[Any]:

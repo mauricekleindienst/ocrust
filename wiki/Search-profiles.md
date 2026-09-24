@@ -67,15 +67,19 @@ and end on a word boundary, so `Adler` is not in `Radler` or `Adlerhorst` — no
 in `Adlers`, and `Radler` is not in `Adler`: a letter too many or too few at an
 edge makes another word, not a misread one, whatever `fuzzy` allows. A letter
 that can be read inside the word is a misreading — the doubled `r` of `Adlerr`,
-the doubled `p` of `Opperation`. Numbers are strict at their edges:
-`Hafenstraße 120` is neither `Hafenstraße 12` nor `Hafenstraße 1200`. For
-inflected forms list them (`match = ["Adler", "Adlers"]`) or set
-`whole_words = false`.
+the doubled `p` of `Opperation` — and so is a first or last letter the scan
+lost from a term longer than eight letters (`eheimhaltungsvereinbarung`).
+Numbers are strict at their edges: `Hafenstraße 120` is neither
+`Hafenstraße 12` nor `Hafenstraße 1200`. Letters and digits written together
+are one word: `VEGA` is not in `VEGA2`, `Hafenstraße 12` not in
+`Hafenstraße 12a`. For inflected forms list them
+(`match = ["Adler", "Adlers"]`) or set `whole_words = false`.
 
-A mark set beside a word is not part of it — a footnote `Adler¹`, `ORKA™`, `®` —
-and neither is a digit glued to a word's end (`Adler1`, the footnote read as a
-1). A regular expression keeps to whole words too: `KD-\d{6}` is not found in
-`KD-1234567` or `XKD-123456`; set `whole_words = false` to find it inside.
+A mark set beside a word is not part of it: `ORKA™`, `®`, `℃`. A raised or
+lowered digit is a digit set apart from the word before it: `Adler¹` is the
+word `Adler` with a footnote, `m²` and `CO₂` read as `m2` and `CO2`. A regular
+expression keeps to whole words too: `KD-\d{6}` is not found in `KD-1234567`
+or `XKD-123456`; set `whole_words = false` to find it inside.
 
 With `case = true` every letter read in place of one of the term's must have
 its case, spellings included: `Mueller` is `Müller`, `MUELLER` is not.
@@ -278,8 +282,9 @@ Matching takes about 11 ms a page, next to about 1.6 s for reading it.
 - `near` and `not_near` look at letters to either side, not at sentences or
   pages. `not_near` also sees the word the hit is part of — with
   `whole_words = false`, `not_near = ["Adlerhorst"]` rules out the `Adler` in
-  `Adlerhorst` — but not the hit's own letters: `not_near = ["Kran"]` does not
-  rule out `Kranich`. Both are judged in each reading order: `near` holds if
+  `Adlerhorst` — but neither the hit's own letters (`not_near = ["Kran"]` does
+  not rule out `Kranich`) nor letters across a gap (`der Adler` does not spell
+  `Radler`). A `near` or `not_near` word needs a letter or digit. Both are judged in each reading order: `near` holds if
   either order puts the word beside the term (right above it in its column,
   though the layout read the next column in between), and `not_near` rules the
   hit out if either does.
