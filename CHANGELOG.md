@@ -2,10 +2,12 @@
 
 ## 0.2.7 — 2026-09-24
 
-Bugs found in 0.2.6 by an independent review, in rounds: each round's findings
-were reproduced, fixed with a test that fails without the fix, and handed back
-to be checked — including the fixes of the round before. Term-search accuracy
-on the independent set is unchanged: 99.8 % precision, 99.8 % recall.
+Bugs found in 0.2.6 by an independent review, in seven rounds: each round's
+findings were reproduced, fixed with a test that fails without the fix, and
+handed back to be checked — the fixes of the round before included — until a
+round found nothing left worth fixing. Term-search accuracy on the independent
+set is unchanged: 99.8 % precision, 99.8 % recall; classification markings
+unchanged on both of their sets.
 
 236 Rust unit tests, 10 Rust end-to-end tests, 367 Python tests.
 
