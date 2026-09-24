@@ -136,6 +136,7 @@ def archive_members(data: bytes) -> list[tuple[str, bytes]]:
         raise ConversionError("not a valid zip archive") from exc
     out: list[tuple[str, bytes]] = []
     seen: set[str] = set()
+    folded: set[str] = set()
     total = 0
     for info in archive.infolist()[:_MAX_MEMBERS]:
         name = info.filename.replace("\\", "/")
@@ -154,11 +155,22 @@ def archive_members(data: bytes) -> list[tuple[str, bytes]]:
             break
         total += len(content)
         clean = posixpath.normpath(name).lstrip("/")
-        if clean.startswith("../") or clean == ".." or clean.lower() in seen:
+        if clean.startswith("../") or clean == ".." or clean in seen:
             # Outside the archive, or a second entry of one name: the first
             # is the one kept.
             continue
-        seen.add(clean.lower())
+        seen.add(clean)
+        if clean.casefold() in folded:
+            # `Protokoll.txt` beside `protokoll.txt`: two files on Linux, one
+            # on Windows and macOS. The second is kept under a name of its own.
+            stem, dot, suffix = clean.rpartition(".")
+            if not dot or "/" in suffix:
+                stem, dot, suffix = clean, "", ""
+            counter = 2
+            while f"{stem}~{counter}{dot}{suffix}".casefold() in folded:
+                counter += 1
+            clean = f"{stem}~{counter}{dot}{suffix}"
+        folded.add(clean.casefold())
         out.append((clean, content))
     return out
 

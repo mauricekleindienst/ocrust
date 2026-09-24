@@ -152,7 +152,8 @@ class Converted:
 
 def _scan(data: bytes, ctx: Context, suffix: str, name: str) -> Note:
     if not ctx.options.ocr:
-        if suffix != ".pdf":
+        if suffix != ".pdf" or b"%PDF-" not in data[:1024]:
+            # A picture, whatever its name says: nothing to read without OCR.
             return Note(meta={"extraction": "none"})
         # A PDF's own text, and nothing recognized: no models needed, and a
         # scanned page stays empty.

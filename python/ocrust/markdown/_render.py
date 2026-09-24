@@ -103,13 +103,98 @@ def escape(text: str) -> str:
 
 def inline(content: Iterable[Inline], *, breaks: str = "  \n") -> str:
     """Inline content as Markdown; `breaks` is what a line break becomes."""
-    items = normalize(list(content))
+    items = _peeled(_joined_code(normalize(list(content))))
     out: list[str] = []
     for index, item in enumerate(items):
         after = _first_char(items[index + 1]) if index + 1 < len(items) else ""
         before = out[-1][-1:] if out and out[-1] else ""
-        out.append(_inline(item, breaks, before, after))
+        text = _inline(item, breaks, before, after)
+        if out and text:
+            previous = out[-1]
+            if text.startswith("[") and previous.endswith("!") and not previous.endswith("\\!"):
+                # `Neu!` right before a link would make it a picture.
+                out[-1] = previous[:-1] + "\\!"
+            elif isinstance(items[index - 1], FootnoteRef) and text[0] in "([:":
+                # `[^1](2019)` would read as a link, `[^1]:` as a footnote.
+                text = "\\" + text
+        out.append(text)
     return "".join(out)
+
+
+def _joined_code(items: list[Inline]) -> list[Inline]:
+    """Code spans right next to each other as one: two backtick fences that
+    touch are read as one longer fence."""
+    out: list[Inline] = []
+    for item in items:
+        if (
+            isinstance(item, Span)
+            and item.kind == "code"
+            and out
+            and isinstance(out[-1], Span)
+            and out[-1].kind == "code"
+        ):
+            out[-1] = Span("code", [*out[-1].children, *item.children])
+        else:
+            out.append(item)
+    return out
+
+
+_FORMATS = ("strong", "emph", "strike")
+
+
+def _peeled(items: list[Inline]) -> list[Inline]:
+    """Emphasis with the punctuation and white space at an edge that touches
+    a letter taken out of it: `**Hinweis:**Text` and `**Remarque :**le` stay
+    literal in CommonMark, `**Hinweis**:Text` does not. Nested emphasis gives
+    up its edges too."""
+    out: list[Inline] = []
+    for index, item in enumerate(items):
+        if not (isinstance(item, Span) and item.kind in _FORMATS):
+            out.append(item)
+            continue
+        after = _first_char(items[index + 1]) if index + 1 < len(items) else ""
+        before = _last_char(out[-1]) if out else ""
+        head = tail = ""
+        if after.isalnum():
+            item, tail = _peel(item, end=True)
+        if before.isalnum() and item.children:
+            item, head = _peel(item, end=False)
+        if head:
+            out.append(head)
+        if item.children:
+            out.append(item)
+        if tail:
+            out.append(tail)
+    return normalize(out)
+
+
+def _peel(span: Span, *, end: bool) -> tuple[Span, str]:
+    """`span` without the punctuation and white space at one end, and those."""
+    children = list(span.children)
+    taken = ""
+    while children:
+        at = -1 if end else 0
+        edge = children[at]
+        if isinstance(edge, str):
+            kept = edge
+            while kept and (kept[at].isspace() or _punctuation(kept[at])):
+                kept = kept[:-1] if end else kept[1:]
+            moved = edge[len(kept) :] if end else edge[: len(edge) - len(kept)]
+            taken = moved + taken if end else taken + moved
+            if kept:
+                children[at] = kept
+                break
+            children.pop(at)
+        elif isinstance(edge, Span) and edge.kind in _FORMATS:
+            inner, moved = _peel(edge, end=end)
+            taken = moved + taken if end else taken + moved
+            if inner.children:
+                children[at] = inner
+                break
+            children.pop(at)
+        else:
+            break
+    return Span(span.kind, children, span.url), taken
 
 
 def _first_char(item: Inline) -> str:
@@ -118,6 +203,14 @@ def _first_char(item: Inline) -> str:
     if isinstance(item, Span) and item.children:
         return _first_char(item.children[0])
     return ""
+
+
+def _last_char(item: Inline) -> str:
+    if isinstance(item, str):
+        return item[-1:]
+    if isinstance(item, Span) and item.children:
+        return ")" if item.kind == "link" else _last_char(item.children[-1])
+    return "]" if isinstance(item, FootnoteRef) else ""
 
 
 def _inline(item: Inline, breaks: str, before: str = "", after: str = "") -> str:
@@ -150,21 +243,24 @@ def _inline(item: Inline, breaks: str, before: str = "", after: str = "") -> str
         return inner
     lead = inner[: len(inner) - len(inner.lstrip())]
     trail = inner[len(inner.rstrip()) :]
-    # Only where it matters: `**Hinweis:**` before a space or at the end of a
-    # paragraph is fine as it is.
-    if not trail and after.isalnum():
-        while len(core) > 1 and _punctuation(core[-1]) and core[-2] != "\\":
-            trail = core[-1] + trail
-            core = core[:-1]
-    if not lead and before.isalnum():
-        while len(core) > 1 and _punctuation(core[0]) and core[0] != "\\":
-            lead = lead + core[0]
-            core = core[1:]
-    if (_punctuation(core[-1]) and not trail and after.isalnum()) or (
-        _punctuation(core[0]) and not lead and before.isalnum()
+    # Punctuation at an edge that touches a letter was taken out before (see
+    # `_peeled`); what is left there is markup — a code span, a link — or the
+    # markers of emphasis inside, which join this one's.
+    nested = marker[0] == "*"
+    last = item.children[-1] if item.children else None
+    first = item.children[0] if item.children else None
+    if (
+        _punctuation(core[-1])
+        and not trail
+        and after.isalnum()
+        and not (nested and isinstance(last, Span) and last.kind in ("strong", "emph"))
+    ) or (
+        _punctuation(core[0])
+        and not lead
+        and before.isalnum()
+        and not (nested and isinstance(first, Span) and first.kind in ("strong", "emph"))
     ):
-        # Nothing but punctuation, or an escape at the edge: emphasis would
-        # not take here, so the text goes without it.
+        # Emphasis would not take here, so the text goes without it.
         return lead + core + trail
     return f"{lead}{marker}{core}{marker}{trail}"
 

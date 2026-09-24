@@ -77,9 +77,15 @@ def _pdf_with_text(lines: list[tuple[str, int]], pages: int = 1, rotate: int = 0
 
 def _pdf_from_stream(stream: str, pages: int = 1, rotate: int = 0) -> bytes:
     """Wraps one content stream into a PDF of `pages` identical pages."""
+    return _pdf_from_streams([stream] * pages, rotate=rotate)
+
+
+def _pdf_from_streams(streams: list[str], rotate: int = 0) -> bytes:
+    """A PDF with a page for each content stream."""
     # Object layout: catalog, page tree, then one page + content per page,
     # with the font last.
     first_page_obj = 3
+    pages = len(streams)
     page_ids = [first_page_obj + 2 * i for i in range(pages)]
     font_id = first_page_obj + 2 * pages
     rotate_entry = f" /Rotate {rotate}" if rotate else ""
@@ -89,7 +95,7 @@ def _pdf_from_stream(stream: str, pages: int = 1, rotate: int = 0) -> bytes:
             " ".join(f"{pid} 0 R" for pid in page_ids), pages
         ),
     ]
-    for pid in page_ids:
+    for pid, stream in zip(page_ids, streams, strict=True):
         objects.append(
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]{rotate_entry} "
             f"/Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {pid + 1} 0 R >>"

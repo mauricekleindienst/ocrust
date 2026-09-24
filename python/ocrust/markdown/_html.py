@@ -193,6 +193,12 @@ class Element:
         )
 
 
+#: Elements open inside one another at most. A generated page that opens a
+#: `<font>` on every line and never closes one is read as a browser shows it,
+#: not refused as nested too deeply: past this depth, content stays where it is.
+_MAX_DEPTH = 100
+
+
 class _Builder(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -219,7 +225,7 @@ class _Builder(HTMLParser):
             self._close(closes, boundary)
         node = Element(tag, {k.lower(): v or "" for k, v in attrs})
         self.stack[-1].children.append(node)
-        if tag not in _VOID:
+        if tag not in _VOID and len(self.stack) < _MAX_DEPTH:
             self.stack.append(node)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:

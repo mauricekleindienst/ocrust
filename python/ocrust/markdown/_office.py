@@ -43,6 +43,7 @@ from ._ir import (
     strip,
     subscript,
     superscript,
+    verbatim,
 )
 from ._package import (
     ConversionError,
@@ -421,7 +422,7 @@ class _Word:
                 if items:
                     out.extend(_nest_items(items))
                     items.clear()
-                code.append(plain(entry.content))
+                code.append(verbatim(entry.content))
                 continue
             flush()
             if entry.heading and not is_empty(entry.content):
@@ -846,13 +847,27 @@ def _points(element: Element | None) -> dict[int, str]:
 
 
 def _number(text: str) -> str:
+    """A number as Excel shows it: to fifteen significant digits, which is
+    all a sheet keeps, without the noise of binary fractions (0.1 + 0.2), and
+    a whole number as long as it is exact."""
     try:
         value = float(text)
     except ValueError:
         return text
-    if math.isfinite(value) and value == int(value) and abs(value) < 1e15:
+    if math.isfinite(value) and value == int(value) and abs(value) <= 2**53:
         return str(int(value))
-    return format(value, ".10g")
+    return format(value, ".15g")
+
+
+_XSTRING = re.compile(r"_x([0-9A-Fa-f]{4})_")
+
+
+def _xstring(text: str) -> str:
+    """Text of a sheet with its escapes undone: `_x000D_` is a carriage
+    return, `_x005F_` the underscore that keeps a literal `_x...` apart."""
+    if "_x" not in text:
+        return text
+    return _XSTRING.sub(lambda m: chr(int(m.group(1), 16)), text)
 
 
 def _either(element: Element, first: str, second: str) -> Element | None:
@@ -1313,7 +1328,7 @@ class _Workbook:
             texts = [t.text or "" for t in children(si, "t")]
             for run in children(si, "r"):
                 texts.extend(t.text or "" for t in children(run, "t"))
-            self.shared.append("".join(texts))
+            self.shared.append(_xstring("".join(texts)))
 
     def _read_styles(self, part: str) -> None:
         root = self.package.xml(part)
@@ -1430,11 +1445,13 @@ class _Workbook:
         if kind == "inlineStr":
             inline_el = child(cell, "is")
             return (
-                "".join(t.text or "" for t in descendants(inline_el, "t"))
+                _xstring("".join(t.text or "" for t in descendants(inline_el, "t")))
                 if inline_el is not None
                 else ""
             )
-        if kind in ("str", "e", "d"):
+        if kind == "str":
+            return _xstring(raw)
+        if kind in ("e", "d"):
             return raw
         if kind == "b":
             return "TRUE" if raw.strip() in ("1", "true") else "FALSE"

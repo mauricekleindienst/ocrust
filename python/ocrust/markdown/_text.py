@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import csv
 import io
 import re
@@ -104,10 +105,21 @@ _ENUMERATOR = re.compile(r"^\s{0,3}(\d{1,3})[.)]\s+(.*)$")
 _FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n(.*?\r?\n)?---[ \t]*(\r?\n|\Z)", re.S)
 
 
+def _cp1252_fallback(error: UnicodeError) -> tuple[str, int]:
+    """Bytes that are not UTF-8 read as Windows-1252, each on its own: a line
+    pasted in from an old file does not turn every other umlaut to mojibake."""
+    assert isinstance(error, UnicodeDecodeError)
+    bad = error.object[error.start : error.end]
+    return bytes(bad).decode("cp1252", "replace"), error.end
+
+
+codecs.register_error("ocrust-cp1252", _cp1252_fallback)
+
+
 def decode_text(data: bytes) -> str:
-    """Bytes of a text file as text: by its byte order mark, as UTF-8 if it
-    is valid UTF-8, else as Windows-1252 — the other encoding text files
-    written in Western Europe come in."""
+    """Bytes of a text file as text: by its byte order mark, else as UTF-8,
+    with what is not UTF-8 read as Windows-1252 — the other encoding text
+    files written in Western Europe come in."""
     for bom, encoding in (
         (b"\xef\xbb\xbf", "utf-8"),
         (b"\xff\xfe\x00\x00", "utf-32-le"),
@@ -126,10 +138,7 @@ def decode_text(data: bytes) -> str:
             "utf-16-le" if odd >= sample[0::2].count(b"\x00") else "utf-16-be", "replace"
         )
         return text.replace("\r\n", "\n").replace("\r", "\n")
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        text = data.decode("cp1252", "replace")
+    text = data.decode("utf-8", "ocrust-cp1252")
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -213,6 +222,8 @@ def _chunk(lines: list[str], width: int) -> list[Block]:
     items = _list_items(lines)
     if items is not None:
         return items
+    if _records(lines):
+        return [Paragraph(_paragraph(lines, 0))]
     # A line that leads into a list — `Offene Punkte:` — then the list.
     for index in range(1, len(lines)):
         if _BULLET.match(lines[index]) or _ENUMERATOR.match(lines[index]):
@@ -222,6 +233,24 @@ def _chunk(lines: list[str], width: int) -> list[Block]:
                 return [Paragraph(_paragraph(lines[:index], width)), *rest]
             break
     return [Paragraph(_paragraph(lines, width))]
+
+
+_LEAD = re.compile(r"\S+")
+
+
+def _records(lines: list[str]) -> bool:
+    """Whether lines are records — a log, a list of names — rather than a
+    paragraph wrapped at a width: most of them begin with the same word, or
+    with a number of the same shape (a date, a time)."""
+    if len(lines) < 4:
+        return False
+    leads: dict[str, int] = {}
+    for line in lines:
+        found = _LEAD.search(line)
+        if found:
+            lead = re.sub(r"\d", "9", found.group().rstrip(",.:;"))
+            leads[lead] = leads.get(lead, 0) + 1
+    return max(leads.values(), default=0) >= 0.8 * len(lines)
 
 
 def _list_items(lines: list[str]) -> list[Block] | None:

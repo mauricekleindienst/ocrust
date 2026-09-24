@@ -198,6 +198,19 @@ def plain(content: list[Inline] | Block | list[Block]) -> str:
     return clean("".join(parts)).strip()
 
 
+def verbatim(content: list[Inline]) -> str:
+    """The text of inline content with its white space as it is — the
+    indentation of a line of code — and a line break as one."""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, Break):
+            parts.append("\n")
+        else:
+            _plain(item, parts)
+    lines = printable("".join(parts)).replace("\u00a0", " ").split("\n")
+    return "\n".join(line.rstrip() for line in lines).strip("\n")
+
+
 def _plain(item: Any, parts: list[str]) -> None:
     if isinstance(item, str):
         parts.append(item)

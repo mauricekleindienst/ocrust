@@ -417,9 +417,13 @@ def test_long_inputs_are_joined_in_linear_time():
     assert time.monotonic() - started < 15
 
 
-def test_what_breaks_a_reader_is_a_conversion_error():
+def test_what_breaks_a_reader_is_a_conversion_error(monkeypatch):
+    def deep(data: bytes, ctx: object) -> None:
+        raise RecursionError
+
+    monkeypatch.setitem(markdown._READERS, ".rtf", deep)
     with pytest.raises(markdown.ConversionError, match="nested too deeply"):
-        convert(("<table><tr><td>" * 2000).encode(), "tief.html")
+        convert(b"{\\rtf1 x}", "tief.rtf")
     big = ("a,b\n" + "x" * 200_000 + ",y\n").encode()
     assert "yyy" not in convert(big, "gross.csv").markdown
     raw = b"Subject: Test\r\nMessage-ID: <<<>>>\r\nContent-Type: text/plain\r\n\r\nInhalt\r\n"
@@ -713,3 +717,138 @@ def test_a_lock_is_taken_over_only_from_a_process_that_is_gone():
 
     assert _alive(os.getpid())
     assert not _alive(999_999_999)
+
+
+# -- second review round: what is read
+
+
+def test_excel_numbers_keep_every_digit_a_sheet_keeps():
+    rows = '<row r="1"><c r="A1" t="s"><v>0</v></c></row>' + "".join(
+        f'<row r="{i}"><c r="A{i}"><v>{v}</v></c></row>'
+        for i, v in enumerate(
+            ["123456789.12", "9876543210.55", "3.14159265358979", "1234567890123456"], 2
+        )
+    )
+    text = convert(xlsx({"Bilanz": rows}, ["Betrag"]), "b.xlsx").markdown
+    for value in ("123456789.12", "9876543210.55", "3.14159265358979", "1234567890123456"):
+        assert f"\n{value}\n" in text
+    rows = '<row r="1"><c r="A1"><v>0.30000000000000004</v></c></row>'
+    assert "\n0.3\n" in convert(xlsx({"S": rows}, []), "f.xlsx").markdown
+
+
+def test_excel_escapes_are_the_characters_they_stand_for():
+    rows = (
+        '<row r="1"><c r="A1" t="s"><v>0</v></c></row>'
+        '<row r="2"><c r="A2" t="inlineStr"><is><t>Lieferung_x000D_\nam Montag</t></is></c></row>'
+        '<row r="3"><c r="A3" t="s"><v>1</v></c></row>'
+    )
+    text = convert(xlsx({"S": rows}, ["Anmerkung", "a_x0009_b _x005F_x000D_"]), "e.xlsx").markdown
+    assert "Lieferung am Montag" in text and "a b \\_x000D\\_" in text
+
+
+def test_one_byte_that_is_not_utf8_leaves_the_rest_of_the_file_alone():
+    data = "Müller;München\n".encode() + "Café;Köln\n".encode("cp1252")
+    text = convert(data, "k.csv").markdown
+    assert "Müller" in text and "Café" in text and "Ã" not in text
+
+
+def test_a_log_keeps_a_line_for_each_record():
+    log = "".join(
+        f"2026-01-{d:02d} 12:00 INFO backup of server{d:02d} finished ok\n" for d in range(1, 9)
+    )
+    names = "Teilnehmer:\n" + "".join(f"Name {i}, Firma {chr(65 + i)}\n" for i in range(6))
+    assert len(body(convert(log.encode(), "b.txt").markdown).splitlines()) == 8
+    assert len(body(convert(names.encode(), "t.txt").markdown).splitlines()) == 7
+
+
+def test_code_styled_paragraphs_keep_their_indentation():
+    styles = (
+        '<w:style w:type="paragraph" w:styleId="SourceCode"><w:name w:val="Source Code"/></w:style>'
+    )
+    lines = ["def total(items):", "    s = 0", "    for i in items:", "        s += i"]
+    word = docx("".join(para(line, "SourceCode") for line in lines), styles=styles)
+    assert "```\n" + "\n".join(lines) + "\n```" in convert(word, "c.docx").markdown
+    content = (
+        f"<office:document-content {ODF_NS}><office:styles>"
+        '<style:style style:name="Pre" style:display-name="Preformatted Text" style:family="paragraph"/>'
+        "</office:styles><office:body><office:text>"
+        '<text:p text:style-name="Pre">if x:</text:p>'
+        '<text:p text:style-name="Pre"><text:s text:c="4"/>y()</text:p>'
+        "</office:text></office:body></office:document-content>"
+    )
+    odt = package({"mimetype": "application/vnd.oasis.opendocument.text", "content.xml": content})
+    assert "```\nif x:\n    y()\n```" in convert(odt, "c.odt").markdown
+
+
+def test_archive_members_differing_in_case_are_both_kept():
+    archive = package({"Protokoll.txt": "Montag", "protokoll.txt": "Dienstag"})
+    text = convert(archive, "p.zip").markdown
+    assert "Montag" in text and "Dienstag" in text and "protokoll~2.txt" in text
+
+
+def test_pictures_differing_in_case_are_kept_under_two_names(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"A" * 3000)
+    (tmp_path / "b" / "Logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"B" * 3000)
+    page = tmp_path / "p.html"
+    page.write_text(
+        '<img src="a/logo.png" alt="A"><img src="b/Logo.png" alt="B">', encoding="utf-8"
+    )
+    assets = markdown.convert(page, assets=True, ocr=False).assets
+    assert len({name.casefold() for name in assets}) == 2
+
+
+def test_a_figure_along_the_page_edges_is_text_and_a_page_number_is_not():
+    from conftest import _pdf_from_streams, _winansi_literal
+
+    def page(lines: list[tuple[str, int, int]]) -> str:
+        shown = (f"/F1 11 Tf 1 0 0 1 {x} {y} Tm ({_winansi_literal(t)}) Tj" for t, x, y in lines)
+        return "BT\n" + "\n".join(shown) + "\nET"
+
+    balances = ["1523.10", "2210.55", "987.40"]
+    streams = [
+        page(
+            [
+                (f"Buchung {n}: Lastschrift Stadtwerke", 60, 700),
+                (f"Kontostand am Seitenende: {balance} EUR", 60, 60),
+                (f"Seite {n + 1} von 3", 480, 30),
+            ]
+        )
+        for n, balance in enumerate(balances)
+    ]
+    text = markdown.convert(_pdf_from_streams(streams), name="konto.pdf", ocr=False).markdown
+    assert all(balance in text for balance in balances)
+    assert "Seite 1 von 3" not in text
+
+
+def test_a_page_of_a_thousand_unclosed_tags_is_read():
+    lines = "".join(f"<font color=red>Fehler {i}<br>" for i in range(1200))
+    text = convert(f"<html><body>{lines}</body></html>".encode(), "log.html").markdown
+    assert "Fehler 0" in text and "Fehler 1199" in text
+
+
+def test_a_picture_named_pdf_without_ocr_is_an_empty_note():
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 100
+    assert markdown.convert(png, name="scan.pdf", ocr=False).meta["extraction"] == "none"
+
+
+# -- second review round: writing
+
+
+def test_emphasis_at_punctuation_next_to_a_letter():
+    nested = _ir.Span("strong", [_ir.Span("emph", ["Wichtig:"])])
+    assert _render.inline([nested, "Die Frist"]) == "***Wichtig***:Die Frist"
+    spaced = _ir.Span("strong", ["Remarque :"])
+    assert _render.inline([spaced, "le délai"]) == "**Remarque** :le délai"
+    both = _ir.Span("strong", [_ir.Span("emph", ["(netto)"])])
+    assert _render.inline(["Betrag", both, "ist"]) == "Betrag(***netto***)ist"
+
+
+def test_neighbouring_markup_stays_apart():
+    link = _ir.Span("link", ["Jetzt bestellen"], "https://shop.example")
+    assert _render.inline(["Neu!", link]) == "Neu\\![Jetzt bestellen](https://shop.example)"
+    keys = [_ir.Span("code", ["Strg"]), _ir.Span("code", ["C"])]
+    assert _render.inline(keys) == "`StrgC`"
+    cited = ["Urteil", _ir.FootnoteRef("1"), "(2019)"]
+    assert _render.inline(cited) == "Urteil[^1]\\(2019)"

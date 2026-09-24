@@ -94,17 +94,42 @@ def _boilerplate(pages: Sequence[Page]) -> set[str]:
         return set()
     counts: Counter[str] = Counter()
     numbers: set[str] = set()
+    # The numbers in each repeated line, by page: a page number counts up with
+    # the pages, a running balance does not.
+    found: dict[str, dict[int, list[int]]] = {}
     for page in pages:
         seen: set[str] = set()
         for line in _margin_lines(page):
             key = _key(line.text)
             if _PAGE_NUMBER.match(line.text.strip()):
                 numbers.add(key)
+            if key not in seen:
+                found.setdefault(key, {})[page.index] = [
+                    int(n) for n in re.findall(r"\d+", line.text)
+                ]
             seen.add(key)
         counts.update(seen)
     needed = max(3, len(pages) * _REPEAT_SHARE) if len(pages) >= 3 else len(pages)
-    repeated = {key for key, count in counts.items() if count >= needed}
+    repeated = {
+        key
+        for key, count in counts.items()
+        if count >= needed and _numbered_like_pages(found.get(key, {}))
+    }
     return repeated | numbers
+
+
+def _numbered_like_pages(occurrences: dict[int, list[int]]) -> bool:
+    """Whether the numbers of a line repeated along the pages are the same on
+    each, or count with the pages (`Seite 3 von 9`): then it is a running head.
+    A subtotal carried from page to page is text."""
+    shapes = {len(numbers) for numbers in occurrences.values()}
+    if len(shapes) != 1:
+        return False
+    for position in range(shapes.pop()):
+        values = {index: numbers[position] for index, numbers in occurrences.items()}
+        if len(set(values.values())) > 1 and len({v - i for i, v in values.items()}) > 1:
+            return False
+    return True
 
 
 def _heading_levels(pages: Sequence[Page]) -> dict[float, int]:

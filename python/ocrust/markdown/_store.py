@@ -500,11 +500,14 @@ class _Exporter:
             return False
         if not all((self.out_dir / item["path"]).is_file() for item in entry.get("notes", [])):
             return False
+        self.still_kept = []
         for note_path in entry.get("kept", []):
-            if not isinstance(note_path, str) or not self._keep_reason(
-                self.out_dir / note_path, note_path, key
-            ):
+            if not isinstance(note_path, str):
                 return False
+            reason = self._keep_reason(self.out_dir / note_path, note_path, key)
+            if not reason:
+                return False
+            self.still_kept.append((self.out_dir / note_path, reason))
         if entry.get("size") == stat.st_size and entry.get("mtime_ns") == stat.st_mtime_ns:
             return True
         if entry.get("size") != stat.st_size:
@@ -606,9 +609,15 @@ class _Exporter:
         except OSError as exc:
             self.result.failed.append((source.path, exc.strerror or str(exc)))
             return
+        self.still_kept: list[tuple[Path, str]] = []
         if self.up_to_date(source, key, stat):
             self.result.unchanged.append(source.path)
             self.progress("unchanged", source.path, None, "")
+            for target, reason in self.still_kept:
+                # Said on every run, so a note that went its own way is not
+                # forgotten; converted again only once it is let go.
+                self.result.kept.append((target, reason))
+                self.progress("kept", target, None, reason)
             return
         if self.dry_run:
             target = self.out_dir / f"{source.stem}.md"

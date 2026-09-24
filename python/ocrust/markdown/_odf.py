@@ -28,6 +28,7 @@ from ._ir import (
     flatten,
     is_empty,
     plain,
+    verbatim,
 )
 from ._office import _sheet_blocks
 from ._package import (
@@ -135,6 +136,7 @@ class _Reader:
         self, container: Element, list_style: str | None = None, depth: int = 0
     ) -> list[Block]:
         out: list[Block] = []
+        code_run: Code | None = None
         for node in container:
             name = local(node.tag)
             if name in ("h", "p") and _hidden_paragraph(node):
@@ -153,13 +155,19 @@ class _Reader:
                 extras: list[Block] = []
                 content = self.inlines(node, extras)
                 style = self.styles.name(attr(node, "style-name"))
-                if not is_empty(content):
+                if style in ("preformatted text", "source text"):
+                    # A line of code each: one block for the lines in a row,
+                    # blank ones and indentation kept.
+                    text = verbatim(content)
+                    if out and out[-1] is code_run:
+                        out[-1] = code_run = Code(code_run.text + "\n" + text)
+                    elif text.strip():
+                        out.append(code_run := Code(text))
+                elif not is_empty(content):
                     if style in ("title",):
                         out.append(Heading(1, content))
                     elif style in ("quotations", "quote"):
                         out.append(Quote([Paragraph(content)]))
-                    elif style in ("preformatted text", "source text"):
-                        out.append(Code(plain(content)))
                     else:
                         out.append(Paragraph(content))
                 out.extend(extras)

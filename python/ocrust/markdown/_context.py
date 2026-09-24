@@ -127,7 +127,9 @@ class Context:
             stem, suffix = base, "bin"
         candidate = f"{stem}.{suffix}"
         counter = 1
-        while candidate in self.assets:
+        # `Logo.png` and `logo.png` are one file on Windows and macOS.
+        taken = {name.casefold() for name in self.assets}
+        while candidate.casefold() in taken:
             counter += 1
             candidate = f"{stem}-{counter}.{suffix}"
         self.assets[candidate] = data
