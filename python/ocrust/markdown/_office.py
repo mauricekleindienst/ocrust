@@ -1411,9 +1411,10 @@ class _Workbook:
                     values[column] = text
             if not values:
                 continue
-            if limit is not None and len(rows) >= limit:
+            if (limit is not None and len(rows) >= limit) or self.ctx.cells_left < len(values):
                 dropped += 1
                 continue
+            self.ctx.cells_left -= len(values)
             rows[index] = values
         return rows, dropped
 

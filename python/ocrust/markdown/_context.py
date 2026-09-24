@@ -20,6 +20,11 @@ from ._ir import Block, Image
 if TYPE_CHECKING:
     from ocrust import Document, Ocr
 
+#: Cells of all a document's sheets written out at most. A table of a million
+#: cells is already more than anyone reads; a file of a few kilobytes can
+#: claim a trillion by repeating one cell.
+CELL_BUDGET = 1_000_000
+
 #: Pictures smaller than this are icons, bullets and rules, not text.
 _MIN_PICTURE_BYTES = 2048
 
@@ -88,6 +93,8 @@ class Context:
         #: Why pictures went unread, once each: a missing model is worth
         #: saying, not worth failing a Word file over.
         self.warnings: list[str] = []
+        #: Sheet cells still to be written, over the whole document.
+        self.cells_left = CELL_BUDGET
 
     def engine(self) -> Ocr:
         if self._built is None:
