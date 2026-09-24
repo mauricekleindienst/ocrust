@@ -45,11 +45,12 @@ def blocks_of(doc: Document, *, paged: bool) -> list[Block]:
     pages = list(doc.pages)
     boilerplate = _boilerplate(pages)
     levels = _heading_levels(pages)
+    repeated = _repeated_headings(pages)
     out: list[Block] = []
     for page in pages:
         if paged:
             out.append(Marker(f"page {page.index + 1}"))
-        out.extend(_page(page, boilerplate, levels))
+        out.extend(_page(page, boilerplate, levels, repeated))
     return _join_across_pages(out)
 
 
@@ -68,6 +69,24 @@ def _key(text: str) -> str:
     """A running head's identity: its words, with the page number made
     anonymous so `Seite 3 von 9` and `Seite 4 von 9` are one line."""
     return re.sub(r"\d+", "#", " ".join(text.lower().split()))
+
+
+def _repeated_headings(pages: Sequence[Page]) -> set[str]:
+    """Headings at a page's edge that come back on other pages: a letterhead
+    or a page number set large is a running head too. A title that says what
+    the running heads say, once, is not."""
+    counts: Counter[str] = Counter()
+    top_share, bottom_share = _MARGIN_SHARE, 1 - _MARGIN_SHARE
+    for page in pages:
+        seen = {
+            _key(line.text)
+            for block in page.blocks
+            if block.kind == "heading"
+            for line in block.lines
+            if line.box.y1 <= page.height * top_share or line.box.y0 >= page.height * bottom_share
+        }
+        counts.update(seen)
+    return {key for key, count in counts.items() if count >= 2}
 
 
 def _margin_lines(page: Page) -> list[Line]:
@@ -158,20 +177,26 @@ def _heading_levels(pages: Sequence[Page]) -> dict[float, int]:
     return levels
 
 
-def _page(page: Page, boilerplate: set[str], levels: dict[float, int]) -> list[Block]:
+def _page(
+    page: Page, boilerplate: set[str], levels: dict[float, int], repeated: set[str]
+) -> list[Block]:
     top = page.height * _MARGIN_SHARE
     bottom = page.height * (1 - _MARGIN_SHARE)
 
-    def kept(line: Line) -> bool:
+    def kept(line: Line, running: set[str]) -> bool:
         at_edge = line.box.y1 <= top or line.box.y0 >= bottom
-        return not (at_edge and _key(line.text) in boilerplate)
+        return not (at_edge and _key(line.text) in running)
 
     blocks: list[tuple[ScanBlock, list[Line]]] = []
     for block in page.blocks:
-        # A heading is never a running head, even when it says the same: the
-        # title on page one is what a browser repeats small at every top.
-        whole = block.kind in ("table", "heading")
-        lines = list(block.lines) if whole else [ln for ln in block.lines if kept(ln)]
+        # A heading is a running head only when it comes back as a heading:
+        # the title on page one is what a browser repeats small at every top.
+        if block.kind == "table":
+            lines = list(block.lines)
+        elif block.kind == "heading":
+            lines = [ln for ln in block.lines if kept(ln, repeated)]
+        else:
+            lines = [ln for ln in block.lines if kept(ln, boilerplate)]
         if lines and any(line.text.strip() for line in lines):
             blocks.append((block, lines))
 

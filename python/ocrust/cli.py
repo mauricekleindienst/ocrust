@@ -2602,7 +2602,7 @@ def _markdown_one(
     """One document, to stdout or to one file; no index, nothing kept in sync."""
     from . import markdown
 
-    if options.assets and args.output is None:
+    if options.assets and (args.output is None or str(args.output) in _STANDARD_STREAMS):
         _fail("--assets keeps the pictures beside the note: give it a file with -o note.md")
         return 2
     try:

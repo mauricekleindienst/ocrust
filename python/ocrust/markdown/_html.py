@@ -194,13 +194,22 @@ class Element:
 
 
 #: Elements open inside one another at most. A generated page that opens a
-#: `<font>` on every line and never closes one is read as a browser shows it,
-#: not refused as nested too deeply: past this depth, text formatting is let
-#: go and its content stays where it is. Everything that decides what is read
-#: — a script, a hidden element, a table — keeps its place.
+#: `<font>` or a `<div>` on every line and never closes one is read as a
+#: browser shows it, not refused as nested too deeply: past this depth, text
+#: formatting and plain containers are let go and their content stays where it
+#: is. Everything that decides what is read — a script, a hidden element, a
+#: table — keeps its place.
 _MAX_DEPTH = 100
-_FORMATTING = {
+_LET_GO = {
     "a",
+    "article",
+    "blockquote",
+    "center",
+    "div",
+    "footer",
+    "header",
+    "main",
+    "section",
     "abbr",
     "b",
     "big",
@@ -251,7 +260,7 @@ class _Builder(HTMLParser):
         node = Element(tag, {k.lower(): v or "" for k, v in attrs})
         self.stack[-1].children.append(node)
         if tag not in _VOID and (
-            len(self.stack) < _MAX_DEPTH or tag not in _FORMATTING or _invisible(node)
+            len(self.stack) < _MAX_DEPTH or tag not in _LET_GO or _invisible(node)
         ):
             self.stack.append(node)
 
@@ -327,9 +336,30 @@ class _Converter:
                 pending.append(child)
                 continue
             flush()
-            out.extend(self.block(child))
+            inner = self.block(child)
+            if child.tag == "a" and inner:
+                # A link around a heading and its teaser — a card on an index
+                # page: the heading carries the link.
+                inner = self._linked(inner, child.attrs.get("href", ""))
+            out.extend(inner)
         flush()
         return out
+
+    def _linked(self, blocks: list[Block], href: str) -> list[Block]:
+        href = href.strip()
+        if not href or href.lower().startswith(("javascript:", "#", "data:")):
+            return blocks
+        link = urljoin(self.base, href) if self.base else href
+        for index, block in enumerate(blocks):
+            if isinstance(block, (Heading, Paragraph)) and not is_empty(block.content):
+                content = [Span("link", strip(block.content), link)]
+                blocks[index] = (
+                    Heading(block.level, content)
+                    if isinstance(block, Heading)
+                    else Paragraph(content)
+                )
+                break
+        return blocks
 
     def block(self, node: Element) -> list[Block]:
         tag = node.tag

@@ -182,9 +182,10 @@ impl TextLayer {
     }
 
     /// Whether a page read without recognizing anything holds text rather
-    /// than boxes: most of its characters, shown or hidden, have their
-    /// Unicode. A symbol here and there — a stamp, a tick — is no reason to
-    /// leave a page empty.
+    /// than boxes: nineteen in twenty of its characters, shown and hidden
+    /// together, have their Unicode. A stamp in a symbol font over a scan's
+    /// hidden text is no reason to leave the page empty; a font that maps
+    /// only some of its letters is.
     pub fn readable_enough(&self) -> bool {
         let printed: Vec<&TextGlyph> = self
             .glyphs
@@ -192,7 +193,7 @@ impl TextLayer {
             .filter(|g| !g.text.trim().is_empty())
             .collect();
         let mapped = printed.iter().filter(|g| g.mapped).count();
-        mapped * 2 >= printed.len()
+        mapped * 20 >= printed.len() * 19
     }
 
     /// Whether the text a page shows has its characters: a font without a
@@ -880,19 +881,10 @@ fn unligature(text: String) -> String {
 
 /// The bullets Word and PowerPoint draw from the Symbol and Wingdings fonts,
 /// which map them into the Private Use Area: a bullet is what they show.
+/// Only the ones no letter of those fonts shares: Symbol's θ and ν sit where
+/// Wingdings has its squares, and stay what they are.
 fn symbol_bullet(c: char) -> Option<char> {
-    matches!(
-        c,
-        '\u{F0B7}'
-            | '\u{F0A7}'
-            | '\u{F0A8}'
-            | '\u{F06E}'
-            | '\u{F071}'
-            | '\u{F076}'
-            | '\u{F0D8}'
-            | '\u{F0FC}'
-    )
-    .then_some('•')
+    matches!(c, '\u{F0B7}' | '\u{F0A7}' | '\u{F0D8}' | '\u{F0FC}').then_some('•')
 }
 
 /// A character a text layer should hold: not a replacement or private-use
@@ -1329,8 +1321,10 @@ mod tests {
     fn symbol_font_bullets_are_bullets_and_a_stamp_leaves_the_page_readable() {
         assert_eq!(symbol_bullet('\u{F0B7}'), Some('•'));
         assert_eq!(symbol_bullet('a'), None);
-        let mut glyphs: Vec<TextGlyph> = word("Hallo Welt", 100.0, 200.0, 20.0)
-            .into_iter()
+        assert_eq!(symbol_bullet('\u{F071}'), None);
+        // A scan's hidden text, a page of it.
+        let mut glyphs: Vec<TextGlyph> = (0..20)
+            .flat_map(|row| word("Zeile des Vertrags", 100.0, 100.0 + 30.0 * row as f64, 20.0))
             .map(|mut g| {
                 g.visible = false;
                 g

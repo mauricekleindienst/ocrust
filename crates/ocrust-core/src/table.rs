@@ -148,7 +148,14 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32) -> Vec<Found> 
         let (end, candidates) = grow(&rows, lines, at, text_height);
         log::debug!("  grow from {at}: end {end}, {candidates} candidate rows");
         if candidates >= MIN_ROWS {
-            if let Some(columns) = columns_of(&rows[at..end], gutter) {
+            let continues = continuations(&rows[at..end], &lines[at..end], text_height);
+            let own_rows: Vec<Vec<Candidate>> = rows[at..end]
+                .iter()
+                .zip(&continues)
+                .filter(|(_, continues)| !**continues)
+                .map(|(row, _)| row.clone())
+                .collect();
+            if let Some(columns) = columns_of(&own_rows, gutter) {
                 log::debug!(
                     "  run {at}..{end} ({candidates} candidates) -> columns {}",
                     columns
@@ -283,8 +290,12 @@ fn grow(rows: &[Vec<Candidate>], lines: &[Line], start: usize, text_height: f32)
             // table without saying anything about its columns.
             continue;
         } else if offset == last + 1
-            && lines[offset].bbox.y0 - lines[offset - 1].bbox.y1 <= text_height * CONTINUATION_GAP
-            && within_a_cell(row, &rows[last])
+            && carries_on(
+                &rows[start..=offset],
+                &lines[start..=offset],
+                offset - start,
+                text_height,
+            )
         {
             // The next line of a cell that wraps: part of the row above.
             last = offset;
@@ -295,42 +306,120 @@ fn grow(rows: &[Vec<Candidate>], lines: &[Line], start: usize, text_height: f32)
     (last + 1, candidates)
 }
 
-/// Whether every cell of `row` lies under one cell of `above`.
-fn within_a_cell(row: &[Candidate], above: &[Candidate]) -> bool {
+/// Whether `row` is the next line of cells in `above` that wrap: each of its
+/// cells starts under one of those, and that one's text reached so far across
+/// its column that the next word could not have followed it on its line.
+/// Figures never wrap: a line holding one under a figure is a row of its own,
+/// with an empty cell, not the rest of the row above.
+fn wraps_into(
+    row: &[Candidate],
+    above: &[Candidate],
+    table: &[Vec<Candidate>],
+    text_height: f32,
+) -> bool {
     !row.is_empty()
         && row.iter().all(|candidate| {
-            let bbox = candidate.cell.bbox;
-            above
+            let cell = &candidate.cell;
+            let mut over = above
                 .iter()
-                .filter(|a| a.cell.bbox.horizontal_overlap(&bbox) > 0.0)
-                .count()
-                == 1
+                .filter(|a| a.cell.bbox.horizontal_overlap(&cell.bbox) > 0.0);
+            let (Some(first), None) = (over.next(), over.next()) else {
+                return false;
+            };
+            let upper = &first.cell;
+            if figure(&cell.text) || figure(&upper.text) {
+                return false;
+            }
+            if (cell.bbox.x0 - upper.bbox.x0).abs() > text_height * 0.5 {
+                return false;
+            }
+            // A word broken with a hyphen at the cell's edge wrapped, whatever
+            // the column's width.
+            if broken_word(&upper.text, &cell.text) {
+                return true;
+            }
+            // The column is as wide as its widest cell, at least.
+            let column = table
+                .iter()
+                .flatten()
+                .filter(|c| c.cell.bbox.horizontal_overlap(&upper.bbox) > 0.0)
+                .map(|c| c.cell.bbox.width())
+                .fold(upper.bbox.width(), f32::max);
+            let chars = cell.text.chars().count().max(1) as f32;
+            let first_word = cell.text.split_whitespace().next().unwrap_or("");
+            let word = cell.bbox.width() * first_word.chars().count() as f32 / chars;
+            let space = text_height * 0.25;
+            upper.bbox.width() + space + word > column * 0.98
         })
 }
 
-/// Which rows of a run carry on the row above: the next lines of cells that
-/// wrap. A row is one when it has fewer cells than the table's fullest rows
-/// and sits right under the line above, while the table's rows are set
-/// clearly further apart than that. A table set without space between its
-/// rows keeps every line a row.
+/// Whether every cell of `row` starts under one cell of `above`, and neither
+/// is a figure.
+fn under_cells(row: &[Candidate], above: &[Candidate]) -> bool {
+    !row.is_empty()
+        && row.iter().all(|candidate| {
+            let mut over = above
+                .iter()
+                .filter(|a| a.cell.bbox.horizontal_overlap(&candidate.cell.bbox) > 0.0);
+            match (over.next(), over.next()) {
+                (Some(upper), None) => !figure(&candidate.cell.text) && !figure(&upper.cell.text),
+                _ => false,
+            }
+        })
+}
+
+/// Whether a cell holds a figure — an amount, a date, a phone number — rather
+/// than words.
+fn figure(text: &str) -> bool {
+    let text = text.trim();
+    text.chars().any(|c| c.is_ascii_digit())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_whitespace() || ".,:;-–/+%€$£()'".contains(c))
+}
+
+/// Which rows of a run carry on the row above (see [`carries_on`]).
 fn continuations(rows: &[Vec<Candidate>], lines: &[Line], text_height: f32) -> Vec<bool> {
+    (0..rows.len())
+        .map(|i| carries_on(rows, lines, i, text_height))
+        .collect()
+}
+
+/// Whether row `i` of a run is the next line of the row above rather than a
+/// row of its own: fewer cells than the fullest rows, set right under the line
+/// above, every cell under one cell of it and none of them a figure — and
+/// either the cells above had filled their columns ([`wraps_into`]), or the
+/// line leaves the first column empty while the table's rows stand clearly
+/// further apart than it does from the row above (a line break inside a cell).
+fn carries_on(rows: &[Vec<Candidate>], lines: &[Line], i: usize, text_height: f32) -> bool {
+    if i == 0 {
+        return false;
+    }
     let fullest = rows.iter().map(Vec::len).max().unwrap_or(0);
-    let gap = |i: usize| lines[i].bbox.y0 - lines[i - 1].bbox.y1;
+    let gap = |j: usize| lines[j].bbox.y0 - lines[j - 1].bbox.y1;
+    if rows[i].len() >= fullest || gap(i) > text_height * CONTINUATION_GAP {
+        return false;
+    }
+    if wraps_into(&rows[i], &rows[i - 1], rows, text_height) {
+        return true;
+    }
+    let left = rows
+        .iter()
+        .flatten()
+        .map(|c| c.cell.bbox.x0)
+        .fold(f32::INFINITY, f32::min);
+    let opens = |row: &[Candidate]| row.iter().any(|c| c.cell.bbox.x0 <= left + text_height);
+    if opens(&rows[i]) || !under_cells(&rows[i], &rows[i - 1]) {
+        return false;
+    }
+    // How far apart the rows that open in the first column stand.
     let mut row_gaps: Vec<f32> = (1..rows.len())
-        .filter(|&i| rows[i].len() == fullest)
+        .filter(|&j| j != i && rows[j].len() >= 2 && opens(&rows[j]))
         .map(gap)
         .collect();
     row_gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let usual = row_gaps.get(row_gaps.len() / 2).copied().unwrap_or(0.0);
-    (0..rows.len())
-        .map(|i| {
-            i > 0
-                && rows[i].len() < fullest
-                && gap(i) <= text_height * CONTINUATION_GAP
-                && gap(i) < usual * 0.5
-                && within_a_cell(&rows[i], &rows[i - 1])
-        })
-        .collect()
+    usual > 0.0 && gap(i) < usual * 0.5
 }
 
 /// The gaps between one row's cells.
@@ -482,7 +571,7 @@ fn grid(
                 let (column, span) = place(&piece.bbox, columns);
                 if let Some(&at) = placed.get(&(row, column)) {
                     let cell = &mut cells[at];
-                    cell.text = format!("{} {}", cell.text, piece.text);
+                    cell.text = join_wrapped(&cell.text, &piece.text);
                     cell.bbox = cell.bbox.union(&piece.bbox);
                     cell.confidence = cell.confidence.min(piece.confidence);
                     continue;
@@ -505,6 +594,31 @@ fn grid(
         columns: columns.len(),
         cells,
     }
+}
+
+/// A cell's text and the next line of it: a word broken at the line end with a
+/// hyphen (`Instandhal-` / `tung`) is one word again.
+fn join_wrapped(first: &str, next: &str) -> String {
+    if broken_word(first, next) {
+        format!("{}{}", &first[..first.len() - 1], next)
+    } else {
+        format!("{first} {next}")
+    }
+}
+
+/// Whether `first` ends in a word broken with a hyphen that `next` finishes —
+/// not a suspended one, `Vor-` over `und Nachname`.
+fn broken_word(first: &str, next: &str) -> bool {
+    let mut chars = first.trim_end().chars().rev();
+    first.ends_with('-')
+        && chars.next() == Some('-')
+        && chars.next().is_some_and(char::is_alphabetic)
+        && next
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(char::is_lowercase)
+        && !crate::layout::continues_a_suspended_hyphen(next.trim_start())
 }
 
 /// How many cells a row needs before it helps define the columns.
@@ -612,6 +726,7 @@ fn place(bbox: &Rect, columns: &[(f32, f32)]) -> (usize, usize) {
 ///
 /// The words are kept because the columns, once known, say better than any gap
 /// threshold where the cuts belong.
+#[derive(Clone)]
 struct Candidate {
     cell: Segment,
     words: Vec<crate::doc::Word>,
@@ -764,6 +879,18 @@ fn join(run: &[&crate::doc::Word], fallback: Rect) -> Segment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cell_broken_over_two_lines_is_joined_whole() {
+        assert_eq!(
+            join_wrapped("Instandhal-", "tung der Anlagen"),
+            "Instandhaltung der Anlagen"
+        );
+        assert_eq!(join_wrapped("Vor-", "und Nachname"), "Vor- und Nachname");
+        assert_eq!(join_wrapped("Schmidt,", "Weber"), "Schmidt, Weber");
+        assert!(figure("4,90") && figure("030 1234") && figure("12.03.2026"));
+        assert!(!figure("Muttern M4") && !figure("12.06. Hinweis:"));
+    }
     use crate::doc::Word;
     use crate::geom::Quad;
 

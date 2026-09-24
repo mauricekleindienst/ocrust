@@ -1163,3 +1163,107 @@ def test_scan_only_says_when_a_page_is_missing(no_models, tmp_path, capsys):
     pdf.write_bytes(_pdf_of([("Hallo", 20, 72, 700)]))
     assert main(["scan", str(pdf), "--pdf-text", "only", "--pages", "3", "-q"]) == 1
     assert "no page 3" in " ".join(capsys.readouterr().err.split())
+
+
+# -- fourth review round
+
+
+def test_a_row_with_an_empty_cell_stays_a_row(no_models):
+    rows = [("Bezeichnung", "Menge", "Preis"), ("Schrauben M4", "100", "4,90")]
+    rows += [("Muttern M4", "", "2,10"), ("Unterlegscheiben M4", "50", "1,20")]
+    lines = [
+        (text, 10, x, 700 - i * 11.5)
+        for i, row in enumerate(rows)
+        for text, x in zip(row, (72, 300, 420), strict=True)
+        if text
+    ]
+    text = markdown.convert(_pdf_of(lines), name="t.pdf", ocr=False).body
+    assert "| Muttern M4 |  | 2,10 |" in text and "| Schrauben M4 | 100 | 4,90 |" in text
+
+
+def test_a_slide_title_over_one_line_is_a_heading(no_models):
+    lines = [
+        ("What comes next for the team", 28, 72, 700),
+        ("We open two new offices.", 14, 72, 640),
+    ]
+    text = markdown.convert(_pdf_of(lines), name="s.pdf", ocr=False).body
+    assert "# What comes next for the team" in text and "\nWe open two new offices." in text
+
+
+def test_terms_set_in_small_print_keep_their_headings(no_models):
+    lines, y = [], 760
+    for section in range(1, 5):
+        lines.append((f"§ {section} Geltungsbereich", 9, 60, y))
+        y -= 14
+        for _ in range(6):
+            lines.append(("Diese Bedingungen gelten fuer alle Vertraege mit dem Kunden.", 7, 60, y))
+            y -= 9
+        y -= 8
+    text = markdown.convert(_pdf_of(lines), name="agb.pdf", ocr=False).body
+    assert text.count("# § ") == 4
+
+
+def test_a_letterhead_set_large_is_not_a_heading_on_every_page(no_models):
+    from conftest import _pdf_from_streams, _winansi_literal
+
+    pages = []
+    for n in range(1, 4):
+        lines = [("ACME Consulting GmbH", 16, 72, 770)]
+        lines += [
+            (f"Absatz {n} beginnt hier mit einem ganzen Satz Text.", 11, 72, 700 - i * 15)
+            for i in range(12)
+        ]
+        shown = (
+            f"/F1 {s} Tf 1 0 0 1 {x} {y} Tm ({_winansi_literal(t)}) Tj" for t, s, x, y in lines
+        )
+        pages.append("BT\n" + "\n".join(shown) + "\nET")
+    text = markdown.convert(_pdf_from_streams(pages), name="b.pdf", ocr=False).body
+    assert "ACME Consulting" not in text
+
+
+def test_a_date_beside_the_address_stays_apart_on_a_page_with_a_table(no_models):
+    lines = [("Firma Beispiel GmbH", 10, 72, 720), ("Herrn Max Mustermann", 10, 72, 708)]
+    lines += [("Berlin, 3. Juni 2026", 10, 420, 708), ("Musterstrasse 12", 10, 72, 696)]
+    lines += [("12345 Berlin", 10, 72, 684), ("Angebot Nr. 4711", 10, 72, 650)]
+    rows = [
+        ("Pos.", "Leistung", "Preis"),
+        ("1", "Beratung", "960,00"),
+        ("2", "Umsetzung", "2.880,00"),
+    ]
+    rows += [("3", "Schulung", "480,00")]
+    lines += [
+        (t, 10, x, 600 - i * 14)
+        for i, row in enumerate(rows)
+        for t, x in zip(row, (72, 110, 450), strict=True)
+    ]
+    text = markdown.convert(_pdf_of(lines), name="a.pdf", ocr=False).body
+    assert "Mustermann Berlin, 3. Juni" not in text and "Herrn Max Mustermann" in text
+
+
+def test_a_heading_a_little_larger_than_its_text_does_not_swallow_it(no_models):
+    lines = [("Section 1", 13.5, 72, 700), ("The committee met on Monday.", 11, 72, 686)]
+    lines += [("It agreed on the budget.", 11, 72, 672)]
+    text = markdown.convert(_pdf_of(lines), name="h.pdf", ocr=False).body
+    assert "# Section 1\n" in text and "The committee met on Monday." in text
+    assert "# Section 1 The" not in text
+
+
+def test_link_cards_keep_their_links():
+    cards = "".join(
+        f'<a href="https://example.com/posts/{i}"><h3>Beitrag {i}</h3><p>Worum es geht.</p></a>'
+        for i in range(2)
+    )
+    text = convert(f"<main>{cards}</main>".encode(), "i.html").markdown
+    assert "[Beitrag 0](https://example.com/posts/0)" in text and "Worum es geht." in text
+
+
+def test_a_page_of_unclosed_divs_is_read():
+    page = "<body>" + "".join(f"<div>Zeile {i}" for i in range(600)) + "</body>"
+    text = convert(page.encode(), "d.html").markdown
+    assert "Zeile 0" in text and "Zeile 599" in text
+
+
+def test_assets_to_a_standard_stream_are_refused(tmp_path):
+    (tmp_path / "plan.docx").write_bytes(picture_docx())
+    args = ["markdown", str(tmp_path / "plan.docx"), "-o", "/dev/stdout", "--assets", "--no-ocr"]
+    assert main(args) == 2
