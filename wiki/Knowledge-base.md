@@ -156,7 +156,7 @@ picture that appears on every slide is kept once.
 
 | option | |
 |---|---|
-| `-o FOLDER` | the knowledge base; with one document, `-o note.md` writes just that note, and without `-o` it goes to standard output |
+| `-o FOLDER` | the knowledge base; with one document, `-o note.md` writes just that note (with `--assets`, its pictures in `_assets/note/` beside it), and without `-o` it goes to standard output |
 | `--prune` | remove the notes of documents that are gone |
 | `--force` | convert everything again, and replace notes edited by hand |
 | `-n`, `--dry-run` | show what would change |
