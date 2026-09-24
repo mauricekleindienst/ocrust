@@ -5,6 +5,7 @@ ocrust scan *.jpg -f markdown -o out/   # batch, one file per input
 ocrust ocr scan.pdf -o scan.ocr.pdf     # add a text layer, keep the pages
 ocrust pdf photo.jpg -o photo.pdf       # build a searchable PDF from an image
 ocrust tiff scan.pdf --gray             # deskewed multi-page TIFF
+ocrust markdown archive/ -o wissen/     # every document as a Markdown note
 ocrust languages                        # what the installed model covers
 ocrust doctor                           # what is installed, what is missing
 """
@@ -218,6 +219,7 @@ _EXAMPLES = """examples:
   ocrust tiff scan.pdf --gray              an archive-ready TIFF
   ocrust vs archive/                       which files are VS-NfD, GEHEIM, …
   ocrust find archive/ --terms profil.toml every term of a profile, however broken
+  ocrust markdown archive/ -o wissen/      any document as Markdown, kept in sync
   ocrust doctor                            what is installed, what is missing
 """
 
@@ -479,6 +481,93 @@ def _build_parser() -> argparse.ArgumentParser:
     find.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
     find.set_defaults(mentions=False)
 
+    markdown = sub.add_parser(
+        "markdown",
+        aliases=["md"],
+        help="convert documents of any kind to Markdown notes for a knowledge base",
+        description="Convert documents to Markdown: PDF and scans (a PDF's own text where it\n"
+        "has one, OCR where not), Word, PowerPoint, Excel, OpenDocument, EPUB, HTML,\n"
+        "mail (.eml, .mht), RTF, CSV, text, Markdown and source code. One note per\n"
+        "document, flat YAML front matter, page markers, tables as pipe tables.\n\n"
+        "With -o FOLDER the notes mirror the input folders and stay in sync: a second\n"
+        "run converts only what changed, never overwrites a note edited by hand, and\n"
+        "with --prune removes the notes of documents that are gone.\n\n"
+        "exit status: 1 when a document could not be converted, else 0.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    markdown.add_argument(
+        "inputs",
+        nargs="+",
+        type=Path,
+        help="files and folders (read recursively), or - for stdin with --name",
+    )
+    markdown.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="a folder of notes kept in sync, or a .md file for one document "
+        "(default: the note on stdout)",
+    )
+    markdown.add_argument(
+        "--prune",
+        action="store_true",
+        help="delete the notes of documents that are no longer there",
+    )
+    markdown.add_argument(
+        "--force",
+        action="store_true",
+        help="convert everything again, and replace notes edited by hand",
+    )
+    markdown.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="show what would be written or deleted, and change nothing",
+    )
+    markdown.add_argument(
+        "--pdf-text",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="use a PDF page's own text: auto (default) where it can be trusted, "
+        "always, or never (recognize every page)",
+    )
+    markdown.add_argument(
+        "--no-ocr",
+        action="store_true",
+        help="do not recognize image files or the pictures inside documents",
+    )
+    markdown.add_argument(
+        "--no-pictures",
+        action="store_true",
+        help="do not read the text in pictures inside documents (diagrams, screenshots)",
+    )
+    markdown.add_argument(
+        "--assets",
+        action="store_true",
+        help="keep the pictures inside documents as files in _assets/ and link them",
+    )
+    markdown.add_argument(
+        "--max-rows",
+        type=_whole(0),
+        default=5000,
+        metavar="N",
+        help="rows of a spreadsheet or CSV table to write, the rest counted (default "
+        "5000; 0 for all)",
+    )
+    markdown.add_argument("--name", help="file name of a document read from stdin")
+    markdown.add_argument(
+        "--workers",
+        type=_whole(1, _MAX_PARALLEL),
+        help="pages recognized in parallel (default: one per core, at most 16)",
+    )
+    markdown.add_argument("--dpi", type=_real(20, 2400), help="PDF rasterization DPI (default 200)")
+    markdown.add_argument("--models", type=Path, help="directory holding the ONNX models")
+    markdown.add_argument("--device", help="cpu (default), auto, cuda[:n], coreml, directml")
+    markdown.add_argument(
+        "--threads", type=_whole(1, _MAX_PARALLEL), help="threads per inference operator"
+    )
+    markdown.add_argument("-q", "--quiet", action="store_true", help="suppress the summary line")
+
     for searcher in (vs, find):
         searcher.add_argument(
             "--terms",
@@ -509,7 +598,7 @@ def _build_parser() -> argparse.ArgumentParser:
             help="with -f jsonl -o FILE: skip the files FILE already has and append the rest",
         )
 
-    for reader in (scan, pdf, ocr, tiff, vs, find):
+    for reader in (scan, pdf, ocr, tiff, vs, find, markdown):
         reader.add_argument(
             "--password",
             help="password for encrypted PDFs; OCRUST_PASSWORD keeps it out of the shell history",
@@ -2349,6 +2438,157 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
     return 1 if unreadable or earlier_unreadable else 0
 
 
+def _markdown_options(args: argparse.Namespace) -> Any:
+    from .markdown import Options
+
+    return Options(
+        pdf_text=args.pdf_text,
+        ocr=not args.no_ocr,
+        pictures=not args.no_pictures,
+        assets=args.assets,
+        max_rows=args.max_rows or None,
+        password=_password(args),
+    )
+
+
+def _cmd_markdown(args: argparse.Namespace) -> int:
+    from . import markdown
+
+    options = _markdown_options(args)
+    engine: Ocr | None = None
+
+    def make_engine() -> Ocr:
+        # Made when the first scan or picture needs it: a folder of Word files
+        # converts without the model files installed.
+        nonlocal engine
+        if engine is None:
+            engine = Ocr(
+                **_guards(args),
+                models_dir=args.models,
+                device=args.device,
+                threads=args.threads,
+                page_workers=args.workers or min(os.cpu_count() or 4, 16),
+                pdf_dpi=args.dpi,
+                pdf_text=args.pdf_text,
+            )
+        return engine
+
+    inputs = list(args.inputs)
+    single = len(inputs) == 1 and (str(inputs[0]) == STDIN or not inputs[0].is_dir())
+    to_file = args.output is not None and (
+        _special_file(args.output)
+        or args.output.suffix.lower() in (".md", ".markdown")
+        or args.output.is_file()
+    )
+    if args.output is None or to_file:
+        if not single:
+            _fail("several documents need a folder to be written to: -o FOLDER")
+            return 2
+        return _markdown_one(args, inputs[0], options, make_engine)
+    if any(str(item) == STDIN for item in inputs):
+        _fail("- (stdin) is converted on its own, to stdout or to a .md file")
+        return 2
+    missing = [item for item in inputs if not item.exists()]
+    for item in missing:
+        _fail(f"{item}: {_why_unreachable(item)}")
+    inputs = [item for item in inputs if item.exists()]
+    if not inputs:
+        return 1
+
+    started = time.monotonic()
+    quiet = args.quiet
+
+    def progress(event: str, source: Path, note: Path | None, detail: str) -> None:
+        if event == "failed":
+            _fail(f"{source}: {detail}")
+        elif quiet:
+            return
+        elif event in ("written", "would write") and note is not None:
+            prefix = "" if event == "written" else _paint("would write ", "dim")
+            _tell(prefix + _arrow(source, note))
+        elif event == "kept":
+            _tell(f"  {_paint('kept', 'amber')} {source}: {detail}")
+        elif event in ("pruned", "would remove") and note is not None:
+            verb = "removed" if event == "pruned" else "would remove"
+            _tell(f"  {_paint(verb, 'dim')} {note}")
+
+    try:
+        result = markdown.export(
+            inputs,
+            args.output,
+            options=options,
+            engine=make_engine,
+            prune=args.prune,
+            force=args.force,
+            dry_run=args.dry_run,
+            progress=progress,
+        )
+    except markdown.ConversionError as exc:
+        _fail(str(exc))
+        return 1
+    for source, reason in result.failed:
+        # Clashes are reported here; conversion failures came through progress.
+        if "also" in reason and reason.endswith("rename one"):
+            _fail(f"{source}: {reason}")
+    for warning in result.warnings:
+        _tell(f"{_paint('note:', 'amber', 'bold')} {_wrap(warning, 6)}")
+    if not quiet:
+        parts = [
+            _count(len(result.written), "note") + (" to write" if args.dry_run else " written")
+        ]
+        if result.unchanged:
+            parts.append(f"{len(result.unchanged)} unchanged")
+        if result.kept:
+            parts.append(_paint(f"{len(result.kept)} kept", "amber"))
+        if result.pruned:
+            parts.append(f"{len(result.pruned)} " + ("to remove" if args.dry_run else "removed"))
+        if result.failed:
+            parts.append(_paint(_count(len(result.failed), "failure"), "red"))
+        if result.skipped:
+            parts.append(f"{len(result.skipped)} other files skipped")
+        parts.append(_duration((time.monotonic() - started) * 1000))
+        _tell(_paint("done:", "rust", "bold") + " " + ", ".join(parts))
+    return 1 if (result.failed or missing) else 0
+
+
+def _markdown_one(
+    args: argparse.Namespace, source: Path, options: Any, make_engine: Callable[[], Ocr]
+) -> int:
+    """One document, to stdout or to one file; no index, nothing kept in sync."""
+    from . import markdown
+
+    try:
+        if str(source) == STDIN:
+            data = _read_stdin()
+            if not data:
+                _fail("nothing arrived on stdin")
+                return 1
+            name = args.name or "stdin"
+            if not markdown.supported(name):
+                _fail("stdin needs --name with the document's file name, e.g. --name brief.docx")
+                return 2
+            result = markdown.convert(data, name=name, options=options, engine=make_engine)
+        else:
+            if not source.exists():
+                _fail(f"{source}: {_why_unreachable(source)}")
+                return 1
+            result = markdown.convert(source, options=options, engine=make_engine)
+    except (markdown.ConversionError, OcrustError, OSError, ValueError) as exc:
+        _fail(f"{source}: {getattr(exc, 'strerror', None) or exc}")
+        return 1
+    if args.output is None:
+        sys.stdout.write(result.markdown)
+        return 0
+    if _overwrites_input([args.output], [source]):
+        _fail(f"{args.output} is the input itself; write the note somewhere else")
+        return 2
+    if not _save(args.output, result.markdown, args):
+        return 1
+    if not args.quiet:
+        _tell(_arrow(source, args.output))
+    return 0
+
+
 def _cmd_languages(args: argparse.Namespace) -> int:
     from . import known_languages
 
@@ -2537,6 +2777,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _cmd_vs(args)
     if args.command == "find":
         return _cmd_find(args)
+    if args.command in ("markdown", "md"):
+        return _cmd_markdown(args)
     if args.command == "languages":
         return _cmd_languages(args)
     if args.command == "install-models":
