@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import _formats, _html, _mail, _odf, _office, _rtf, _text
 from ._context import Context, Options
-from ._ir import Block, Heading, Note, plain
+from ._ir import Block, Heading, Note, nfc, plain
 from ._package import ConversionError
 from ._render import front_matter, render
 from ._scan import blocks_of, extraction
@@ -145,6 +145,8 @@ class Converted:
     @property
     def body(self) -> str:
         """The Markdown without its front matter."""
+        if self.note.raw_body is not None:
+            return nfc(self.note.raw_body).strip("\n") + "\n"
         return render(self.note, {})
 
 
@@ -178,6 +180,16 @@ def read(data: bytes, name: str, ctx: Context) -> Note | None:
         if reader is None:
             return None
         return reader(data, ctx)
+    except (ConversionError, OSError, MemoryError):
+        raise
+    except RecursionError as exc:
+        raise ConversionError("nested too deeply to be read") from exc
+    except Exception as exc:
+        if type(exc).__name__ == "OcrustError":
+            raise
+        # A file that breaks a reader in a way nobody foresaw is a file that
+        # cannot be converted — said as such, not as a traceback.
+        raise ConversionError(f"cannot be read ({type(exc).__name__}: {exc})") from exc
     finally:
         ctx.depth -= 1
 

@@ -19,6 +19,7 @@ import datetime as _dt
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Iterable
 from typing import Any
 from urllib.parse import quote
@@ -37,7 +38,9 @@ from ._ir import (
     Note,
     Paragraph,
     Quote,
+    Raw,
     Rule,
+    Span,
     Table,
     clean,
     nfc,
@@ -100,10 +103,24 @@ def escape(text: str) -> str:
 
 def inline(content: Iterable[Inline], *, breaks: str = "  \n") -> str:
     """Inline content as Markdown; `breaks` is what a line break becomes."""
-    return "".join(_inline(item, breaks) for item in normalize(list(content)))
+    items = normalize(list(content))
+    out: list[str] = []
+    for index, item in enumerate(items):
+        after = _first_char(items[index + 1]) if index + 1 < len(items) else ""
+        before = out[-1][-1:] if out and out[-1] else ""
+        out.append(_inline(item, breaks, before, after))
+    return "".join(out)
 
 
-def _inline(item: Inline, breaks: str) -> str:
+def _first_char(item: Inline) -> str:
+    if isinstance(item, str):
+        return item[:1]
+    if isinstance(item, Span) and item.children:
+        return _first_char(item.children[0])
+    return ""
+
+
+def _inline(item: Inline, breaks: str, before: str = "", after: str = "") -> str:
     if isinstance(item, str):
         return escape(clean(item))
     if isinstance(item, Break):
@@ -112,6 +129,9 @@ def _inline(item: Inline, breaks: str) -> str:
         return f"[^{_label(item.label)}]"
     if item.kind == "code":
         return _code_span(plain(item.children) if item.children else "")
+    if item.kind == "image":
+        alt = _brackets(inline(item.children, breaks=" "))
+        return f"![{alt}]({file_target(item.url)})"
     inner = inline(item.children, breaks=breaks)
     if item.kind == "link":
         # Like emphasis: the white space around a link's text is outside it.
@@ -123,13 +143,40 @@ def _inline(item: Inline, breaks: str) -> str:
     if marker is None:
         return inner
     # A delimiter next to white space does not open or close emphasis, so the
-    # white space goes outside it: `**Vertrag **` would stay literal.
+    # white space goes outside it: `**Vertrag **` would stay literal. So does
+    # punctuation at the edge — `**Hinweis:**Text` stays literal too.
     core = inner.strip()
     if not core:
         return inner
     lead = inner[: len(inner) - len(inner.lstrip())]
     trail = inner[len(inner.rstrip()) :]
+    # Only where it matters: `**Hinweis:**` before a space or at the end of a
+    # paragraph is fine as it is.
+    if not trail and after.isalnum():
+        while len(core) > 1 and _punctuation(core[-1]) and core[-2] != "\\":
+            trail = core[-1] + trail
+            core = core[:-1]
+    if not lead and before.isalnum():
+        while len(core) > 1 and _punctuation(core[0]) and core[0] != "\\":
+            lead = lead + core[0]
+            core = core[1:]
+    if (_punctuation(core[-1]) and not trail and after.isalnum()) or (
+        _punctuation(core[0]) and not lead and before.isalnum()
+    ):
+        # Nothing but punctuation, or an escape at the edge: emphasis would
+        # not take here, so the text goes without it.
+        return lead + core + trail
     return f"{lead}{marker}{core}{marker}{trail}"
+
+
+def _punctuation(char: str) -> bool:
+    return unicodedata.category(char)[0] in "PS"
+
+
+def _brackets(text: str) -> str:
+    """Link text or alt text with every bracket escaped: one left unescaped
+    would end the link early."""
+    return re.sub(r"(?<!\\)([\[\]])", r"\\\1", text)
 
 
 def _code_span(text: str) -> str:
@@ -149,12 +196,18 @@ def _link(text: str, url: str) -> str:
     target = _destination(url)
     if not text.strip() or text == escape(url):
         return f"<{url}>" if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^\s<>]*$", url) else target
-    return f"[{text}]({target})"
+    return f"[{_brackets(text)}]({target})"
 
 
 def _destination(url: str) -> str:
     """A link target that survives white space and parentheses."""
     return quote(url, safe="/:?#[]@!$&'*+,;=%~-._")
+
+
+def file_target(path: str) -> str:
+    """A link to a file next to the note: every character a URL would read as
+    something else — `#`, `?`, `%`, a space — encoded."""
+    return quote(path, safe="/")
 
 
 def _label(label: str) -> str:
@@ -174,8 +227,24 @@ def _paragraph(content: list[Inline]) -> str:
 
 
 def blocks(items: Iterable[Block]) -> str:
-    """Blocks as Markdown, a blank line between each two."""
-    parts = [text for text in (_block(item) for item in items) if text.strip()]
+    """Blocks as Markdown, a blank line between each two.
+
+    Two lists in a row are written with different markers — `-` and `*`,
+    `1.` and `1)` — or Markdown would read them as one.
+    """
+    parts: list[str] = []
+    previous: Block | None = None
+    alternate = False
+    for item in items:
+        if isinstance(item, ListBlock):
+            follows = isinstance(previous, ListBlock) and previous.ordered == item.ordered
+            alternate = not alternate if follows else False
+            text = _list(item, alternate)
+        else:
+            text = _block(item)
+        if text.strip():
+            parts.append(text)
+            previous = item
     return "\n\n".join(parts)
 
 
@@ -187,7 +256,7 @@ def _block(item: Block) -> str:
         if not text:
             return ""
         # A trailing run of `#` would be read as the closing sequence.
-        text = re.sub(r"(\s)(#+)$", r"\1\\\2", text)
+        text = re.sub(r"(^|\s)(#+)$", r"\1\\\2", text)
         return f"{'#' * min(max(item.level, 1), 6)} {text}"
     if isinstance(item, ListBlock):
         return _list(item)
@@ -207,6 +276,8 @@ def _block(item: Block) -> str:
         return f"<!-- {text} -->" if text else ""
     if isinstance(item, Image):
         return _image(item)
+    if isinstance(item, Raw):
+        return item.text.strip("\n")
     if isinstance(item, Footnote):
         inner = blocks(item.blocks)
         if not inner:
@@ -217,7 +288,7 @@ def _block(item: Block) -> str:
     raise TypeError(f"not a block: {item!r}")  # pragma: no cover - a converter bug
 
 
-def _list(item: ListBlock) -> str:
+def _list(item: ListBlock, alternate: bool = False) -> str:
     entries: list[str] = []
     tight = all(
         len(entry) <= 2
@@ -228,7 +299,10 @@ def _list(item: ListBlock) -> str:
     )
     number = max(item.start, 0)
     for entry in item.items:
-        marker = f"{number}." if item.ordered else "-"
+        if item.ordered:
+            marker = f"{number})" if alternate else f"{number}."
+        else:
+            marker = "*" if alternate else "-"
         number += 1
         indent = " " * (len(marker) + 1)
         if tight:
@@ -289,9 +363,9 @@ def _fenced(text: str, language: str) -> str:
 
 def _image(item: Image) -> str:
     parts: list[str] = []
-    alt = escape(clean(item.alt)).replace("\n", " ").strip()
+    alt = _brackets(escape(clean(item.alt)).replace("\n", " ").strip())
     if item.target:
-        parts.append(f"![{alt}]({_destination(item.target)})")
+        parts.append(f"![{alt}]({file_target(item.target)})")
     text = blocks(item.blocks)
     if text:
         quoted = "\n".join(f"> {line}" if line else ">" for line in text.split("\n"))

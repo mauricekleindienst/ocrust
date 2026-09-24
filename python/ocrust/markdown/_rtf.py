@@ -132,6 +132,13 @@ class _State:
     link: str = ""
     field: dict[str, str] | None = None
     in_fldinst: bool = False
+    #: Hidden text (`\\v`): read past, never written.
+    hidden: bool = False
+    #: Inside a list item's number (`\\listtext`), whose own paragraph
+    #: settings are the number's, not the item's.
+    listtext: bool = False
+    #: The code page of the current font, when its character set names one.
+    codec: str = ""
 
 
 @dataclass
@@ -158,21 +165,27 @@ class _Parser:
         self.notes: list[Footnote] = []
         self.note_runs: list[Run] | None = None
         self.pending_skip = 0
+        self.high = 0
+        self.fonts: dict[int, str] = {}
 
     # -- output
 
     def _emit_text(self, text: str, state: _State) -> None:
         if state.skip or not text:
             return
-        if state.in_fldinst and state.field is not None:
-            state.field["instr"] = state.field.get("instr", "") + text
-            return
         if self.pending_skip:
+            # The fallback a `\\u` escape is followed by, for readers that
+            # do not know it: skipped, hidden or not.
             dropped = min(self.pending_skip, len(text))
             text = text[dropped:]
             self.pending_skip -= dropped
             if not text:
                 return
+        if state.hidden:
+            return
+        if state.in_fldinst and state.field is not None:
+            state.field["instr"] = state.field.get("instr", "") + text
+            return
         if state.script == "super":
             text = superscript(text)
         elif state.script == "sub":
@@ -290,7 +303,8 @@ class _Parser:
                     self.hex.append(int(hexa, 16))
                 continue
             if self.hex and newline is None:
-                self._emit_text(bytes(self.hex).decode(self.codec, "replace"), state)
+                codec = state.codec or self.codec
+                self._emit_text(bytes(self.hex).decode(codec, "replace"), state)
                 self.hex.clear()
             if brace == "{":
                 stack.append(state)
@@ -323,7 +337,10 @@ class _Parser:
             if text is not None:
                 if not state.skip:
                     self._emit_text(
-                        text.encode("latin-1", "replace").decode(self.codec, "replace"), state
+                        text.encode("latin-1", "replace").decode(
+                            state.codec or self.codec, "replace"
+                        ),
+                        state,
                     )
                 continue
             if hexa is not None:
@@ -345,8 +362,10 @@ class _Parser:
             assert word is not None
             number = int(param) if param is not None else None
             if first or ignorable:
+                if word in ("listtext", "pntext"):
+                    state.listtext = True
                 if word in _SKIPPED or (
-                    ignorable and word not in ("footnote", "fldrslt", "shptxt")
+                    ignorable and word not in ("footnote", "fldrslt", "shptxt", "shpinst")
                 ):
                     if word == "fldinst":
                         state.in_fldinst = True
@@ -355,7 +374,7 @@ class _Parser:
                     ignorable = False
                     continue
                 ignorable = False
-            if state.skip and word not in ("u",):
+            if state.skip:
                 continue
             self._control(word, number, state)
         self.end_paragraph()
@@ -374,6 +393,8 @@ class _Parser:
                 return
             if word in _PARAGRAPH_WORDS:
                 return
+        if state.listtext and word in _PARAGRAPH_WORDS:
+            return
         if word == "ansicpg" and number:
             try:
                 codecs.lookup(f"cp{number}")
@@ -383,10 +404,23 @@ class _Parser:
         elif word in ("mac",):
             self.codec = "mac_roman"
         elif word == "u" and number is not None:
-            if state.skip:
-                return
-            self._emit_text(chr(number + 65536 if number < 0 else number), state)
+            code = number + 65536 if number < 0 else number
+            self.pending_skip = 0
+            if 0xD800 <= code <= 0xDBFF:
+                # The first half of a character outside the basic plane — an
+                # emoji, as Word writes it: the second half follows.
+                self.high = code
+            elif 0xDC00 <= code <= 0xDFFF:
+                if self.high:
+                    combined = 0x10000 + ((self.high - 0xD800) << 10) + (code - 0xDC00)
+                    self._emit_text(chr(combined), state)
+                self.high = 0
+            else:
+                self.high = 0
+                self._emit_text(chr(code), state)
             self.pending_skip = state.unicode_skip
+        elif word == "f" and number is not None:
+            state.codec = self.fonts.get(number, "")
         elif word == "uc" and number is not None:
             state.unicode_skip = max(number, 0)
         elif word in ("par", "sect") or word == "page":
@@ -438,8 +472,9 @@ class _Parser:
         elif word == "nosupersub":
             state.script = ""
         elif word == "v":
-            # Hidden text.
-            state.skip = on
+            # Hidden text: its control words still count — the `\\v0` that
+            # ends it among them.
+            state.hidden = on
         elif word == "footnote":
             state.footnote = True
             self.note_runs = []
@@ -474,6 +509,40 @@ def _group_at(text: str, start: int) -> str:
                 return text[start : index + 1]
         index += 1
     return text[start:]
+
+
+#: Code pages by RTF character set.
+_CHARSETS = {
+    0: "cp1252",
+    128: "cp932",
+    129: "cp949",
+    134: "cp936",
+    136: "cp950",
+    161: "cp1253",
+    162: "cp1254",
+    163: "cp1258",
+    177: "cp1255",
+    178: "cp1256",
+    186: "cp1257",
+    204: "cp1251",
+    222: "cp874",
+    238: "cp1250",
+}
+
+
+def _fonts(text: str) -> dict[int, str]:
+    """The code page of every font whose character set names one: Cyrillic
+    text in a WordPad file is in its font's code page, not the document's."""
+    found = text.find("{\\fonttbl")
+    if found < 0:
+        return {}
+    table = _group_at(text, found)
+    out: dict[int, str] = {}
+    for match in re.finditer(r"\\f(\d+)[^;{}]*?\\fcharset(\d+)", table):
+        codec = _CHARSETS.get(int(match.group(2)))
+        if codec:
+            out[int(match.group(1))] = codec
+    return out
 
 
 def _styles(text: str) -> dict[int, str]:
@@ -540,5 +609,7 @@ def rtf(data: bytes, _ctx: Context) -> Note:
         from ._package import ConversionError
 
         raise ConversionError("not an RTF document")
-    blocks = _Parser(text, _styles(text)).parse()
+    parser = _Parser(text, _styles(text))
+    parser.fonts = _fonts(text)
+    blocks = parser.parse()
     return Note(blocks=blocks, meta=_info(text))

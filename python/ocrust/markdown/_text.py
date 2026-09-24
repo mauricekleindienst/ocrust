@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import contextlib
 import csv
 import io
-import json
 import re
+import sys
 from typing import Any
 
 from ._context import Context
@@ -117,14 +116,16 @@ def decode_text(data: bytes) -> str:
         (b"\xfe\xff", "utf-16-be"),
     ):
         if data.startswith(bom):
-            return data[len(bom) :].decode(encoding, "replace")
+            text = data[len(bom) :].decode(encoding, "replace")
+            return text.replace("\r\n", "\n").replace("\r", "\n")
     sample = data[:4096]
     if sample and sample.count(b"\x00") > len(sample) // 4:
         # UTF-16 without a byte order mark: every other byte of ASCII is zero.
         odd = sample[1::2].count(b"\x00")
-        return data.decode(
+        text = data.decode(
             "utf-16-le" if odd >= sample[0::2].count(b"\x00") else "utf-16-be", "replace"
         )
+        return text.replace("\r\n", "\n").replace("\r", "\n")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
@@ -185,17 +186,30 @@ def text_blocks(text: str, *, wrapped: bool = True) -> list[Block]:
 def _chunk(lines: list[str], width: int) -> list[Block]:
     if len(lines) == 2 and re.match(r"^\s*(=+|-+)\s*$", lines[1]) and lines[0].strip():
         return [Heading(1 if "=" in lines[1] else 2, [lines[0].strip()])]
-    if all(line.lstrip().startswith(">") for line in lines):
+    quoted = [line.lstrip().startswith(">") for line in lines]
+    if any(quoted) and not all(quoted):
+        # A quote and the reply beneath it, with no blank line between: each
+        # run of lines on its own.
+        out: list[Block] = []
+        start = 0
+        for index in range(1, len(lines) + 1):
+            if index == len(lines) or quoted[index] != quoted[start]:
+                out.extend(_chunk(lines[start:index], width))
+                start = index
+        return out
+    if all(quoted):
         inner = "\n".join(re.sub(r"^\s*>\s?", "", line) for line in lines)
         return [Quote(text_blocks(inner, wrapped=width > 0))]
-    if len(lines) >= 2 and all("\t" in line for line in lines):
-        widths = {len(line.split("\t")) for line in lines}
-        if len(widths) == 1:
-            return [Table([[[cell.strip()] for cell in line.split("\t")] for line in lines])]
     if all(line.startswith(("    ", "\t")) for line in lines):
         return [
             Code("\n".join(line[4:] if line.startswith("    ") else line[1:] for line in lines))
         ]
+    if len(lines) >= 2 and all("\t" in line.strip("\t") for line in lines):
+        widths = {len(line.strip("\t").split("\t")) for line in lines}
+        if len(widths) == 1:
+            return [
+                Table([[[cell.strip()] for cell in line.strip("\t").split("\t")] for line in lines])
+            ]
     items = _list_items(lines)
     if items is not None:
         return items
@@ -285,6 +299,9 @@ def delimited(data: bytes, ctx: Context, delimiter: str | None = None) -> Note:
         except csv.Error:
             counts = {d: sample.count(d) for d in (",", ";", "\t", "|")}
             delimiter = max(counts, key=lambda d: counts[d])
+    # A cell may hold a whole letter; the reader's default of 128 kB would
+    # make that an error.
+    csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
     rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
     rows = [row for row in rows if any(cell.strip() for cell in row)]
     blocks: list[Block] = []
@@ -305,28 +322,63 @@ def code(data: bytes, _ctx: Context, suffix: str) -> Note:
     text = decode_text(data)
     language = CODE_LANGUAGES.get(suffix, "")
     if language == "json" and "\n" not in text.strip() and len(text) > 120:
-        with contextlib.suppress(ValueError):
-            text = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+        text = _indent_json(text)
     return Note(blocks=[Code(text, language)])
+
+
+def _indent_json(text: str) -> str:
+    """Minified JSON laid out on lines, character for character otherwise: no
+    number is reformatted, no duplicate key dropped, as parsing and writing it
+    again would."""
+    out: list[str] = []
+    depth = 0
+    in_string = escaped = False
+    newline = "\n"
+    for char in text.strip():
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+        elif char in "{[":
+            depth += 1
+            out.append(char + newline + "  " * depth)
+        elif char in "}]":
+            depth = max(depth - 1, 0)
+            out.append(newline + "  " * depth + char)
+        elif char == ",":
+            out.append("," + newline + "  " * depth)
+        elif char == ":":
+            out.append(": ")
+        elif not char.isspace():
+            out.append(char)
+    # Empty objects and arrays back on one line.
+    return re.sub(r"([\[{])\n\s*([\]}])", r"\1\2", "".join(out))
 
 
 def subtitles(data: bytes, _ctx: Context) -> Note:
     """Subtitles and transcripts (`.srt`, `.vtt`): the spoken text, without
-    cue numbers and timings, in paragraphs of a readable length."""
+    cue numbers, timings, styles and notes, in paragraphs of a readable
+    length."""
     text = decode_text(data)
     spoken: list[str] = []
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if (
-            not stripped
-            or stripped.isdigit()
-            or "-->" in stripped
-            or stripped.startswith(("WEBVTT", "NOTE", "STYLE", "REGION", "Kind:", "Language:"))
-        ):
+    for cue in re.split(r"\n\s*\n", text):
+        lines = [line.strip() for line in cue.strip("\n").split("\n") if line.strip()]
+        timing = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        if timing is None:
+            # WEBVTT headers, STYLE and REGION blocks, NOTEs: no speech.
             continue
-        stripped = re.sub(r"<[^>]+>", "", stripped)
-        if not spoken or spoken[-1] != stripped:
-            spoken.append(stripped)
+        for line in lines[timing + 1 :]:
+            line = re.sub(r"<[^>]+>", "", line).strip()
+            if line and (not spoken or spoken[-1] != line):
+                spoken.append(line)
     blocks: list[Block] = []
     current = ""
     for piece in spoken:

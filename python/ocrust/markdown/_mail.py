@@ -15,18 +15,35 @@ import re
 from email.message import EmailMessage, Message
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any
+from urllib.parse import urljoin
 
 from ._context import Context
-from ._html import decode_html, html_blocks
-from ._ir import Block, Heading, Marker, Note, Paragraph, Span
+from ._html import decode_html, html_blocks, web_codec
+from ._ir import Block, Heading, Marker, Note, Paragraph, Span, body_of, relabel
 from ._text import text_blocks
 
 #: How deep mails inside mails are followed.
 _MAX_DEPTH = 4
 
 
+def _header(message: Message, name: str) -> str | None:
+    """A header's value, or None when it is missing — or so broken the mail
+    library cannot parse it, which must not cost the mail its body."""
+    try:
+        value = message.get(name)
+    except Exception:  # noqa: BLE001 - any malformed header is just absent
+        return None
+    try:
+        return str(value) if value is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _addresses(message: Message, header: str) -> list[str]:
-    values = message.get_all(header) or []
+    try:
+        values = message.get_all(header) or []
+    except Exception:  # noqa: BLE001 - a malformed address list is an empty one
+        return []
     out: list[str] = []
     for name, address in getaddresses([str(v) for v in values]):
         if address and name:
@@ -38,20 +55,20 @@ def _addresses(message: Message, header: str) -> list[str]:
 
 def _meta(message: Message) -> dict[str, Any]:
     meta: dict[str, Any] = {}
-    subject = message.get("subject")
-    meta["title"] = str(subject).strip() if subject else None
+    subject = _header(message, "subject")
+    meta["title"] = subject.strip() if subject else None
     sender = _addresses(message, "from")
     meta["from"] = sender[0] if sender else None
     meta["to"] = _addresses(message, "to") or None
     meta["cc"] = _addresses(message, "cc") or None
-    date = message.get("date")
+    date = _header(message, "date")
     if date:
         try:
-            meta["date"] = parsedate_to_datetime(str(date))
+            meta["date"] = parsedate_to_datetime(date)
         except (TypeError, ValueError, IndexError):
             meta["date"] = None
-    message_id = message.get("message-id")
-    meta["message_id"] = str(message_id).strip().strip("<>") if message_id else None
+    message_id = _header(message, "message-id")
+    meta["message_id"] = message_id.strip().strip("<>") or None if message_id else None
     return meta
 
 
@@ -62,7 +79,7 @@ def _decoded(part: Message) -> str:
     charset = part.get_content_charset() or ""
     if part.get_content_type() == "text/html" and not charset:
         return decode_html(payload)
-    for encoding in (charset, "utf-8", "cp1252"):
+    for encoding in (web_codec(charset) if charset else "", "utf-8", "cp1252"):
         if not encoding:
             continue
         try:
@@ -122,8 +139,11 @@ def _message_blocks(message: Message, ctx: Context, depth: int) -> list[Block]:
         blocks.extend(body)
     elif plain_part is not None:
         blocks.extend(text_blocks(_decoded(plain_part), wrapped=True))
-    for part in _attachments(message):
-        name = part.get_filename() or ""
+    for count, part in enumerate(_attachments(message), 1):
+        try:
+            name = part.get_filename() or ""
+        except Exception:  # noqa: BLE001 - a broken file name is none
+            name = ""
         if part.get_content_type() == "message/rfc822" and depth < _MAX_DEPTH:
             payload = part.get_payload()
             inner = payload[0] if isinstance(payload, list) and payload else None
@@ -138,7 +158,9 @@ def _message_blocks(message: Message, ctx: Context, depth: int) -> list[Block]:
                 ]
                 if facts:
                     blocks.append(Paragraph([Span("emph", ["; ".join(str(f) for f in facts)])]))
-                blocks.extend(_demote(_message_blocks(inner, ctx, depth + 1)))
+                blocks.extend(
+                    _demote(relabel(_message_blocks(inner, ctx, depth + 1), f"m{depth}-{count}-"))
+                )
             continue
         data = part.get_payload(decode=True)
         if not isinstance(data, bytes) or not name:
@@ -159,7 +181,7 @@ def _message_blocks(message: Message, ctx: Context, depth: int) -> list[Block]:
             continue
         blocks.append(Marker(f"attachment {name}"))
         blocks.append(Heading(2, [f"Attachment: {name}"]))
-        blocks.extend(_demote(note.blocks))
+        blocks.extend(_demote(relabel(body_of(note), f"a{depth}-{count}-")))
     return blocks
 
 
@@ -191,8 +213,13 @@ def mht(data: bytes, ctx: Context) -> Note:
     html_part, plain_part = _body_parts(message)
     related = _related(message)
     if html_part is not None:
-        base = str(html_part.get("content-location") or message.get("content-location") or "")
-        blocks, meta = html_blocks(_decoded(html_part), ctx, related.get, base)
+        base = _header(html_part, "content-location") or _header(message, "content-location") or ""
+
+        def resolve(src: str) -> tuple[bytes, str] | None:
+            # By the address the page used, or by the one it resolves to.
+            return related.get(src) or (related.get(urljoin(base, src)) if base else None)
+
+        blocks, meta = html_blocks(_decoded(html_part), ctx, resolve, base)
     elif plain_part is not None:
         blocks, meta = text_blocks(_decoded(plain_part), wrapped=True), {}
     else:

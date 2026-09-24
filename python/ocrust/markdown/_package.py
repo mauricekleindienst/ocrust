@@ -17,8 +17,12 @@ from collections.abc import Iterator
 from typing import Any
 from xml.etree import ElementTree
 
-#: The most any one part of a package may unpack to.
+#: The most any one part of a package may unpack to: pictures, and parts read
+#: as a stream (a worksheet, the shared strings).
 PART_LIMIT = 512 * 1024 * 1024
+#: The most an XML part read whole may unpack to. Its tree takes twenty times
+#: that in memory; a Word document of this size is a few thousand pages.
+XML_LIMIT = 64 * 1024 * 1024
 
 
 class ConversionError(Exception):
@@ -52,8 +56,69 @@ class Package:
         return data
 
     def xml(self, name: str) -> ElementTree.Element | None:
-        data = self.read(name)
+        data = self.read(name, XML_LIMIT)
         return parse_xml(data) if data is not None else None
+
+    def stream_elements(
+        self, name: str, tag: str, limit: int = PART_LIMIT
+    ) -> Iterator[ElementTree.Element]:
+        """The elements called `tag` of an XML part, one at a time, each let go
+        once it has been looked at: a sheet of a million rows in the memory
+        of one."""
+        found = self.find(name)
+        if found is None:
+            return
+        with self.zip.open(found) as raw:
+            stream = _Limited(raw, limit, found)
+            head = stream.peek_head()
+            if b"<!doctype" in head[:4096].lower() or b"<!entity" in head.lower():
+                raise ConversionError("XML with a document type declaration is not read")
+            stack: list[ElementTree.Element] = []
+            try:
+                for event, element in ElementTree.iterparse(stream, events=("start", "end")):
+                    if event == "start":
+                        stack.append(element)
+                        continue
+                    stack.pop()
+                    if local(element.tag) == tag:
+                        yield element
+                        element.clear()
+                        if stack:
+                            stack[-1].remove(element)
+            except ElementTree.ParseError as exc:
+                raise ConversionError(f"broken XML in {found}: {exc}") from exc
+
+
+class _Limited(io.RawIOBase):
+    """A zip member's stream that refuses to unpack past a limit."""
+
+    def __init__(self, raw: Any, limit: int, name: str) -> None:
+        self.raw = raw
+        self.limit = limit
+        self.name = name
+        self.count = 0
+        self.head = b""
+
+    def peek_head(self) -> bytes:
+        self.head = self.raw.read(65536)
+        return self.head
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        if self.head:
+            size = min(len(buffer), len(self.head))
+            buffer[:size] = self.head[:size]
+            self.head = self.head[size:]
+        else:
+            chunk = self.raw.read(len(buffer))
+            size = len(chunk)
+            buffer[:size] = chunk
+        self.count += size
+        if self.count > self.limit:
+            raise ConversionError(f"{self.name} unpacks to more than {self.limit // 2**20} MB")
+        return size
 
 
 def parse_xml(data: bytes) -> ElementTree.Element:

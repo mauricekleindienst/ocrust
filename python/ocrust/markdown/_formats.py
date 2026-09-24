@@ -9,10 +9,11 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from ._context import Context
 from ._html import decode_html, html_blocks
-from ._ir import Block, Heading, Marker, Note
+from ._ir import Block, Heading, Marker, Note, body_of, relabel
 from ._package import (
     ConversionError,
     Package,
@@ -67,7 +68,7 @@ def epub(data: bytes, ctx: Context) -> Note:
     for item in (
         children(child(opf, "manifest"), "item") if child(opf, "manifest") is not None else []
     ):
-        href = attr(item, "href") or ""
+        href = unquote(attr(item, "href") or "")
         manifest[attr(item, "id") or ""] = (
             posixpath.normpath(posixpath.join(folder, href)),
             attr(item, "media-type") or "",
@@ -88,7 +89,7 @@ def epub(data: bytes, ctx: Context) -> Note:
         chapter_folder = posixpath.dirname(path)
 
         def resolve(src: str, base: str = chapter_folder) -> tuple[bytes, str] | None:
-            target = posixpath.normpath(posixpath.join(base, src.split("#", 1)[0]))
+            target = posixpath.normpath(posixpath.join(base, unquote(src.split("#", 1)[0])))
             content = package.read(target)
             return (content, target) if content is not None else None
 
@@ -115,13 +116,14 @@ def zip_archive(data: bytes, ctx: Context) -> Note:
             note = ctx.convert(content, name, ctx)
         except Exception:  # noqa: BLE001 - one member must not sink the archive
             continue
-        if note is None or not note.blocks:
+        content = body_of(note) if note is not None else []
+        if not content:
             continue
         blocks.append(Marker(f"member {name}"))
         blocks.append(Heading(2, [name]))
         blocks.extend(
             Heading(min(b.level + 2, 6), b.content) if isinstance(b, Heading) else b
-            for b in note.blocks
+            for b in relabel(content, f"z{len(blocks)}-")
         )
     return Note(blocks=blocks)
 
@@ -133,6 +135,7 @@ def archive_members(data: bytes) -> list[tuple[str, bytes]]:
     except zipfile.BadZipFile as exc:
         raise ConversionError("not a valid zip archive") from exc
     out: list[tuple[str, bytes]] = []
+    seen: set[str] = set()
     total = 0
     for info in archive.infolist()[:_MAX_MEMBERS]:
         name = info.filename.replace("\\", "/")
@@ -151,8 +154,11 @@ def archive_members(data: bytes) -> list[tuple[str, bytes]]:
             break
         total += len(content)
         clean = posixpath.normpath(name).lstrip("/")
-        if clean.startswith("../"):
+        if clean.startswith("../") or clean == ".." or clean.lower() in seen:
+            # Outside the archive, or a second entry of one name: the first
+            # is the one kept.
             continue
+        seen.add(clean.lower())
         out.append((clean, content))
     return out
 

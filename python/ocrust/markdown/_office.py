@@ -22,6 +22,7 @@ from ._ir import (
     Block,
     Break,
     Code,
+    Entry,
     Footnote,
     FootnoteRef,
     Heading,
@@ -37,6 +38,7 @@ from ._ir import (
     assemble,
     flatten,
     is_empty,
+    nest,
     plain,
     strip,
     subscript,
@@ -167,6 +169,7 @@ class _Para:
     ordered: bool = False
     number: int = 1
     style: str = ""
+    list_id: object = None
 
 
 class _Numbering:
@@ -182,7 +185,7 @@ class _Numbering:
         for item in children(root, "abstractNum"):
             levels: dict[int, _Level] = {}
             for lvl in children(item, "lvl"):
-                index = int(attr(lvl, "ilvl") or 0)
+                index = _level_number(attr(lvl, "ilvl"))
                 fmt = (
                     attr(child(lvl, "numFmt"), "val", "decimal")
                     if child(lvl, "numFmt") is not None
@@ -192,7 +195,7 @@ class _Numbering:
                 text = child(lvl, "lvlText")
                 levels[index] = _Level(
                     fmt=fmt or "decimal",
-                    start=int(attr(start, "val") or 1) if start is not None else 1,
+                    start=_count(attr(start, "val"), 1, 10**6) if start is not None else 1,
                     text=(attr(text, "val") or "") if text is not None else "",
                 )
             self.abstract[attr(item, "abstractNumId") or ""] = levels
@@ -202,7 +205,9 @@ class _Numbering:
             for override in children(num, "lvlOverride"):
                 start = child(override, "startOverride")
                 if start is not None:
-                    overrides[int(attr(override, "ilvl") or 0)] = int(attr(start, "val") or 1)
+                    overrides[_level_number(attr(override, "ilvl"))] = _count(
+                        attr(start, "val"), 1, 10**6
+                    )
             self.nums[attr(num, "numId") or ""] = (
                 attr(abstract, "val") or "" if abstract is not None else "",
                 overrides,
@@ -281,6 +286,16 @@ class _Styles:
                 return level + 1 if level < 9 else 0
         return 0
 
+    def vanishes(self, sid: str) -> bool | None:
+        """Whether a style hides its text; `None` when it says nothing."""
+        for style in self.chain(sid):
+            rpr = child(style, "rPr")
+            for name in ("vanish", "specVanish"):
+                flag = child(rpr, name)
+                if flag is not None:
+                    return _on(flag)
+        return None
+
     def numbering(self, sid: str) -> tuple[str, int] | None:
         for style in self.chain(sid):
             num = child(child(style, "pPr"), "numPr")
@@ -289,9 +304,26 @@ class _Styles:
                 ilvl = child(num, "ilvl")
                 return (
                     attr(num_id, "val") or "" if num_id is not None else "",
-                    int(attr(ilvl, "val") or 0) if ilvl is not None else 0,
+                    _level_number(attr(ilvl, "val")) if ilvl is not None else 0,
                 )
         return None
+
+
+def _level_number(value: str | None) -> int:
+    """A list level, within the nine Word has."""
+    try:
+        return min(max(int(value or 0), 0), 8)
+    except ValueError:
+        return 0
+
+
+def _count(value: str | None, default: int = 1, most: int = 64) -> int:
+    """A span or repeat count from the file, kept within reason: a file may
+    claim thirty million columns for one cell."""
+    try:
+        return min(max(int(value or default), 1), most)
+    except ValueError:
+        return default
 
 
 def _on_attr(value: str | None) -> bool:
@@ -318,6 +350,7 @@ class _Word:
                     self.notes[f"{kind}{note_id}"] = note
         self.used_notes: list[str] = []
         self.titled = False
+        self.paragraph_style = ""
 
     def convert(self) -> Note:
         root = self.package.xml(self.part)
@@ -368,7 +401,7 @@ class _Word:
 
         def flush() -> None:
             if items:
-                out.append(_nest_items(items))
+                out.extend(_nest_items(items))
                 items.clear()
             if code:
                 out.append(Code("\n".join(code)))
@@ -386,7 +419,7 @@ class _Word:
                 continue
             if entry.style in _CODE_STYLES:
                 if items:
-                    out.append(_nest_items(items))
+                    out.extend(_nest_items(items))
                     items.clear()
                 code.append(plain(entry.content))
                 continue
@@ -419,7 +452,11 @@ class _Word:
         style_el = child(ppr, "pStyle")
         sid = attr(style_el, "val") or "" if style_el is not None else self.styles.default
         extras: list[Block] = []
-        content = self._inlines(p, extras)
+        outer_style, self.paragraph_style = self.paragraph_style, sid
+        try:
+            content = self._inlines(p, extras)
+        finally:
+            self.paragraph_style = outer_style
         para = _Para(content=content, extras=extras, style=self.styles.name(sid))
 
         level = self._style_level(p)
@@ -435,7 +472,7 @@ class _Word:
             ilvl = child(num, "ilvl")
             numbering = (
                 attr(num_id, "val") or "" if num_id is not None else "",
-                int(attr(ilvl, "val") or 0) if ilvl is not None else 0,
+                _level_number(attr(ilvl, "val")) if ilvl is not None else 0,
             )
             if not numbering[0] and sid:
                 inherited = self.styles.numbering(sid)
@@ -461,6 +498,7 @@ class _Word:
                         para.list_level = int(style_level.group(1)) - 1
                     para.ordered = lvl.fmt != "bullet"
                     para.number = number
+                    para.list_id = numbering[0]
         if is_empty(para.content) and not para.extras:
             return []
         if is_empty(para.content):
@@ -517,7 +555,7 @@ class _Word:
         state: _FieldState,
     ) -> None:
         rpr = child(run, "rPr")
-        if _on(child(rpr, "vanish")) or _on(child(rpr, "specVanish")):
+        if self._hidden(rpr):
             return
         fmt: set[str] = set()
         if _on(child(rpr, "b")):
@@ -573,6 +611,20 @@ class _Word:
                     for inner in choice:
                         if local(inner.tag) in ("drawing", "pict", "object"):
                             extras.extend(self._drawing(inner))
+
+    def _hidden(self, rpr: Element | None) -> bool:
+        """Whether a run is hidden text: by its own formatting, else by its
+        character style, else by its paragraph's style."""
+        for name in ("vanish", "specVanish"):
+            flag = child(rpr, name)
+            if flag is not None:
+                return _on(flag)
+        style = child(rpr, "rStyle")
+        if style is not None:
+            by_style = self.styles.vanishes(attr(style, "val") or "")
+            if by_style is not None:
+                return by_style
+        return bool(self.styles.vanishes(self.paragraph_style))
 
     def _note_ref(self, note_id: str, kind: str, runs: list[Run]) -> None:
         label = f"{kind}{note_id}"
@@ -632,10 +684,19 @@ class _Word:
         rows: list[list[list[Block]]] = []
         for tr in _rows(table):
             row: list[list[Block]] = []
+            # Cells a row leaves out on its left: its values start further right.
+            before = child(child(tr, "trPr"), "gridBefore")
+            if before is not None:
+                row.extend(
+                    []
+                    for _ in range(
+                        _count(attr(before, "val"), 0) if attr(before, "val") != "0" else 0
+                    )
+                )
             for tc in _cells(tr):
                 tcpr = child(tc, "tcPr")
                 span_el = child(tcpr, "gridSpan")
-                span = int(attr(span_el, "val") or 1) if span_el is not None else 1
+                span = _count(attr(span_el, "val")) if span_el is not None else 1
                 merge = child(tcpr, "vMerge")
                 continued = merge is not None and (attr(merge, "val") or "continue") == "continue"
                 blocks = [] if continued else self._body(tc)
@@ -731,29 +792,21 @@ def _unbold(content: list[Inline]) -> list[Inline]:
     return out
 
 
-def _nest_items(items: list[_Para]) -> ListBlock:
-    """Word list paragraphs as nested lists, by their list level."""
-    return _nest_from(items, 0)[0]
-
-
-def _nest_from(items: list[_Para], start: int) -> tuple[ListBlock, int]:
-    first = items[start]
-    result = ListBlock(ordered=first.ordered, items=[], start=first.number)
-    index = start
-    while index < len(items):
-        item = items[index]
-        if item.list_level < first.list_level:
-            break
-        if item.list_level > first.list_level and result.items:
-            nested, index = _nest_from(items, index)
-            result.items[-1].append(nested)
-            continue
-        if item.list_level > first.list_level:
-            # A list that starts deeper than it goes on: take it as it comes.
-            item.list_level = first.list_level
-        result.items.append([Paragraph(item.content), *item.extras])
-        index += 1
-    return result, index
+def _nest_items(items: list[_Para]) -> list[Block]:
+    """List paragraphs as nested lists, by their level; a paragraph of another
+    list, or of another kind, at the same level starts a list of its own."""
+    return nest(
+        [
+            Entry(
+                level=item.list_level,
+                ordered=item.ordered,
+                blocks=[Paragraph(item.content), *item.extras],
+                number=item.number,
+                list_id=item.list_id,
+            )
+            for item in items
+        ]
+    )
 
 
 def _main_part(package: Package, fallback: str) -> str:
@@ -929,15 +982,20 @@ class _Slides:
                 target = self.rels.get(rel_id(entry))
                 if target and not target[2]:
                     slides.append(target[1])
+        shown = 0
         for number, part in enumerate(slides, 1):
-            blocks.extend(self._slide(number, part))
+            converted = self._slide(number, part)
+            if converted:
+                shown += 1
+            blocks.extend(converted)
         meta = office_properties(self.package)
-        meta["slides"] = len(slides)
+        meta["slides"] = shown
         return Note(blocks=blocks, meta=meta)
 
     def _slide(self, number: int, part: str) -> list[Block]:
         root = self.package.xml(part)
-        if root is None:
+        if root is None or root.get("show") in ("0", "false"):
+            # A hidden slide is not part of the talk.
             return []
         rels = relationships(self.package, part)
         layout_positions = self._layout_positions(rels)
@@ -994,6 +1052,9 @@ class _Slides:
                 continue
             ph_type, ph_idx = _placeholder(node)
             if ph_type in _SKIPPED_PLACEHOLDERS:
+                continue
+            own = next(descendants(node, "cNvPr"), None)
+            if own is not None and _on_attr(attr(own, "hidden")):
                 continue
             position = _offset(node) or layout.get(f"idx:{ph_idx}") or layout.get(f"type:{ph_type}")
             if position is None:
@@ -1088,39 +1149,46 @@ def _drawing_text(
 ) -> list[Block]:
     """A DrawingML text body: paragraphs, and bullets where the shape or the
     paragraph asks for them."""
-    paragraphs: list[tuple[int, str, list[Inline]]] = []
+    paragraphs: list[tuple[int, str, list[Inline], int]] = []
     for p in children(body, "p"):
         ppr = child(p, "pPr")
-        try:
-            level = int(attr(ppr, "lvl") or 0) if ppr is not None else 0
-        except ValueError:
-            level = 0
+        level = _level_number(attr(ppr, "lvl")) if ppr is not None else 0
+        start = 1
+        auto = child(ppr, "buAutoNum")
         if child(ppr, "buNone") is not None:
             kind = "none"
-        elif child(ppr, "buAutoNum") is not None:
+        elif auto is not None:
             kind = "ordered"
+            start = _count(attr(auto, "startAt"), 1, 10**6)
         elif child(ppr, "buChar") is not None or child(ppr, "buBlip") is not None:
             kind = "bullet"
         else:
             kind = "inherited" if bulleted else "none"
         content = _drawing_runs(p, rels)
         if not is_empty(content):
-            paragraphs.append((level, kind, content))
+            paragraphs.append((level, kind, content, start))
     if len(paragraphs) == 1 and paragraphs[0][1] == "inherited" and paragraphs[0][0] == 0:
         # One statement in a text placeholder is a sentence, not a list.
-        paragraphs = [(0, "none", paragraphs[0][2])]
+        paragraphs = [(0, "none", paragraphs[0][2], 1)]
     out: list[Block] = []
     items: list[_Para] = []
-    for level, kind, content in paragraphs:
+    counters: dict[int, int] = {}
+    for level, kind, content, start in paragraphs:
         if kind == "none":
             if items:
-                out.append(_nest_items(items))
+                out.extend(_nest_items(items))
                 items = []
+            counters.clear()
             out.append(Paragraph(content))
-        else:
-            items.append(_Para(content=content, list_level=level, ordered=kind == "ordered"))
+            continue
+        counters = {k: v for k, v in counters.items() if k <= level}
+        number = counters.get(level, start - 1) + 1
+        counters[level] = number
+        items.append(
+            _Para(content=content, list_level=level, ordered=kind == "ordered", number=number)
+        )
     if items:
-        out.append(_nest_items(items))
+        out.extend(_nest_items(items))
     return out
 
 
@@ -1163,7 +1231,10 @@ def pptx(data: bytes, ctx: Context) -> Note:
 # --------------------------------------------------------------------------
 # Excel
 
-_DATE_FORMATS = {14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 30, 36, 45, 46, 47, 50, 57}
+_DATE_FORMATS = {14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 30, 36, 45, 47, 50, 57}
+_DURATION_FORMATS = {46}
+#: Columns beyond this are a sheet's formatting run to its edge, not data.
+_MAX_SHEET_COLUMNS = 16384
 _PERCENT_FORMATS = {9, 10}
 
 
@@ -1199,7 +1270,8 @@ def _excel_date(serial: float, base_1904: bool) -> _dt.date | _dt.datetime | _dt
     stamp = stamp.replace(microsecond=0) + (
         _dt.timedelta(seconds=1) if stamp.microsecond >= 500000 else _dt.timedelta()
     )
-    if serial < 1 and not base_1904:
+    if serial < 1:
+        # A time of day with no date: 0.5 is noon, in either date system.
         return stamp.time()
     if stamp.time() == _dt.time(0, 0):
         return stamp.date()
@@ -1234,12 +1306,10 @@ class _Workbook:
             self._read_shared(f"{folder}/sharedStrings.xml")
 
     def _read_shared(self, part: str) -> None:
-        root = self.package.xml(part)
-        if root is None:
-            return
-        for si in children(root, "si"):
-            # Plain text, or rich text runs; phonetic readings (`rPh`) are a
-            # reading aid, not part of the value.
+        # Plain text, or rich text runs; phonetic readings (`rPh`) are a
+        # reading aid, not part of the value. Streamed: a workbook's strings
+        # can run to hundreds of megabytes.
+        for si in self.package.stream_elements(part, "si"):
             texts = [t.text or "" for t in children(si, "t")]
             for run in children(si, "r"):
                 texts.extend(t.text or "" for t in children(run, "t"))
@@ -1265,11 +1335,15 @@ class _Workbook:
                 number = 0
             if number in _DATE_FORMATS:
                 self.formats.append("date")
+            elif number in _DURATION_FORMATS:
+                self.formats.append("duration")
             elif number in _PERCENT_FORMATS:
                 self.formats.append("percent")
             elif number in custom:
-                code = custom[number]
-                if "%" in re.sub(r'"[^"]*"', "", code):
+                code = re.sub(r'"[^"]*"', "", custom[number])
+                if re.search(r"\[(h+|m+|s+)\]", code, re.IGNORECASE):
+                    self.formats.append("duration")
+                elif "%" in code:
                     self.formats.append("percent")
                 elif _is_date_format(code):
                     self.formats.append("date")
@@ -1289,49 +1363,59 @@ class _Workbook:
         names: list[str] = []
         truncated = False
         for sheet in children(sheets, "sheet") if sheets is not None else []:
+            if (attr(sheet, "state") or "visible") != "visible":
+                # Hidden on purpose: helper tables, and sometimes secrets.
+                continue
             name = attr(sheet, "name") or f"Sheet {len(names) + 1}"
             target = self.rels.get(rel_id(sheet))
             if not target or target[2] or target[0] != "worksheet":
                 continue
             names.append(name)
-            grid = self._grid(target[1], base_1904)
-            sheet_blocks, cut = _sheet_blocks(grid, self.ctx.options.max_rows)
-            truncated |= cut
+            rows, dropped = self._rows(target[1], base_1904, self.ctx.options.max_rows)
+            truncated |= dropped > 0
             blocks.append(Marker(f"sheet {name}"))
             blocks.append(Heading(2, [name]))
-            blocks.extend(sheet_blocks)
+            blocks.extend(_sheet_blocks(rows, dropped))
         meta = office_properties(self.package)
         meta["sheets"] = len(names)
         if truncated:
             meta["truncated"] = True
         return Note(blocks=blocks, meta=meta)
 
-    def _grid(self, part: str, base_1904: bool) -> dict[tuple[int, int], str]:
-        root = self.package.xml(part)
-        grid: dict[tuple[int, int], str] = {}
-        if root is None:
-            return grid
-        data = child(root, "sheetData")
-        if data is None:
-            return grid
+    def _rows(
+        self, part: str, base_1904: bool, limit: int | None
+    ) -> tuple[dict[int, dict[int, str]], int]:
+        """A sheet's non-empty rows, row → column → text, read as a stream,
+        and how many rows beyond `limit` there were."""
+        rows: dict[int, dict[int, str]] = {}
+        dropped = 0
         next_row = 0
-        for row in children(data, "row"):
+        for row in self.package.stream_elements(part, "row"):
             try:
-                row_index = int(attr(row, "r") or 0) - 1
+                index = int(attr(row, "r") or 0) - 1
             except ValueError:
-                row_index = -1
-            if row_index < 0:
-                row_index = next_row
-            next_row = row_index + 1
+                index = -1
+            if index < 0:
+                index = next_row
+            next_row = index + 1
+            values: dict[int, str] = {}
             next_column = 0
             for cell in children(row, "c"):
                 ref = _cell_ref(attr(cell, "r") or "")
                 column = ref[1] if ref else next_column
                 next_column = column + 1
+                if column > _MAX_SHEET_COLUMNS:
+                    continue
                 text = self._value(cell, base_1904)
                 if text:
-                    grid[(row_index, column)] = text
-        return grid
+                    values[column] = text
+            if not values:
+                continue
+            if limit is not None and len(rows) >= limit:
+                dropped += 1
+                continue
+            rows[index] = values
+        return rows, dropped
 
     def _value(self, cell: Element, base_1904: bool) -> str:
         kind = attr(cell, "t") or "n"
@@ -1368,52 +1452,51 @@ class _Workbook:
             converted = _excel_date(number, base_1904)
             if converted is not None:
                 return _format_serial(converted)
+        if fmt == "duration" and math.isfinite(number):
+            return _duration(number)
         if fmt == "percent":
             return f"{_number(repr(round(number * 100, 10)))} %"
         return _number(raw)
 
 
-def _sheet_blocks(
-    grid: dict[tuple[int, int], str], max_rows: int | None
-) -> tuple[list[Block], bool]:
+def _duration(days: float) -> str:
+    """Elapsed time as Excel's `[h]:mm` shows it: 1.5 days is 36:00."""
+    seconds = round(abs(days) * 86400)
+    hours, rest = divmod(seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    sign = "-" if days < 0 else ""
+    text = f"{sign}{hours}:{minutes:02d}"
+    return f"{text}:{seconds:02d}" if seconds else text
+
+
+def _sheet_blocks(rows: dict[int, dict[int, str]], dropped: int = 0) -> list[Block]:
     """A sheet's cells as tables, split where whole rows are empty.
 
     A sheet often holds a title, a few lines of notes and then the table; a
     run of rows with a single value each is text, not a one-column table.
     """
-    if not grid:
-        return [], False
-    rows = sorted({r for r, _ in grid})
-    groups: list[list[int]] = []
-    for row in rows:
-        if groups and row == groups[-1][-1] + 1:
-            groups[-1].append(row)
-        else:
-            groups.append([row])
     out: list[Block] = []
-    written = 0
-    truncated = False
-    for group in groups:
-        columns = sorted({c for (r, c) in grid if r in set(group)})
-        lines = [[grid.get((r, c), "") for c in columns] for r in group]
-        if all(sum(1 for v in line if v) <= 1 for line in lines):
-            for line in lines:
-                text = next((v for v in line if v), "")
-                if text:
-                    out.append(Paragraph([text]))
-            continue
-        if max_rows is not None and written + len(lines) > max_rows:
-            keep = max(max_rows - written, 1)
-            dropped = len(lines) - keep
-            lines = lines[:keep]
-            truncated = True
+    group: list[int] = []
+
+    def flush() -> None:
+        if not group:
+            return
+        columns = sorted({c for r in group for c in rows[r]})
+        lines = [[rows[r].get(c, "") for c in columns] for r in group]
+        if all(len(rows[r]) <= 1 for r in group):
+            out.extend(Paragraph([next(iter(rows[r].values()))]) for r in group)
+        else:
             out.append(Table([[[v] for v in line] for line in lines]))
-            out.append(Paragraph([Span("emph", [f"{dropped} more rows not shown"])]))
-            written += keep
-            break
-        written += len(lines)
-        out.append(Table([[[v] for v in line] for line in lines]))
-    return out, truncated
+        group.clear()
+
+    for index in sorted(rows):
+        if group and index != group[-1] + 1:
+            flush()
+        group.append(index)
+    flush()
+    if dropped:
+        out.append(Paragraph([Span("emph", [f"{dropped} more rows not shown"])]))
+    return out
 
 
 def xlsx(data: bytes, ctx: Context) -> Note:

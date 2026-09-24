@@ -165,6 +165,7 @@ _INLINE = {
 }
 _HEADINGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
 _STRUCTURE = {"table", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "blockquote", "pre", "dl"}
+_LAYOUT_STRUCTURE = {"table", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "article"}
 _WHITESPACE = re.compile(r"[ \t\n\r\f]+")
 
 
@@ -378,7 +379,7 @@ class _Converter:
         return out
 
     def pre(self, node: Element) -> list[Block]:
-        text = node.text()
+        text = _pre_text(node)
         if text.startswith("\n"):
             text = text[1:]
         language = ""
@@ -394,14 +395,16 @@ class _Converter:
         if not rows:
             return []
         cells = [cell for row in rows for cell in row]
+        # A table that lays out the page — a mail's frame, a newsletter's
+        # columns — holds tables, headings or whole articles in its cells. A
+        # table of data may hold a list or two paragraphs in a cell and is
+        # still a table.
+        text_length = sum(len(cell.text()) for cell in cells)
         layout = (
             node.attrs.get("role") == "presentation"
-            or any(cell.has_any(_STRUCTURE) for cell in cells)
-            or any(
-                sum(1 for c in cell.children if isinstance(c, Element) and c.tag in ("p", "div"))
-                > 1
-                for cell in cells
-            )
+            or any(cell.has_any(_LAYOUT_STRUCTURE) for cell in cells)
+            or (len(cells) <= 2 and text_length > 400)
+            or text_length > 600 * max(len(cells), 1)
         )
         if layout:
             out: list[Block] = []
@@ -536,6 +539,19 @@ class _Converter:
         return self.ctx.picture(data, name, described)
 
 
+def _pre_text(node: Element) -> str:
+    """Preformatted text, a `<br>` as the line break it shows."""
+    parts: list[str] = []
+    for child in node.children:
+        if isinstance(child, str):
+            parts.append(child)
+        elif child.tag == "br":
+            parts.append("\n")
+        elif child.tag not in _SKIP:
+            parts.append(_pre_text(child))
+    return "".join(parts)
+
+
 def _span(value: str | None) -> int:
     try:
         return min(max(int(value or 1), 1), 50)
@@ -546,7 +562,8 @@ def _span(value: str | None) -> int:
 def _invisible(node: Element) -> bool:
     style = node.attrs.get("style", "").replace(" ", "").lower()
     return (
-        "display:none" in style
+        "hidden" in node.attrs
+        or "display:none" in style
         or "visibility:hidden" in style
         or node.attrs.get("aria-hidden") == "true"
     )
@@ -567,14 +584,20 @@ def _table_rows(table: Element) -> list[list[Element]]:
 
 
 def _content_root(root: Element) -> Element:
-    """The part of a page that is the document: its one `<main>` or
-    `<article>`, else its body."""
-    for tag in ("main", "article"):
-        found = root.find_all(tag)
-        if len(found) == 1:
-            return found[0]
+    """The part of a page that is the document: its one `<main>`, or its one
+    `<article>` when that holds most of the page's text, else its body. A
+    teaser in a sidebar is an article too, and not the page."""
     bodies = root.find_all("body")
-    return bodies[0] if bodies else root
+    body = bodies[0] if bodies else root
+    mains = root.find_all("main")
+    if len(mains) == 1:
+        return mains[0]
+    articles = root.find_all("article")
+    if len(articles) == 1:
+        page = len(_WHITESPACE.sub("", body.text()))
+        if len(_WHITESPACE.sub("", articles[0].text())) >= 0.5 * page:
+            return articles[0]
+    return body
 
 
 def metadata(root: Element) -> dict[str, Any]:
@@ -614,6 +637,29 @@ def html_blocks(
     return converter.blocks(_content_root(root)), metadata(root)
 
 
+def web_codec(name: str) -> str:
+    """The codec a browser uses for a declared charset: Latin-1 and ASCII
+    labels mean Windows-1252 on the web, and a page that says ISO-8859-1 but
+    has typographic quotes in it is the rule, not the exception."""
+    label = name.strip().lower().replace("_", "-")
+    if label in (
+        "iso-8859-1",
+        "iso8859-1",
+        "latin1",
+        "latin-1",
+        "l1",
+        "us-ascii",
+        "ascii",
+        "cp819",
+        "ibm819",
+        "iso-ir-100",
+        "windows-1252",
+        "x-cp1252",
+    ):
+        return "cp1252"
+    return label
+
+
 def decode_html(data: bytes) -> str:
     """HTML bytes as text, in the encoding the page declares."""
     if data.startswith(b"\xef\xbb\xbf"):
@@ -626,7 +672,7 @@ def decode_html(data: bytes) -> str:
     )
     if match:
         try:
-            return data.decode(match.group(1), "replace")
+            return data.decode(web_codec(match.group(1)), "replace")
         except LookupError:
             pass
     try:

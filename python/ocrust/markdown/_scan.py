@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from ocrust._types import Block as ScanBlock
 from ocrust._types import Document, Line, Page
 
-from ._ir import Block, Break, Heading, Inline, ListBlock, Marker, Paragraph, Table, plain
+from ._ir import Block, Break, Entry, Heading, Inline, Marker, Paragraph, Table, nest, plain
 
 #: How much of the page height, at the top and at the bottom, running heads and
 #: page numbers are looked for in.
@@ -155,7 +155,7 @@ def _page(page: Page, boilerplate: set[str], levels: dict[float, int]) -> list[B
 
     def flush_list() -> None:
         if items:
-            out.append(_nest(items))
+            out.extend(_nest(items))
             items.clear()
 
     for block, lines in blocks:
@@ -273,30 +273,46 @@ def _with_text(line: Line, text: str) -> Line:
     return dataclasses.replace(line, text=text)
 
 
-def _nest(items: list[_Item]) -> ListBlock:
-    """Items as a list, nested by how far each is indented."""
+def _nest(items: list[_Item]) -> list[Block]:
+    """Items as lists, nested by how far each is indented.
+
+    Indents a little apart are one level — a recognized bullet's box moves by a
+    few pixels — and every item ends up in a list, whatever level the first
+    one sits at.
+    """
     step = statistics.median(
         [abs(b.x - a.x) for a, b in zip(items, items[1:]) if abs(b.x - a.x) > 4] or [1e9]
     )
     tolerance = max(step * 0.5, 6.0)
-    return _build(items, 0, tolerance)[0]
+    levels: list[float] = []
+    for x in sorted(item.x for item in items):
+        if not levels or x - levels[-1] > tolerance:
+            levels.append(x)
 
+    def level(x: float) -> int:
+        return min(range(len(levels)), key=lambda i: abs(levels[i] - x))
 
-def _build(items: list[_Item], start: int, tolerance: float) -> tuple[ListBlock, int]:
-    first = items[start]
-    result = ListBlock(ordered=first.ordered, items=[], start=first.number)
-    index = start
-    while index < len(items):
-        item = items[index]
-        if item.x < first.x - tolerance:
-            break
-        if item.x > first.x + tolerance and result.items:
-            child, index = _build(items, index, tolerance)
-            result.items[-1].append(child)
-            continue
-        result.items.append([Paragraph(item.content)])
-        index += 1
-    return result, index
+    entries: list[Entry] = []
+    last: dict[int, int] = {}
+    lists = 0
+    for item in items:
+        depth = level(item.x)
+        if item.ordered and item.number <= last.get(depth, 0):
+            # Counting starts again: another list.
+            lists += 1
+        last[depth] = item.number if item.ordered else 0
+        for deeper in [d for d in last if d > depth]:
+            del last[deeper]
+        entries.append(
+            Entry(
+                level=depth,
+                ordered=item.ordered,
+                blocks=[Paragraph(item.content)],
+                number=item.number,
+                list_id=lists,
+            )
+        )
+    return nest(entries)
 
 
 def _join_across_pages(blocks: list[Block]) -> list[Block]:
