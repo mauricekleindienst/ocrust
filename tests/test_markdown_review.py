@@ -852,3 +852,89 @@ def test_neighbouring_markup_stays_apart():
     assert _render.inline(keys) == "`StrgC`"
     cited = ["Urteil", _ir.FootnoteRef("1"), "(2019)"]
     assert _render.inline(cited) == "Urteil[^1]\\(2019)"
+
+
+# -- second review round: PDFs read from their own text
+
+
+def _text_stream(lines: list[tuple[str, float, float]], size: int = 11, mode: str = "") -> str:
+    from conftest import _winansi_literal
+
+    shown = (f"/F1 {size} Tf 1 0 0 1 {x} {y} Tm ({_winansi_literal(t)}) Tj" for t, x, y in lines)
+    return f"BT {mode}\n" + "\n".join(shown) + "\nET"
+
+
+def test_a_form_drawn_labels_first_keeps_its_values_beside_them(monkeypatch, tmp_path):
+    from conftest import _pdf_from_stream
+
+    monkeypatch.setenv("OCRUST_MODELS_DIR", str(tmp_path / "no-models"))
+    pairs = [("Rechnungsnummer:", "RE-2026-0042"), ("Kundennummer:", "K-10077")]
+    pairs += [("Zahlungsziel:", "14 Tage netto"), ("Betrag:", "1.299,90 EUR")]
+    template = _text_stream([(label, 72, 700 - i * 16) for i, (label, _) in enumerate(pairs)])
+    data = _text_stream([(value, 190, 700 - i * 16) for i, (_, value) in enumerate(pairs)])
+    text = markdown.convert(_pdf_from_stream(template + "\n" + data), name="r.pdf", ocr=False).body
+    for label, value in pairs:
+        assert any(label in line and value in line for line in text.splitlines()), text
+
+
+def test_body_text_over_a_table_in_smaller_print_is_not_a_heading(monkeypatch, tmp_path):
+    from conftest import _pdf_from_stream
+
+    monkeypatch.setenv("OCRUST_MODELS_DIR", str(tmp_path / "no-models"))
+    body_lines = ["The committee met on Monday to review", "the budget for the coming year."]
+    stream = _text_stream([(t, 60, 740 - i * 14) for i, t in enumerate(body_lines)])
+    rows = [(f"Item {i}", 60, 700 - i * 11) for i in range(12)]
+    rows += [(f"{i * 10},00", 300, 700 - i * 11) for i in range(12)]
+    stream += "\n" + _text_stream(rows, size=9)
+    note = markdown.convert(_pdf_from_stream(stream), name="minutes.pdf", ocr=False)
+    assert not [line for line in note.body.splitlines() if line.startswith("#")]
+    assert note.meta["title"] == "minutes"
+
+
+def test_without_ocr_an_invisible_layer_over_shown_text_is_not_read_twice(monkeypatch, tmp_path):
+    from conftest import _pdf_from_stream
+
+    monkeypatch.setenv("OCRUST_MODELS_DIR", str(tmp_path / "no-models"))
+    lines = ["Der Vertrag beginnt am 1. April.", "Die Miete betraegt 850 EUR."]
+    shown = _text_stream([(t, 72, 700 - i * 18) for i, t in enumerate(lines)], size=12)
+    hidden = _text_stream([(t, 72.5, 700.6 - i * 18) for i, t in enumerate(lines)], mode="3 Tr")
+    text = markdown.convert(_pdf_from_stream(shown + "\n" + hidden), name="v.pdf", ocr=False).body
+    assert text.count("Der Vertrag beginnt") == 1
+
+
+def test_without_ocr_a_font_without_unicode_leaves_the_page_unread(monkeypatch, tmp_path):
+    monkeypatch.setenv("OCRUST_MODELS_DIR", str(tmp_path / "no-models"))
+    names = " ".join(f"/g{i}" for i in range(65, 91))
+    font = (
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+        f"/Encoding << /Type /Encoding /Differences [65 {names}] >> >>"
+    )
+    stream = "BT /F1 14 Tf 72 700 Td (HELLO WORLD THIS IS TEXT) Tj ET"
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        "/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream",
+        font,
+    ]
+    pdf, offsets = "%PDF-1.4\n", []
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf += f"{number} 0 obj\n{obj}\nendobj\n"
+    xref = len(pdf)
+    pdf += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n"
+    pdf += "".join(f"{offset:010} 00000 n \n" for offset in offsets)
+    pdf += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    note = markdown.convert(pdf.encode("latin-1"), name="f.pdf", ocr=False)
+    assert "�" not in note.markdown and note.meta["unread_pages"] == [1]
+
+
+def test_scan_reads_a_pdf_from_its_text_alone_without_the_models(monkeypatch, tmp_path, capsys):
+    from conftest import _pdf_with_text
+
+    monkeypatch.setenv("OCRUST_MODELS_DIR", str(tmp_path / "no-models"))
+    pdf = tmp_path / "t.pdf"
+    pdf.write_bytes(_pdf_with_text([("Hello text layer", 20)]))
+    assert main(["scan", str(pdf), "--pdf-text", "only", "-q"]) == 0
+    assert "Hello text layer" in capsys.readouterr().out

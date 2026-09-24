@@ -139,6 +139,31 @@ fn median_text_height(lines: &[Line]) -> f32 {
     hs[hs.len() / 2]
 }
 
+/// The size most of the characters outside `tables` are set in: the height
+/// at which half of them are in lines at most that tall.
+fn body_text_height(lines: &[Line], tables: &[crate::table::Found]) -> Option<f32> {
+    let mut sized: Vec<(f32, usize)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !tables.iter().any(|t| (t.start..t.end).contains(index)))
+        .map(|(_, line)| (line.quad.edge_height().max(1.0), line.text.chars().count()))
+        .filter(|(_, chars)| *chars > 0)
+        .collect();
+    let total: usize = sized.iter().map(|(_, chars)| chars).sum();
+    if total == 0 {
+        return None;
+    }
+    sized.sort_by(|a, b| cmp_f32(a.0, b.0));
+    let mut seen = 0;
+    for (height, chars) in sized {
+        seen += chars;
+        if seen * 2 >= total {
+            return Some(height);
+        }
+    }
+    None
+}
+
 fn median_height(lines: &[Line]) -> f32 {
     if lines.is_empty() {
         return 1.0;
@@ -297,6 +322,13 @@ fn xy_cut(
             let in_turn = !sheet.exact || read_in_turn(&lines, &[split]);
             let (left, right): (Vec<Line>, Vec<Line>) =
                 lines.into_iter().partition(|l| l.bbox.center_x() < split);
+            let in_turn = in_turn
+                && !(sheet.exact
+                    && labels_and_values(
+                        &[left.iter().collect(), right.iter().collect()],
+                        scale,
+                        cfg,
+                    ));
             let straddled = shared_baseline_share(&left, &right, cfg.baseline_overlap);
             // A column is a block of lines. One box on a side is a cell, a page
             // number or a stray label — never a column.
@@ -453,7 +485,9 @@ fn column_corridors(lines: &[Line], sheet: Sheet, cfg: &LayoutConfig) -> Vec<f32
         let columns = slice_at(lines, &splits);
         let ok = columns.iter().all(|column| reads_as_column(column, cfg))
             && evenly_wide(&columns, cfg)
-            && (!sheet.exact || read_in_turn(lines, &splits));
+            && (!sheet.exact
+                || (read_in_turn(lines, &splits)
+                    && !labels_and_values(&columns, sheet.scale, cfg)));
         log::debug!(
             "corridors {:?} of {width:.0}: {:?} lines, columns {ok}",
             splits.iter().map(|s| *s as i32).collect::<Vec<_>>(),
@@ -500,8 +534,42 @@ fn evenly_wide(columns: &[Vec<&Line>], cfg: &LayoutConfig) -> bool {
         .all(|span| *span >= widest * cfg.column_width_evenness)
 }
 
+/// How narrow, in line heights, a column of running text can be on a page
+/// read from its own text: a newspaper's is twice as wide.
+const EXACT_COLUMN_MIN_WIDTH: f32 = 8.0;
+
+/// Whether two slices side by side on a page read from its own text are a
+/// table's labels and values rather than two columns of text, whatever order
+/// they were drawn in — a form's template is drawn first and its data after.
+/// Their lines pair up on shared baselines, one for one, and one side is
+/// too narrow for running text or is mostly labels ending in a colon.
+fn labels_and_values(columns: &[Vec<&Line>], scale: f32, cfg: &LayoutConfig) -> bool {
+    columns.windows(2).any(|pair| {
+        let (left, right) = (&pair[0], &pair[1]);
+        let veto = cfg.column_shared_baseline_veto;
+        if shared_share(left, right, cfg.baseline_overlap) < veto
+            || shared_share(right, left, cfg.baseline_overlap) < veto
+        {
+            return false;
+        }
+        let narrowest =
+            horizontal_span(left.iter().copied()).min(horizontal_span(right.iter().copied()));
+        let labels = left
+            .iter()
+            .filter(|line| line.text.trim_end().ends_with(':'))
+            .count();
+        narrowest < scale * EXACT_COLUMN_MIN_WIDTH || labels * 2 > left.len()
+    })
+}
+
 /// Share of the left side's baselines that also carry a box on the right.
 fn shared_baseline_share(left: &[Line], right: &[Line], min_overlap: f32) -> f32 {
+    let left: Vec<&Line> = left.iter().collect();
+    let right: Vec<&Line> = right.iter().collect();
+    shared_share(&left, &right, min_overlap)
+}
+
+fn shared_share(left: &[&Line], right: &[&Line], min_overlap: f32) -> f32 {
     if left.is_empty() || right.is_empty() {
         return 0.0;
     }
@@ -725,6 +793,15 @@ fn group(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Block> {
             sound
         })
         .collect();
+    // Where sizes are exact a heading needs to stand out only a little, so the
+    // text it stands out from has to be the body's: the size most of the
+    // characters are set in outside the tables, not the median line — a price
+    // list in nine points is many short lines.
+    let text_height = if exact {
+        body_text_height(&lines, &tables).unwrap_or(text_height)
+    } else {
+        text_height
+    };
     // From the back, so the indices the detector reported still hold.
     let mut tail = lines.len();
     for found in tables.into_iter().rev() {
@@ -1162,6 +1239,59 @@ mod tests {
         assert_eq!(ordered.len(), 10);
         assert_eq!(ordered[0].text, "L0 R0");
         assert_eq!(ordered[9].text, "L9 R9");
+    }
+
+    #[test]
+    fn a_form_drawn_labels_first_keeps_each_value_beside_its_label() {
+        let cfg = LayoutConfig::default();
+        let pairs = [
+            ("Rechnungsnummer:", "RE-2026-0042"),
+            ("Rechnungsdatum:", "15.03.2026"),
+            ("Kundennummer:", "K-10077"),
+            ("Zahlungsziel:", "14 Tage netto"),
+            ("Betrag:", "1.299,90 EUR"),
+        ];
+        // The template first, the data after: the order a form is filled in.
+        let mut lines: Vec<Line> = Vec::new();
+        for (row, (label, _)) in pairs.iter().enumerate() {
+            let y = row as f32 * 16.0;
+            lines.push(line_at(label, 72.0, y, 162.0, y + 13.0));
+        }
+        for (row, (_, value)) in pairs.iter().enumerate() {
+            let y = row as f32 * 16.0;
+            lines.push(line_at(value, 190.0, y, 260.0, y + 13.0));
+        }
+        let ordered = reading_order_exact(lines, &cfg);
+        let text = texts(&ordered).join(" ");
+        for (label, value) in pairs {
+            assert!(text.contains(&format!("{label} {value}")), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_body_size_is_the_size_most_characters_are_set_in() {
+        let mut lines = vec![
+            line_at(
+                "The committee met on Monday to review the budget",
+                0.0,
+                0.0,
+                300.0,
+                13.2,
+            ),
+            line_at(
+                "for the coming year, and all members agreed.",
+                0.0,
+                16.0,
+                280.0,
+                29.2,
+            ),
+        ];
+        for row in 0..8 {
+            let y = 40.0 + row as f32 * 12.0;
+            lines.push(line_at(&format!("Item {row}"), 0.0, y, 40.0, y + 10.8));
+        }
+        assert!((median_text_height(&lines) - 10.8).abs() < 0.01);
+        assert!((body_text_height(&lines, &[]).unwrap() - 13.2).abs() < 0.01);
     }
 
     #[test]

@@ -27,6 +27,7 @@ from typing import Any
 from . import (
     FORMATS,
     READABLE_SUFFIXES,
+    Document,
     Ocr,
     OcrustError,
     __version__,
@@ -931,7 +932,36 @@ def _guards(args: argparse.Namespace) -> dict[str, Any]:
     return {"password": _password(args), "max_pixels": getattr(args, "max_pixels", None)}
 
 
+class _TextOnly:
+    """What `--pdf-text only` scans with: a PDF's own text, read without the
+    models. Nothing is recognized, so none are loaded."""
+
+    def __init__(self, password: str | None) -> None:
+        self.password = password
+
+    def scan(
+        self,
+        source: Any,
+        pages: Sequence[int] | None = None,
+        name: str | None = None,
+        progress: Any = None,
+    ) -> Document:
+        from ocrust import _ocrust
+
+        if isinstance(source, (bytes, bytearray, memoryview)):
+            data, label = bytes(source), name or "<bytes>"
+        else:
+            data, label = Path(source).read_bytes(), name or str(source)
+        payload = json.loads(_ocrust.read_pdf_text(data, label, self.password))
+        if pages is not None:
+            wanted = set(pages)
+            payload["pages"] = [page for page in payload["pages"] if page.get("index") in wanted]
+        return Document._from_json(payload)
+
+
 def _engine_from_args(args: argparse.Namespace) -> Ocr:
+    if getattr(args, "pdf_text", None) == "only":
+        return _TextOnly(_password(args))  # type: ignore[return-value]
     return Ocr(
         **_guards(args),
         models_dir=getattr(args, "models", None),

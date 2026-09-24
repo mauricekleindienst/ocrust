@@ -176,18 +176,50 @@ impl TextLayer {
                 if self.image_area.min(page_area) > 0.5 * page_area {
                     return false;
                 }
-                // A font without a Unicode mapping reads as boxes; one wrong
-                // character in twenty is worse than recognizing the page.
-                let mapped = visible.iter().filter(|g| g.mapped).count();
-                mapped * 20 >= visible.len() * 19
+                self.mapped_enough()
             }
         }
+    }
+
+    /// Whether the text a page shows has its characters: a font without a
+    /// Unicode mapping reads as boxes, and one wrong character in twenty is
+    /// worse than recognizing the page — or, with nothing recognized, than
+    /// leaving it empty.
+    pub fn mapped_enough(&self) -> bool {
+        let printed = self.glyphs.iter().filter(|g| !g.text.trim().is_empty());
+        let visible: Vec<&TextGlyph> = printed.clone().filter(|g| g.visible).collect();
+        let shown: Vec<&TextGlyph> = if visible.is_empty() {
+            printed.collect()
+        } else {
+            visible
+        };
+        let mapped = shown.iter().filter(|g| g.mapped).count();
+        mapped * 20 >= shown.len() * 19
     }
 
     /// The layer's text as lines, the way the text detector delivers them:
     /// one line per run of glyphs on one baseline, split where a gap is wide
     /// enough to be a column or a table cell rather than a space.
     pub fn lines(&self, include_invisible: bool) -> Vec<Line> {
+        let mut lines = self.lines_of(true);
+        if include_invisible {
+            // An invisible layer is somebody's OCR. Over a scan it is all the
+            // text there is; over text the page shows, it is the same words a
+            // second time, and only what no shown line covers is kept.
+            let shown: Vec<Rect> = lines.iter().map(|line| line.bbox).collect();
+            lines.extend(self.lines_of(false).into_iter().filter(|line| {
+                let area = (line.bbox.width() * line.bbox.height()).max(1.0);
+                !shown.iter().any(|b| {
+                    b.horizontal_overlap(&line.bbox) * b.vertical_overlap(&line.bbox) >= 0.5 * area
+                })
+            }));
+        }
+        self.restore_bullets(&mut lines);
+        lines
+    }
+
+    /// The lines of the glyphs drawn visibly, or of those drawn invisibly.
+    fn lines_of(&self, visible: bool) -> Vec<Line> {
         let (width, height) = (self.width, self.height);
         let on_page = |g: &&TextGlyph| {
             let c = g.origin + g.up * 0.3;
@@ -196,7 +228,7 @@ impl TextLayer {
         let glyphs: Vec<&TextGlyph> = self
             .glyphs
             .iter()
-            .filter(|g| (g.visible || include_invisible) && g.size() >= 1.0)
+            .filter(|g| g.visible == visible && g.size() >= 1.0)
             .filter(on_page)
             .collect();
 
@@ -226,12 +258,9 @@ impl TextLayer {
         let gaps_are_cells = spaces >= SPACES_SET || spaces * 3 >= gaps.max(1);
         let runs = merge_runs(runs);
         let runs = join_word_gaps(runs, gaps_are_cells);
-        let mut lines: Vec<Line> = runs
-            .into_iter()
+        runs.into_iter()
             .filter_map(|run| run.into_line(gaps_are_cells))
-            .collect();
-        self.restore_bullets(&mut lines);
-        lines
+            .collect()
     }
 
     /// Puts back the bullet a list item was drawn with: a small filled shape
@@ -1163,6 +1192,46 @@ mod tests {
         assert!(empty.usable(PdfText::Only));
         assert!(!empty.usable(PdfText::Always));
         assert_eq!(PdfText::parse("only"), Some(PdfText::Only));
+    }
+
+    #[test]
+    fn an_invisible_layer_over_shown_text_is_not_read_twice() {
+        let shown = word("Vertrag", 100.0, 200.0, 20.0);
+        let mut glyphs = shown.clone();
+        // The same word again, invisibly and a little off: a DMS's OCR.
+        glyphs.extend(
+            word("Vertrag", 101.0, 201.0, 19.0)
+                .into_iter()
+                .map(|mut g| {
+                    g.visible = false;
+                    g
+                }),
+        );
+        // And an invisible word where nothing is shown: the OCR of a picture.
+        glyphs.extend(
+            word("Stempel", 100.0, 400.0, 20.0)
+                .into_iter()
+                .map(|mut g| {
+                    g.visible = false;
+                    g
+                }),
+        );
+        let texts: Vec<String> = layer(glyphs)
+            .lines(true)
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        assert_eq!(texts, ["Vertrag", "Stempel"]);
+    }
+
+    #[test]
+    fn a_page_in_a_font_without_unicode_is_not_mapped_enough() {
+        let mut glyphs = word("Hallo", 100.0, 200.0, 20.0);
+        assert!(layer(glyphs.clone()).mapped_enough());
+        for glyph in &mut glyphs {
+            glyph.mapped = false;
+        }
+        assert!(!layer(glyphs).mapped_enough());
     }
 
     #[test]

@@ -87,7 +87,13 @@ impl Renderer {
                     image: image::RgbImage::new(0, 0),
                     origin: PageOrigin::PdfText,
                     text: Some(TextPage {
-                        lines: layer.lines(matches!(self.text, PdfText::Always | PdfText::Only)),
+                        // Read without recognizing, a page whose font has
+                        // no Unicode mapping stays empty rather than boxes.
+                        lines: if matches!(self.text, PdfText::Only) && !layer.mapped_enough() {
+                            Vec::new()
+                        } else {
+                            layer.lines(matches!(self.text, PdfText::Always | PdfText::Only))
+                        },
                         width,
                         height,
                     }),
