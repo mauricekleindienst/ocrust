@@ -305,6 +305,12 @@ const COLUMN_GAP_AFTER_SPACE_EM: f64 = 4.0;
 const COLUMN_GAP_EM: f64 = 1.0;
 /// A gap wider than this many ems is a space between two words.
 const SPACE_GAP_EM: f64 = 0.15;
+/// The widest a space glyph is taken to be stretched, in ems, where the
+/// lines around it have letters in the gap.
+const STRETCHED_SPACE_EM: f64 = 12.0;
+/// How far a run drawn later may start after the end of another to carry on
+/// its line, in ems.
+const MERGE_GAP_EM: f64 = 0.6;
 /// Space glyphs enough to say a page sets its own spaces whatever else it
 /// has: a table of one-word cells has more gaps than spaces all the same.
 const SPACES_SET: usize = 8;
@@ -375,10 +381,14 @@ impl Run {
         } else {
             COLUMN_GAP_EM
         };
-        if gap < -0.5 * size || gap > widest * size {
+        // Measured in the smaller of the two sizes: a heading's last word
+        // and the first cell of the table beside it are an em of the heading
+        // apart, and far more than one of the table's.
+        let small = self.size.min(glyph.size());
+        if gap < -0.5 * size || gap > widest * small {
             return false;
         }
-        if gap > SPACE_GAP_EM * size {
+        if gap > SPACE_GAP_EM * small {
             self.space(Piece::Gap);
         }
         self.push(glyph);
@@ -594,15 +604,25 @@ fn join_word_gaps(runs: Vec<Run>, spaces_set: bool) -> Vec<Run> {
             .min_by(|&p, &q| spans[p].1.total_cmp(&spans[q].1));
         let Some(b) = right else { continue };
         let gap = spans[b].1 - x1;
-        if gap > COLUMN_GAP_AFTER_SPACE_EM * size {
+        // A space the document set may be stretched across half a column —
+        // a justified heading of two words; the lines around it decide.
+        let widest = if spaces_set && run.after_space {
+            STRETCHED_SPACE_EM
+        } else {
+            COLUMN_GAP_AFTER_SPACE_EM
+        };
+        if gap > widest * size {
             continue;
         }
         let middle = (x1 + spans[b].1) / 2.0;
-        // The nearest baseline above and below, a line's distance away.
+        let (gap_left, gap_right) = (x1, spans[b].1);
+        // The nearest baseline above and below, a line's distance away, of
+        // the lines that reach into the gap at all: a line of the next column
+        // over is no neighbour of this one.
         let neighbour = |above: bool| {
             let mut best: Option<f64> = None;
-            for (c, &(cy, _, _)) in spans.iter().enumerate() {
-                if !upright[c] || c == a || c == b {
+            for (c, &(cy, cx0, cx1)) in spans.iter().enumerate() {
+                if !upright[c] || c == a || c == b || cx1 < gap_left || cx0 > gap_right {
                     continue;
                 }
                 let d = if above { y - cy } else { cy - y };
@@ -688,7 +708,9 @@ fn follows(run: &Run, next: &Run) -> bool {
         return false;
     }
     let gap = (next.start - run.last_end).dot(b);
-    (-0.3 * size..=COLUMN_GAP_EM * size).contains(&gap)
+    // A word drawn later carries on a line a word space away; the next
+    // column, a table's next cell, can be as near as an em.
+    (-0.3 * size..=MERGE_GAP_EM * run.size.min(next.size)).contains(&gap)
 }
 
 /// The device that draws nothing and writes down every glyph.
@@ -972,6 +994,45 @@ mod tests {
             ]
         );
         assert_eq!(lines[3].segments.len(), 2);
+    }
+
+    #[test]
+    fn a_large_heading_and_small_text_beside_it_are_two_lines() {
+        // The heading's last word, and a table cell in the next column less
+        // than an em of the heading but three of the table's away.
+        let mut glyphs = spaced(
+            "Ein Satz mit vielen Wörtern in kleiner Schrift",
+            100.0,
+            60.0,
+            10.0,
+        );
+        glyphs.extend(word("2:", 100.0, 200.0, 40.0));
+        glyphs.extend(spaced("Position", 100.0 + 40.0 + 30.0, 200.0, 10.0));
+        let lines = layer(glyphs).lines(false);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts[1..], ["2:", "Position"]);
+    }
+
+    #[test]
+    fn a_justified_heading_is_joined_across_its_stretched_space() {
+        // "Bericht 2:" set justified: the space glyph is ordinary, the next
+        // word far off; the heading's next line has letters under the gap.
+        let mut glyphs = spaced(
+            "Ein Satz mit vielen Wörtern in kleiner Schrift",
+            100.0,
+            20.0,
+            10.0,
+        );
+        glyphs.extend(word("Bericht", 100.0, 100.0, 40.0));
+        glyphs.push(glyph(" ", 240.0, 100.0, 40.0));
+        glyphs.extend(word("2:", 560.0, 100.0, 40.0));
+        glyphs.extend(word("Zutrittskontrolle", 100.0, 150.0, 40.0));
+        // A table cell in the next column, on the heading's baseline.
+        glyphs.extend(spaced("Menge", 700.0, 100.0, 10.0));
+        let lines = layer(glyphs).lines(false);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.contains(&"Bericht 2:"), "{texts:?}");
+        assert!(texts.contains(&"Menge"), "{texts:?}");
     }
 
     #[test]

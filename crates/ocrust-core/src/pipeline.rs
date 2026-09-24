@@ -577,7 +577,7 @@ impl Engine {
     /// A page read from its PDF text layer: the same layout as a recognized
     /// page, from lines that are exact rather than recognized.
     fn text_page(&self, index: usize, text: crate::ingest::TextPage, started: Instant) -> Page {
-        let ordered = layout::reading_order(text.lines, &self.config.layout);
+        let ordered = layout::reading_order_exact(text.lines, &self.config.layout);
         let blocks = layout::group_exact_blocks(ordered, &self.config.layout);
         let signals: Vec<crate::quality::LineSignals> = blocks
             .iter()

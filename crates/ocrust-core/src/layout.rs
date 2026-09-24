@@ -154,6 +154,30 @@ fn median_height(lines: &[Line]) -> f32 {
 /// split there, recurse. Horizontal cuts win over vertical ones so that a
 /// page-wide headline above two columns still comes first.
 pub fn reading_order(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Line> {
+    order(lines, cfg, false)
+}
+
+/// [`reading_order`] for lines read from a PDF's own text, handed over in the
+/// order the PDF draws them.
+///
+/// Such a page's lines are never split at a word space, so a white band
+/// through them is a gutter however narrow — a browser sets two columns an em
+/// apart, less than any gutter a recognized page could be trusted with. What
+/// tells a page's gutter from a table's is the drawing order: a page draws one
+/// column and then the next, a table draws row by row, crossing its gutters
+/// on every row.
+pub(crate) fn reading_order_exact(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Line> {
+    order(lines, cfg, true)
+}
+
+/// The narrowest gutter, in line heights, on a page read from its own text:
+/// half a line, which is six tenths of an em.
+const EXACT_GUTTER_FACTOR: f32 = 0.5;
+/// And the narrowest as a share of the width being divided: a hundredth, a
+/// floor for pages of very small print only.
+const EXACT_GUTTER_FRACTION: f32 = 0.01;
+
+fn order(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Line> {
     if lines.len() < 2 {
         return lines;
     }
@@ -171,6 +195,7 @@ pub fn reading_order(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Line> {
     let sheet = Sheet {
         scale,
         width: horizontal_span(&lines),
+        exact,
     };
     xy_cut(lines, sheet, cfg, max_merge_gap, 0, &mut out);
     out
@@ -183,6 +208,20 @@ struct Sheet {
     scale: f32,
     /// Width of the page's content, which is what a column corridor divides.
     width: f32,
+    /// Whether the lines are a PDF's own text, in the order it drew them.
+    exact: bool,
+}
+
+/// Whether reading `lines` in the order they came crosses the `splits` no
+/// more often than columns are crossed: once per column, and a few times more
+/// for a float, a footnote or a running head. A table's rows cross its gutters
+/// every time.
+fn read_in_turn(lines: &[Line], splits: &[f32]) -> bool {
+    let crossings = lines
+        .windows(2)
+        .filter(|pair| column_of(splits, &pair[0]) != column_of(splits, &pair[1]))
+        .count();
+    crossings <= splits.len() + 2 + lines.len() / 10
 }
 
 fn xy_cut(
@@ -248,9 +287,14 @@ fn xy_cut(
     if cfg.detect_columns {
         let content_width = lines.iter().map(|l| l.bbox.x1).fold(f32::MIN, f32::max)
             - lines.iter().map(|l| l.bbox.x0).fold(f32::MAX, f32::min);
-        let min_gap =
-            (scale * cfg.column_gap_factor).max(content_width * cfg.column_gap_min_fraction);
+        let (factor, fraction) = if sheet.exact {
+            (EXACT_GUTTER_FACTOR, EXACT_GUTTER_FRACTION)
+        } else {
+            (cfg.column_gap_factor, cfg.column_gap_min_fraction)
+        };
+        let min_gap = (scale * factor).max(content_width * fraction);
         if let Some((split, gap)) = find_gap(&lines, min_gap, |l| (l.bbox.x0, l.bbox.x1)) {
+            let in_turn = !sheet.exact || read_in_turn(&lines, &[split]);
             let (left, right): (Vec<Line>, Vec<Line>) =
                 lines.into_iter().partition(|l| l.bbox.center_x() < split);
             let straddled = shared_baseline_share(&left, &right, cfg.baseline_overlap);
@@ -278,6 +322,7 @@ fn xy_cut(
                 horizontal_span(&right),
             );
             if thin_side
+                || !in_turn
                 || (straddled >= cfg.column_shared_baseline_veto && (too_narrow || crowded))
             {
                 // The gutter runs through rows, not between columns.
@@ -392,8 +437,12 @@ fn column_corridors(lines: &[Line], sheet: Sheet, cfg: &LayoutConfig) -> Vec<f32
     if width < sheet.width * cfg.column_corridor_page_share {
         return Vec::new();
     }
-    let min_gap =
-        (sheet.scale * cfg.column_corridor_gap_factor).max(width * cfg.column_gap_min_fraction);
+    let (factor, fraction) = if sheet.exact {
+        (EXACT_GUTTER_FACTOR, EXACT_GUTTER_FRACTION)
+    } else {
+        (cfg.column_corridor_gap_factor, cfg.column_gap_min_fraction)
+    };
+    let min_gap = (sheet.scale * factor).max(width * fraction);
     let gaps = find_gaps(lines, min_gap, |l| (l.bbox.x0, l.bbox.x1));
     // The widest corridor first, then the two widest together, and so on: a page
     // set in three columns has two corridors, and neither of them alone leaves
@@ -402,8 +451,9 @@ fn column_corridors(lines: &[Line], sheet: Sheet, cfg: &LayoutConfig) -> Vec<f32
         let mut splits: Vec<f32> = gaps[..count].iter().map(|(split, _)| *split).collect();
         splits.sort_by(|a, b| cmp_f32(*a, *b));
         let columns = slice_at(lines, &splits);
-        let ok =
-            columns.iter().all(|column| reads_as_column(column, cfg)) && evenly_wide(&columns, cfg);
+        let ok = columns.iter().all(|column| reads_as_column(column, cfg))
+            && evenly_wide(&columns, cfg)
+            && (!sheet.exact || read_in_turn(lines, &splits));
         log::debug!(
             "corridors {:?} of {width:.0}: {:?} lines, columns {ok}",
             splits.iter().map(|s| *s as i32).collect::<Vec<_>>(),
@@ -681,7 +731,7 @@ fn group(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Block> {
         let after = lines.split_off(found.end);
         let table_lines = lines.split_off(found.start);
         if !after.is_empty() {
-            blocks.extend(paragraphs(after, scale, text_height, leading, cfg));
+            blocks.extend(paragraphs(after, scale, text_height, leading, exact, cfg));
         }
         blocks.push(Block {
             kind: BlockKind::Table,
@@ -693,7 +743,7 @@ fn group(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Block> {
     }
     debug_assert!(lines.len() == tail);
     if !lines.is_empty() {
-        blocks.extend(paragraphs(lines, scale, text_height, leading, cfg));
+        blocks.extend(paragraphs(lines, scale, text_height, leading, exact, cfg));
     }
     blocks.reverse();
     blocks
@@ -746,6 +796,7 @@ fn paragraphs(
     scale: f32,
     text_height: f32,
     leading: Option<f32>,
+    exact: bool,
     cfg: &LayoutConfig,
 ) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
@@ -768,28 +819,33 @@ fn paragraphs(
             }
         };
         if starts_new {
-            blocks.push(finish_block(std::mem::take(&mut current), text_height, cfg));
+            blocks.push(finish_block(
+                std::mem::take(&mut current),
+                text_height,
+                exact,
+                cfg,
+            ));
         }
         current.push(line);
     }
     if !current.is_empty() {
-        blocks.push(finish_block(current, text_height, cfg));
+        blocks.push(finish_block(current, text_height, exact, cfg));
     }
     // Emitted back to front by the caller, which reverses the whole list.
     blocks.reverse();
     blocks
 }
 
-fn finish_block(mut lines: Vec<Line>, text_height: f32, cfg: &LayoutConfig) -> Block {
+fn finish_block(mut lines: Vec<Line>, text_height: f32, exact: bool, cfg: &LayoutConfig) -> Block {
     if cfg.dehyphenate {
         dehyphenate(&mut lines);
     }
-    plain_block(lines, text_height, cfg)
+    plain_block(lines, text_height, exact, cfg)
 }
 
-fn plain_block(lines: Vec<Line>, text_height: f32, cfg: &LayoutConfig) -> Block {
+fn plain_block(lines: Vec<Line>, text_height: f32, exact: bool, cfg: &LayoutConfig) -> Block {
     Block {
-        kind: classify_block(&lines, text_height, cfg),
+        kind: classify_block(&lines, text_height, exact, cfg),
         bbox: bounds_of(&lines),
         lines,
         table: None,
@@ -824,23 +880,31 @@ pub(crate) fn strip_bullet(line: &str) -> &str {
     rest.trim_start()
 }
 
-fn classify_block(lines: &[Line], text_height: f32, cfg: &LayoutConfig) -> BlockKind {
+/// Lines a heading may run to on a page read from its own text, where sizes
+/// are exact: a title set large in a narrow column wraps more than twice.
+const EXACT_HEADING_LINES: usize = 4;
+
+fn classify_block(lines: &[Line], text_height: f32, exact: bool, cfg: &LayoutConfig) -> BlockKind {
     let first = match lines.first() {
         Some(l) => l,
         None => return BlockKind::Paragraph,
     };
-    let trimmed = first.text.trim_start();
-    if trimmed.starts_with(BULLETS)
-        || trimmed.split_once(['.', ')']).is_some_and(|(head, _)| {
-            !head.is_empty() && head.len() <= 3 && head.chars().all(|c| c.is_ascii_digit())
-        })
-    {
-        return BlockKind::ListItem;
-    }
     // The quad, not the box: a de-hyphenated line's box spans both of the lines
     // it came from, which would make every short hyphenated paragraph a heading.
     let tall = first.quad.edge_height() > text_height * cfg.heading_height_factor;
-    if tall && lines.len() <= 2 && first.text.chars().count() <= 120 {
+    let most_lines = if exact { EXACT_HEADING_LINES } else { 2 };
+    let chars: usize = lines.iter().map(|l| l.text.chars().count()).sum();
+    let heading =
+        tall && lines.len() <= most_lines && first.text.chars().count() <= 120 && chars <= 240;
+    let trimmed = first.text.trim_start();
+    let numbered = trimmed.split_once(['.', ')']).is_some_and(|(head, _)| {
+        !head.is_empty() && head.len() <= 3 && head.chars().all(|c| c.is_ascii_digit())
+    });
+    // A number in front of a large line numbers a chapter, not a list item.
+    if trimmed.starts_with(BULLETS) || (numbered && !heading) {
+        return BlockKind::ListItem;
+    }
+    if heading {
         return BlockKind::Heading;
     }
     BlockKind::Paragraph
@@ -1025,6 +1089,80 @@ mod tests {
 
     fn texts(lines: &[Line]) -> Vec<&str> {
         lines.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    /// Two columns of ten lines each, an em apart, drawn one column after
+    /// the other or row by row across both.
+    fn narrow_columns(row_by_row: bool) -> Vec<Line> {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for row in 0..10 {
+            let y = row as f32 * 14.0;
+            left.push(line_at(&format!("L{row}"), 0.0, y, 300.0, y + 12.0));
+            right.push(line_at(&format!("R{row}"), 310.0, y, 610.0, y + 12.0));
+        }
+        if row_by_row {
+            left.into_iter()
+                .zip(right)
+                .flat_map(|(l, r)| [l, r])
+                .collect()
+        } else {
+            left.into_iter().chain(right).collect()
+        }
+    }
+
+    #[test]
+    fn a_page_read_from_its_text_finds_columns_an_em_apart() {
+        let cfg = LayoutConfig::default();
+        let ordered = reading_order_exact(narrow_columns(false), &cfg);
+        let texts: Vec<&str> = ordered.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts[..3], ["L0", "L1", "L2"]);
+        assert_eq!(texts[10..13], ["R0", "R1", "R2"]);
+        // A recognized page cannot tell such a gutter from a word space.
+        let recognized = reading_order(narrow_columns(false), &cfg);
+        assert_eq!(recognized.len(), 10, "rows merged across the gutter");
+    }
+
+    #[test]
+    fn a_table_drawn_row_by_row_is_not_two_columns() {
+        let cfg = LayoutConfig::default();
+        let ordered = reading_order_exact(narrow_columns(true), &cfg);
+        // Each row is one line of two cells, in order.
+        assert_eq!(ordered.len(), 10);
+        assert_eq!(ordered[0].text, "L0 R0");
+        assert_eq!(ordered[9].text, "L9 R9");
+    }
+
+    #[test]
+    fn a_large_numbered_line_is_a_heading_not_a_list_item() {
+        let cfg = LayoutConfig::default();
+        let heading = line_at("1. Einleitung", 0.0, 0.0, 200.0, 30.0);
+        let item = line_at("1. Antrag stellen", 0.0, 0.0, 200.0, 12.0);
+        assert_eq!(
+            classify_block(&[heading], 12.0, false, &cfg),
+            BlockKind::Heading
+        );
+        assert_eq!(
+            classify_block(&[item], 12.0, false, &cfg),
+            BlockKind::ListItem
+        );
+        // Exact sizes allow a title wrapped over three lines in a narrow column.
+        let title: Vec<Line> = (0..3)
+            .map(|i| {
+                line_at(
+                    "Bericht Nord",
+                    0.0,
+                    i as f32 * 32.0,
+                    200.0,
+                    i as f32 * 32.0 + 30.0,
+                )
+            })
+            .collect();
+        assert_eq!(classify_block(&title, 12.0, true, &cfg), BlockKind::Heading);
+        assert_eq!(
+            classify_block(&title, 12.0, false, &cfg),
+            BlockKind::Paragraph
+        );
     }
 
     #[test]
@@ -1253,6 +1391,7 @@ mod tests {
         let sheet = Sheet {
             scale: 24.0,
             width: 3000.0,
+            exact: false,
         };
         assert!(column_corridors(&lines, sheet, &cfg).is_empty());
         // On a page that holds nothing else, the same block is all there is to go
