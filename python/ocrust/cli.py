@@ -2586,6 +2586,10 @@ def _markdown_one(
     if args.output is None:
         sys.stdout.write(result.markdown)
         return 0
+    if args.dry_run:
+        if not args.quiet:
+            _tell(_paint("would write ", "dim") + _arrow(source, args.output))
+        return 0
     if _overwrites_input([args.output], [source]):
         _fail(f"{args.output} is the input itself; write the note somewhere else")
         return 2

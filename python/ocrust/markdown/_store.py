@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
 INDEX_DIR = ".ocrust"
 INDEX_NAME = "index.json"
+JOURNAL_NAME = "journal.jsonl"
 ASSETS_DIR = "_assets"
 _INDEX_FORMAT = 1
 #: How often, at most, the index is saved while a long run goes on.
@@ -104,11 +105,16 @@ def _file_sha256(path: Path) -> str | None:
         return None
 
 
+_TEMPORARY = iter(range(1, 1 << 62))
+
+
 def _write(path: Path, data: bytes) -> None:
     """Writes atomically: a reader sees the old file or the new one, and an
-    interrupted run leaves no half-written note behind."""
+    interrupted run leaves no half-written note behind. The temporary file's
+    name is short, so a note whose own name is as long as a name may be can
+    still be written."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f".{path.name}.{os.getpid()}.part")
+    partial = path.with_name(f".ocrust-{os.getpid()}-{next(_TEMPORARY)}.part")
     try:
         with partial.open("wb") as handle:
             handle.write(data)
@@ -119,6 +125,42 @@ def _write(path: Path, data: bytes) -> None:
         with contextlib.suppress(OSError):
             partial.unlink()
         raise
+
+
+def _key(path: Path) -> str:
+    """A document's identity: its absolute path as given, symbolic links not
+    followed — a link in one folder and its target in another are two
+    documents, each with its note."""
+    return os.path.normcase(str(_absolute(path)))
+
+
+def _absolute(path: Path) -> Path:
+    """`path` made absolute and `..` taken out, links left as they are."""
+    return Path(os.path.normpath(Path(path).absolute()))
+
+
+def _under(key: str, root: str) -> bool:
+    return key == root or key.startswith(root.rstrip(os.sep) + os.sep)
+
+
+#: The longest a name in a note's path may be, in bytes, before it is cut and
+#: given a hash: file systems allow 255, and `.md` and a picture's folder come
+#: on top.
+_NAME_BYTES = 200
+
+
+def _safe_stem(stem: str) -> str:
+    """A note's path with every overlong name cut short, and made unique again
+    by a hash of what was cut."""
+    parts = []
+    for part in stem.split("/"):
+        raw = part.encode("utf-8", "surrogateescape")
+        if len(raw) > _NAME_BYTES:
+            digest = hashlib.sha1(raw).hexdigest()[:10]
+            head = raw[: _NAME_BYTES - 12].decode("utf-8", "ignore")
+            part = f"{head}~{digest}"
+        parts.append(part)
+    return "/".join(parts)
 
 
 def _hidden(part: str) -> bool:
@@ -163,20 +205,21 @@ def _sources(
     roots: list[Path] = []
     for item in inputs:
         if item.is_dir():
-            root = item.resolve()
+            root = _absolute(item)
             roots.append(root)
             prefix = root.name if several else ""
             for path in _walk(item, out_dir, skipped):
                 relative = path.relative_to(item).as_posix()
                 stem = posixpath.join(prefix, relative) if prefix else relative
                 label = posixpath.join(root.name, relative)
-                sources.append(_Source(path, stem, label, root))
+                sources.append(_Source(path, _safe_stem(stem), label, root))
         elif item.is_file():
             if not supported(item.name):
                 skipped.append(item)
                 continue
-            sources.append(_Source(item, item.name, item.name, item.resolve().parent))
-            roots.append(item.resolve())
+            absolute = _absolute(item)
+            sources.append(_Source(item, _safe_stem(item.name), item.name, absolute.parent))
+            roots.append(absolute)
     return sources, roots
 
 
@@ -252,8 +295,14 @@ class _Lock:
 
 
 class _Index:
-    def __init__(self, out_dir: Path) -> None:
+    """What was converted from what: `index.json`, and beside it a journal of
+    every document converted since it was last written, so that a run killed
+    halfway loses none of what it did."""
+
+    def __init__(self, out_dir: Path, *, record: bool = True) -> None:
         self.path = out_dir / INDEX_DIR / INDEX_NAME
+        self.journal = out_dir / INDEX_DIR / JOURNAL_NAME
+        self.record = record
         self.entries: dict[str, dict[str, Any]] = {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -263,28 +312,76 @@ class _Index:
             entries = data.get("documents")
             if isinstance(entries, dict):
                 self.entries = {k: v for k, v in entries.items() if isinstance(v, dict)}
+        #: Notes a run was about to write when it was stopped: note → (key,
+        #: hash). Such a note is the export's, not a stranger's.
+        self.claims: dict[str, tuple[str, str]] = {}
+        self._replay()
         self.saved = time.monotonic()
         self.owners: dict[str, str] = {}
+        self.assets: dict[str, str] = {}
         for key, entry in self.entries.items():
             self._own(key, entry)
+
+    def _replay(self) -> None:
+        try:
+            lines = self.journal.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                # The line a killed run was writing.
+                continue
+            if not isinstance(record, dict) or not isinstance(record.get("key"), str):
+                continue
+            if isinstance(record.get("entry"), dict):
+                self.entries[record["key"]] = record["entry"]
+            elif record.get("drop"):
+                self.entries.pop(record["key"], None)
+            elif isinstance(record.get("claim"), str):
+                self.claims[record["claim"]] = (record["key"], str(record.get("sha256", "")))
+
+    def _log(self, record: dict[str, Any]) -> None:
+        if not self.record:
+            return
+        self.journal.parent.mkdir(parents=True, exist_ok=True)
+        with self.journal.open("a", encoding="utf-8") as handle:
+            handle.write(_json(record) + "\n")
+
+    def claim(self, key: str, note_path: str, digest: str) -> None:
+        """Says, before a note is written, that it is about to be."""
+        self._log({"key": key, "claim": note_path, "sha256": digest})
 
     def _own(self, key: str, entry: dict[str, Any]) -> None:
         for item in entry.get("notes", []):
             if isinstance(item, dict) and isinstance(item.get("path"), str):
                 self.owners[item["path"]] = key
+        for asset in entry.get("assets", []):
+            if isinstance(asset, str):
+                self.assets[asset] = key
+
+    def _disown(self, key: str) -> None:
+        old = self.entries.get(key)
+        if old is None:
+            return
+        for item in old.get("notes", []):
+            if self.owners.get(item.get("path")) == key:
+                del self.owners[item["path"]]
+        for asset in old.get("assets", []):
+            if self.assets.get(asset) == key:
+                del self.assets[asset]
 
     def put(self, key: str, entry: dict[str, Any]) -> None:
-        old = self.entries.get(key)
-        if old is not None:
-            for item in old.get("notes", []):
-                if self.owners.get(item.get("path")) == key:
-                    del self.owners[item["path"]]
+        self._disown(key)
         self.entries[key] = entry
         self._own(key, entry)
+        self._log({"key": key, "entry": entry})
 
     def drop(self, key: str) -> None:
-        self.put(key, {})
-        del self.entries[key]
+        self._disown(key)
+        self.entries.pop(key, None)
+        self._log({"key": key, "drop": True})
 
     def owner_of(self, note: str) -> tuple[str, dict[str, Any]] | None:
         key = self.owners.get(note)
@@ -300,10 +397,21 @@ class _Index:
             "format": _INDEX_FORMAT,
             "documents": dict(sorted(self.entries.items())),
         }
-        _write(
-            self.path, (json.dumps(payload, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
-        )
+        _write(self.path, (_json(payload, indent=1) + "\n").encode("utf-8"))
+        with contextlib.suppress(OSError):
+            self.journal.unlink()
         self.saved = time.monotonic()
+
+
+def _json(value: Any, indent: int | None = None) -> str:
+    """JSON that is valid UTF-8 whatever the paths in it: a file name that is
+    not UTF-8 is written as escapes, and read back as the same name."""
+    text = json.dumps(value, ensure_ascii=False, indent=indent)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(value, ensure_ascii=True, indent=indent)
+    return text
 
 
 def _relative_link(note: str, asset: str) -> str:
@@ -326,10 +434,12 @@ class _Exporter:
         self.force = force
         self.dry_run = dry_run
         self.progress = progress or (lambda *_: None)
-        self.index = _Index(out_dir)
+        self.index = _Index(out_dir, record=not dry_run)
         self.result = ExportResult()
         self.options_key = _options_key(options)
         self._built: Ocr | None = None
+        self.seen: set[str] = set()
+        self.member_failed = ""
 
     def _engine(self) -> Ocr:
         """One engine for the whole run, made when the first scan needs it."""
@@ -382,9 +492,14 @@ class _Exporter:
                 label = f"{source.label}/{member}"
                 stem = f"{source.stem}/{member}"
                 try:
-                    converted = self._one(content, member, label, stem, modified, None, None)
-                except (ConversionError, ValueError, OSError) as exc:
-                    self.result.failed.append((source.path, f"{member}: {exc}"))
+                    converted = self._one(
+                        content, member, label, _safe_stem(stem), modified, None, None
+                    )
+                except (ConversionError, OcrustError, ValueError, OSError) as exc:
+                    reason = f"{member}: {exc}"
+                    self.result.failed.append((source.path, reason))
+                    self.progress("failed", source.path, None, reason)
+                    self.member_failed = reason
                     continue
                 if converted is not None:
                     out.append(converted)
@@ -443,7 +558,8 @@ class _Exporter:
         return placed
 
     def convert(self, source: _Source) -> None:
-        key = str(source.path.resolve())
+        key = _key(source.path)
+        self.seen.add(key)
         try:
             stat = source.path.stat()
         except OSError as exc:
@@ -454,9 +570,16 @@ class _Exporter:
             self.progress("unchanged", source.path, None, "")
             return
         if self.dry_run:
-            self.result.written.append((source.path, self.out_dir / f"{source.stem}.md"))
-            self.progress("would write", source.path, self.out_dir / f"{source.stem}.md", "")
+            target = self.out_dir / f"{source.stem}.md"
+            reason = self._keep_reason(target, f"{source.stem}.md", key)
+            if reason:
+                self.result.kept.append((target, reason))
+                self.progress("kept", target, None, reason)
+            else:
+                self.result.written.append((source.path, target))
+                self.progress("would write", source.path, target, "")
             return
+        self.member_failed = ""
         try:
             data = source.path.read_bytes()
             notes = self.notes_of(source, data, stat)
@@ -479,20 +602,39 @@ class _Exporter:
         entry_notes: list[dict[str, str]] = []
         entry_assets: list[str] = []
         kept = False
+        failure = self.member_failed
         for note_path, text, assets in notes:
             target = self.out_dir / note_path
-            if not self._may_write(target, note_path, key):
+            reason = self._keep_reason(target, note_path, key)
+            if reason:
                 # Left alone: still ours if it was, never ours if it was not,
-                # and looked at again next time.
+                # and looked at again next time. Its pictures stay with it.
                 kept = True
+                self.result.kept.append((target, reason))
+                self.progress("kept", target, None, reason)
+                if note_path in old_notes:
+                    entry_notes.append(old_notes[note_path])
+                    entry_assets.extend(a for a in old_assets if _asset_of(a, note_path))
+                continue
+            try:
+                payload = text.encode("utf-8")
+                self.index.claim(key, note_path, hashlib.sha256(payload).hexdigest())
+                _write(target, payload)
+                for asset_path, content in assets.items():
+                    owner = self.index.assets.get(asset_path)
+                    destination = self.out_dir / asset_path
+                    if owner not in (None, key) or (owner is None and destination.exists()):
+                        # A picture the export did not put there: left alone.
+                        continue
+                    _write(destination, content)
+                    entry_assets.append(asset_path)
+            except (OSError, UnicodeError) as exc:
+                failure = f"{note_path}: {getattr(exc, 'strerror', None) or exc}"
+                self.result.failed.append((source.path, failure))
+                self.progress("failed", source.path, None, failure)
                 if note_path in old_notes:
                     entry_notes.append(old_notes[note_path])
                 continue
-            payload = text.encode("utf-8")
-            _write(target, payload)
-            for asset_path, content in assets.items():
-                _write(self.out_dir / asset_path, content)
-                entry_assets.append(asset_path)
             entry_notes.append({"path": note_path, "sha256": hashlib.sha256(payload).hexdigest()})
             self.result.written.append((source.path, target))
             self.progress("written", source.path, target, "")
@@ -506,47 +648,65 @@ class _Exporter:
             with contextlib.suppress(OSError):
                 (self.out_dir / stale).unlink()
             self._remove_empty((self.out_dir / stale).parent)
-        self.index.put(
-            key,
-            {
-                "source": source.label,
-                "stem": source.stem,
-                "root": str(source.root),
-                # A note that was kept makes the next run try again.
-                "size": -1 if kept else stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-                "sha256": hashlib.sha256(data).hexdigest(),
-                "options": self.options_key,
-                "converted": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
-                "notes": entry_notes,
-                "assets": sorted(entry_assets),
-            },
-        )
+        entry: dict[str, Any] = {
+            "source": source.label,
+            "stem": source.stem,
+            "root": str(source.root),
+            # A note that was kept makes the next run try again.
+            "size": -1 if kept else stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "options": self.options_key,
+            "converted": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
+            "notes": entry_notes,
+            "assets": sorted(set(entry_assets)),
+        }
+        if failure:
+            # Tried again, and said again, on the next run.
+            entry["error"] = failure
+        self.index.put(key, entry)
         if time.monotonic() - self.index.saved > _SAVE_EVERY:
             self.index.save()
 
-    def _may_write(self, target: Path, note_path: str, key: str) -> bool:
-        """Whether a note may be (over)written: it is not there, or it is
-        exactly what an export wrote last time."""
-        if self.force or not target.exists():
-            return True
+    def _keep_reason(self, target: Path, note_path: str, key: str) -> str:
+        """Why a note must be left as it is, or "" when it may be written: it
+        is not there, or it is what an export wrote for this document.
+
+        A note of another document is never taken, `--force` or not — unless
+        that document is gone and the note untouched since: then the folder
+        was moved or renamed, and the note is this document's now.
+        """
         owner = self.index.owner_of(note_path)
+        if owner is not None and owner[0] != key:
+            owner_key, item = owner
+            gone = not Path(owner_key).exists()
+            if gone and (not target.exists() or _file_sha256(target) == item.get("sha256")):
+                self._release(owner_key, note_path)
+                return ""
+            return f"belongs to {self.index.entries[owner_key].get('source')}"
+        if self.force or not target.exists():
+            return ""
+        if target.is_dir():
+            return "a folder of that name is in the way"
         if owner is None:
-            self.result.kept.append((target, "not written by an export; --force replaces it"))
-            self.progress("kept", target, None, "not written by an export")
-            return False
-        owner_key, item = owner
-        if owner_key != key:
-            self.result.kept.append(
-                (target, f"belongs to {self.index.entries[owner_key].get('source')}")
-            )
-            self.progress("kept", target, None, "another document's note")
-            return False
-        if _file_sha256(target) != item.get("sha256"):
-            self.result.kept.append((target, "edited since it was written; --force replaces it"))
-            self.progress("kept", target, None, "edited by hand")
-            return False
-        return True
+            claim = self.index.claims.get(note_path)
+            if claim is not None and claim[0] == key and _file_sha256(target) == claim[1]:
+                # Written by a run that was stopped before it could say so.
+                return ""
+            return "not written by an export; --force replaces it"
+        if _file_sha256(target) != owner[1].get("sha256"):
+            return "edited since it was written; --force replaces it"
+        return ""
+
+    def _release(self, owner_key: str, note_path: str) -> None:
+        """Takes a note, and its pictures, from a document that is gone."""
+        entry = dict(self.index.entries[owner_key])
+        entry["notes"] = [n for n in entry.get("notes", []) if n.get("path") != note_path]
+        entry["assets"] = [a for a in entry.get("assets", []) if not _asset_of(a, note_path)]
+        if entry["notes"]:
+            self.index.put(owner_key, entry)
+        else:
+            self.index.drop(owner_key)
 
     def _remove_note(self, note_path: str, digest: str) -> bool:
         target = self.out_dir / note_path
@@ -568,11 +728,12 @@ class _Exporter:
     def prune(self, roots: Sequence[Path], seen: set[str]) -> None:
         """Deletes the notes of documents that are gone from the folders this
         run looked at. Documents of other folders are none of its business."""
+        root_keys = [_key(root) for root in roots]
         for key in list(self.index.entries):
             if key in seen:
                 continue
             path = Path(key)
-            inside = any(path == root or root in path.parents for root in roots)
+            inside = any(_under(key, root) for root in root_keys)
             if not inside or (
                 path.exists() and supported(path.name) and not _in_hidden(path, roots)
             ):
@@ -583,26 +744,42 @@ class _Exporter:
                     self.result.pruned.append(self.out_dir / item["path"])
                     self.progress("would remove", path, self.out_dir / item["path"], "")
                 continue
-            removed_all = True
+            kept_notes = []
             for item in entry.get("notes", []):
                 if self._remove_note(item["path"], item.get("sha256", "")):
                     self.result.pruned.append(self.out_dir / item["path"])
                     self.progress("pruned", path, self.out_dir / item["path"], "")
                 else:
-                    removed_all = False
+                    kept_notes.append(item)
+            kept_assets = []
             for asset in entry.get("assets", []):
+                if any(_asset_of(asset, item["path"]) for item in kept_notes):
+                    # An edited note keeps its pictures.
+                    kept_assets.append(asset)
+                    continue
                 with contextlib.suppress(OSError):
                     (self.out_dir / asset).unlink()
                 self._remove_empty((self.out_dir / asset).parent)
-            if removed_all:
+            if kept_notes:
+                self.index.put(key, {**entry, "notes": kept_notes, "assets": kept_assets})
+            else:
                 self.index.drop(key)
 
 
 def _in_hidden(path: Path, roots: Sequence[Path]) -> bool:
+    key = _key(path)
     for root in roots:
-        if root in path.parents:
-            return any(_hidden(part) for part in path.relative_to(root).parts)
+        root_key = _key(root)
+        if key != root_key and _under(key, root_key):
+            relative = key[len(root_key.rstrip(os.sep)) + 1 :]
+            return any(_hidden(part) for part in Path(relative).parts)
     return False
+
+
+def _asset_of(asset: str, note_path: str) -> bool:
+    """Whether a picture was kept for a note: it lives in the note's folder
+    under `_assets/`."""
+    return asset.startswith(posixpath.join(ASSETS_DIR, note_path[: -len(".md")]) + "/")
 
 
 def export(
@@ -644,20 +821,23 @@ def export(
             raise FileNotFoundError(f"{item}: no such file or folder")
     exporter = _Exporter(out, options, engine, force, dry_run, progress)
     documents, roots = _sources(inputs, out, exporter.result.skipped)
+    # Names that differ only in case are one file on Windows and macOS, and
+    # a knowledge base is synced to both: they count as a clash here too.
     notes: dict[str, Path] = {}
     for document in documents:
-        claimed = notes.setdefault(document.stem, document.path)
+        claimed = notes.setdefault(document.stem.casefold(), document.path)
         if claimed != document.path:
             exporter.result.failed.append(
                 (document.path, f"its note {document.stem}.md is also {claimed}'s; rename one")
             )
-    clashing = {d.path for d in documents if notes.get(d.stem) != d.path}
+    clashing = {d.path for d in documents if notes.get(d.stem.casefold()) != d.path}
+    seen = {_key(d.path) for d in documents}
     if dry_run:
         for document in documents:
             if document.path not in clashing:
                 exporter.convert(document)
         if prune:
-            exporter.prune(roots, {str(d.path.resolve()) for d in documents})
+            exporter.prune(roots, seen)
         return exporter.result
     out.mkdir(parents=True, exist_ok=True)
     with _Lock(out / INDEX_DIR):
@@ -666,7 +846,7 @@ def export(
                 if document.path not in clashing:
                     exporter.convert(document)
             if prune:
-                exporter.prune(roots, {str(d.path.resolve()) for d in documents})
+                exporter.prune(roots, seen)
         finally:
             exporter.index.save()
     return exporter.result
