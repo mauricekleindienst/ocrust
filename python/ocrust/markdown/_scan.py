@@ -350,16 +350,19 @@ def _hanging_entries(
     """A block set with a hanging indent — a bibliography's or a glossary's
     entries, each first line flush and the lines after it indented, no space
     between entries — cut into its entries, or None when it is none: the
-    first line flush, two lines at least indented by one amount, and as many
-    of them, near enough, as entries open. Paragraphs indented on their
-    first line open far more flush lines than they indent."""
+    first line flush, two lines at least indented by one amount, and half
+    the entries at least, two or more, going on in them. Paragraphs indented
+    on their first line open far more flush lines than they indent; the
+    lines beside a drop cap all go on the first one."""
     indents = [line.box.x0 - left for line, at_edge in zip(lines, flush) if not at_edge]
     entries = sum(flush)
+    going_on = sum(at_edge and not after for at_edge, after in zip(flush, flush[1:]))
     if (
         not flush[0]
         or len(indents) < 2
         or entries < 2
-        or len(indents) * 2 < entries
+        or going_on < 2
+        or going_on * 2 < entries
         or max(indents) - min(indents) > _FLUSH * height
         or not _INDENT_MIN * height <= min(indents) <= _INDENT_MAX * height
     ):
