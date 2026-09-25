@@ -129,6 +129,11 @@ pub struct TextLayer {
     /// Small filled shapes: the bullets of a list drawn as circles or squares
     /// rather than set as a character, which is how browsers print them.
     marks: Vec<Rect>,
+    /// Straight lines across or down the page, drawn as strokes or as thin
+    /// filled bars: a table's borders, the rules under a header, a
+    /// signature line. A rule between two lines of a table says a row ends
+    /// there; its absence says a cell's text wrapped.
+    rules: Vec<Rect>,
     /// Page area covered by raster images, in square pixels.
     image_area: f64,
     width: f64,
@@ -173,7 +178,7 @@ impl TextLayer {
             glyph.end = point(glyph.end);
             glyph.up = vector(glyph.up);
         }
-        for mark in &mut self.marks {
+        for mark in self.marks.iter_mut().chain(self.rules.iter_mut()) {
             let a = point(KPoint::new(f64::from(mark.x0), f64::from(mark.y0)));
             let b = point(KPoint::new(f64::from(mark.x1), f64::from(mark.y1)));
             *mark = Rect::new(
@@ -186,6 +191,12 @@ impl TextLayer {
         if quarter != 2 {
             std::mem::swap(&mut self.width, &mut self.height);
         }
+    }
+
+    /// The straight lines drawn across or down the page (see
+    /// [`TextLayer::rules`]), in the coordinates of its lines.
+    pub fn rules(&self) -> Vec<Rect> {
+        self.rules.clone()
     }
 
     /// The page's size in pixels, as the renderer would make it.
@@ -797,14 +808,15 @@ fn join_word_gaps(runs: Vec<Run>, spaces_set: bool) -> Vec<Run> {
             continue;
         }
         let middle = (x1 + spans[b].1) / 2.0;
-        let (gap_left, gap_right) = (x1, spans[b].1);
+        let (reach_left, reach_right) = (spans[a].1, spans[b].2);
         // The nearest baseline above and below, a line's distance away, of
-        // the lines that reach into the gap at all: a line of the next column
-        // over is no neighbour of this one.
+        // the lines under or over the two pieces: a line of the next column
+        // over is no neighbour of this one, and a table's rows under a gap
+        // between two cells are, although they are white just there.
         let neighbour = |from: f64, above: bool| {
             let mut best: Option<f64> = None;
             for (c, &(cy, cx0, cx1)) in spans.iter().enumerate() {
-                if !upright[c] || c == a || c == b || cx1 < gap_left || cx0 > gap_right {
+                if !upright[c] || c == a || c == b || cx1 < reach_left || cx0 > reach_right {
                     continue;
                 }
                 let d = if above { from - cy } else { cy - from };
@@ -913,7 +925,17 @@ struct Collector {
     unnamed: std::collections::HashMap<u128, (usize, Vec<(usize, char)>)>,
 }
 
+/// Rules a page keeps at most: a map or a chart draws thousands of strokes,
+/// and a table needs a few dozen.
+const MAX_RULES: usize = 20_000;
+
 impl Collector {
+    fn push_rule(&mut self, rule: Rect) {
+        if self.layer.rules.len() < MAX_RULES {
+            self.layer.rules.push(rule);
+        }
+    }
+
     /// A font whose name is not known and that drew nothing but private-use
     /// characters from Wingdings' bullets, each at the start of its line — a
     /// bullet font, set a glyph at a time before each item: those glyphs are
@@ -955,20 +977,45 @@ impl<'a> Device<'a> for Collector {
     fn set_soft_mask(&mut self, _: Option<SoftMask<'a>>) {}
     fn set_blend_mode(&mut self, _: BlendMode) {}
     fn draw_path(&mut self, path: &BezPath, transform: Affine, _: &Paint<'a>, mode: &PathDrawMode) {
-        // Only small, roughly square, filled shapes: a bullet, not a rule,
-        // a table border or a letter drawn as outlines.
-        if !matches!(mode, PathDrawMode::Fill(_)) {
-            return;
-        }
         let bounds = transform.transform_rect_bbox(kurbo::Shape::bounding_box(path));
         let (w, h) = (bounds.width(), bounds.height());
+        let rect = |b: kurbo::Rect| Rect::new(b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32);
+        if !matches!(mode, PathDrawMode::Fill(_)) {
+            // A stroke: each of its straight pieces that runs across or down
+            // the page is a rule — a border drawn line by line, or a cell's
+            // box drawn whole.
+            let mut start = None;
+            let mut at = None;
+            for element in path.elements() {
+                let (from, to) = match *element {
+                    kurbo::PathEl::MoveTo(p) => {
+                        (start, at) = (Some(p), Some(p));
+                        continue;
+                    }
+                    kurbo::PathEl::LineTo(p) => (at.replace(p), p),
+                    kurbo::PathEl::ClosePath => match start {
+                        Some(p) => (at.replace(p), p),
+                        None => continue,
+                    },
+                    kurbo::PathEl::QuadTo(_, p) | kurbo::PathEl::CurveTo(_, _, p) => {
+                        at = Some(p);
+                        continue;
+                    }
+                };
+                let Some(from) = from else { continue };
+                let (a, b) = (transform * from, transform * to);
+                if (a.x - b.x).abs() < 1.0 || (a.y - b.y).abs() < 1.0 {
+                    self.push_rule(rect(kurbo::Rect::from_points(a, b)));
+                }
+            }
+            return;
+        }
         if w >= 1.0 && h >= 1.0 && w <= 60.0 && h <= 60.0 && (0.6..=1.6).contains(&(w / h)) {
-            self.layer.marks.push(Rect::new(
-                bounds.x0 as f32,
-                bounds.y0 as f32,
-                bounds.x1 as f32,
-                bounds.y1 as f32,
-            ));
+            // Small, roughly square: a bullet.
+            self.layer.marks.push(rect(bounds));
+        } else if w.min(h) <= 6.0 && w.max(h) >= 4.0 * w.min(h).max(1.0) {
+            // A thin bar: a rule, the way browsers draw a table's borders.
+            self.push_rule(rect(bounds));
         }
     }
     fn push_clip_path(&mut self, _: &ClipPath) {}
@@ -1187,6 +1234,7 @@ mod tests {
         TextLayer {
             glyphs,
             marks: Vec::new(),
+            rules: Vec::new(),
             image_area: 0.0,
             width: 1000.0,
             height: 1000.0,

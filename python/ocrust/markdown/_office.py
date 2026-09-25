@@ -36,10 +36,12 @@ from ._ir import (
     Span,
     Table,
     assemble,
+    body_of,
     flatten,
     is_empty,
     nest,
     plain,
+    relabel,
     strip,
     subscript,
     superscript,
@@ -352,6 +354,7 @@ class _Word:
         self.used_notes: list[str] = []
         self.titled = False
         self.paragraph_style = ""
+        self.chunks = 0
 
     def convert(self) -> Note:
         root = self.package.xml(self.part)
@@ -394,6 +397,30 @@ class _Word:
                 choice = child(node, "Choice")
                 if choice is not None:
                     self._collect(choice, entries)
+            elif name == "altChunk":
+                entries.extend(self._chunk(node))
+
+    def _chunk(self, node: Element) -> list[Block]:
+        """Content imported whole from another file (`w:altChunk`): a web
+        page, RTF, plain text or another Word document, which Word shows in
+        its place. It is read by the reader of its kind; one that cannot be
+        read is left out, not the document."""
+        target = self.rels.get(rel_id(node))
+        if not target or target[2] or self.ctx.convert is None:
+            return []
+        part = target[1]
+        try:
+            data = self.package.read(part) or b""
+            kind = _chunk_kind(self.package, part, data)
+            name = (posixpath.splitext(posixpath.basename(part))[0] or "chunk") + kind
+            note = self.ctx.convert(data, name, self.ctx) if kind else None
+        except Exception:  # noqa: BLE001 - one chunk must not sink the document
+            return []
+        if note is None:
+            return []
+        self.chunks += 1
+        # Its footnotes stay its own beside the document's.
+        return relabel(body_of(note), f"chunk{self.chunks}-")
 
     def _assemble(self, entries: list[_Para | Block]) -> list[Block]:
         out: list[Block] = []
@@ -572,6 +599,7 @@ class _Word:
             if state.skipping():
                 state.result_text(value)
                 return
+            state.shown(value)
             if vert == "superscript":
                 value = superscript(value)
             elif vert == "subscript":
@@ -597,7 +625,9 @@ class _Word:
             elif name == "sym":
                 text(_symbol(node))
             elif name == "fldChar":
-                state.char(attr(node, "fldCharType") or "")
+                value = state.char(attr(node, "fldCharType") or "", child(node, "ffData"))
+                if value:
+                    text(value)
             elif name == "instrText":
                 state.instruction(node.text or "")
             elif name == "footnoteReference":
@@ -606,12 +636,45 @@ class _Word:
                 self._note_ref(attr(node, "id") or "", "e", runs)
             elif name in ("drawing", "pict", "object"):
                 extras.extend(self._drawing(node))
+            elif name == "ruby":
+                self._ruby(node, runs, extras, link, state)
             elif name == "AlternateContent":
                 choice = child(node, "Choice")
                 if choice is not None:
                     for inner in choice:
                         if local(inner.tag) in ("drawing", "pict", "object"):
                             extras.extend(self._drawing(inner))
+
+    def _ruby(
+        self,
+        ruby: Element,
+        runs: list[Run],
+        extras: list[Block],
+        link: str,
+        state: _FieldState,
+    ) -> None:
+        """Text with its reading set above it (furigana, Word's Phonetic
+        Guide): the text, then the reading in parentheses, as a web page
+        writes it for a browser without ruby — 東京(とうきょう)."""
+        start = len(runs)
+        base = child(ruby, "rubyBase")
+        if base is not None:
+            self._walk(base, runs, extras, link, state)
+        above = child(ruby, "rt")
+        if above is None:
+            return
+        reading: list[Run] = []
+        self._walk(above, reading, extras, link, state)
+        texts = [(item, fmt) for item, fmt, _ in reading if isinstance(item, str)]
+        said = "".join(item for item, _ in texts).strip()
+        shown = "".join(item for item, _, _ in runs[start:] if isinstance(item, str)).strip()
+        # Dots set over a word for emphasis are not a reading.
+        if re.search(r"\w", said) and said != shown:
+            # The parentheses take the formatting the whole reading has.
+            fmt = frozenset.intersection(*(fmt for _, fmt in texts))
+            runs.append(("(", fmt, state.link or link))
+            runs.extend(reading)
+            runs.append((")", fmt, state.link or link))
 
     def _hidden(self, rpr: Element | None) -> bool:
         """Whether a run is hidden text: by its own formatting, else by its
@@ -708,39 +771,90 @@ class _Word:
         return _table_blocks(rows)
 
 
+@dataclass
+class _Field:
+    """One complex field being read: its instruction, whether its result has
+    begun, and what a form field shows without a result of its own."""
+
+    instruction: str = ""
+    in_result: bool = False
+    value: str = ""
+    shown: bool = False
+
+
 class _FieldState:
     """Word's complex fields: `{ HYPERLINK "…" }` and its displayed result.
 
     The instruction is never text; the result is, and a hyperlink field's
-    result becomes a link.
+    result becomes a link. A legacy form field keeps its answer in its field
+    data instead: a check box's state and a drop-down's choice stand where
+    the field ends, when it has no result that says them.
     """
 
     def __init__(self) -> None:
-        self.stack: list[list[str]] = []
+        self.stack: list[_Field] = []
         self.link = ""
 
-    def char(self, kind: str) -> None:
+    def char(self, kind: str, data: Element | None = None) -> str:
+        """Follows a field character; returns what a form field that ends
+        here shows, if anything."""
         if kind == "begin":
-            self.stack.append(["instr", ""])
+            self.stack.append(_Field(value=_form_value(data)))
         elif kind == "separate" and self.stack:
-            self.stack[-1][0] = "result"
-            match = re.match(r'\s*HYPERLINK\s+"([^"]+)"', self.stack[-1][1])
+            self.stack[-1].in_result = True
+            match = re.match(r'\s*HYPERLINK\s+"([^"]+)"', self.stack[-1].instruction)
             if match and len(self.stack) == 1:
                 self.link = match.group(1)
         elif kind == "end" and self.stack:
-            self.stack.pop()
+            ended = self.stack.pop()
             if not self.stack:
                 self.link = ""
+            if not ended.shown:
+                return ended.value
+        return ""
 
     def instruction(self, text: str) -> None:
-        if self.stack and self.stack[-1][0] == "instr":
-            self.stack[-1][1] += text
+        if self.stack and not self.stack[-1].in_result:
+            self.stack[-1].instruction += text
 
     def skipping(self) -> bool:
-        return any(frame[0] == "instr" for frame in self.stack)
+        return any(not frame.in_result for frame in self.stack)
 
     def result_text(self, _text: str) -> None:
         """Text inside an instruction: never shown."""
+
+    def shown(self, text: str) -> None:
+        """Text of the fields' results: what they show, their data aside."""
+        if text.strip():
+            for frame in self.stack:
+                frame.shown = True
+
+
+def _form_value(data: Element | None) -> str:
+    """What a legacy form field's data (`w:ffData`) says it shows: a check
+    box as ☒ or ☐, a drop-down as the entry chosen. A text field's answer is
+    its result, as any field's."""
+    if data is None:
+        return ""
+    box = child(data, "checkBox")
+    if box is not None:
+        # Checked as the user left it, else as the form was made.
+        state = child(box, "checked")
+        if state is None:
+            state = child(box, "default")
+        return "☒" if _on(state) else "☐"
+    choices = child(data, "ddList")
+    if choices is not None:
+        entries = [attr(entry, "val") or "" for entry in children(choices, "listEntry")]
+        chosen = child(choices, "result")
+        if chosen is None:
+            chosen = child(choices, "default")
+        try:
+            index = int(attr(chosen, "val") or 0) if chosen is not None else 0
+        except ValueError:
+            index = 0
+        return entries[index] if 0 <= index < len(entries) else ""
+    return ""
 
 
 def _rows(table: Element) -> Iterator[Element]:
@@ -820,6 +934,58 @@ def _main_part(package: Package, fallback: str) -> str:
     if found is None:
         raise ConversionError(f"no {fallback} in the package")
     return found
+
+
+#: What an imported chunk is read as, by its content type or else its name.
+_CHUNK_TYPES = {
+    "text/html": ".html",
+    "application/xhtml+xml": ".xhtml",
+    "message/rfc822": ".mht",
+    "multipart/related": ".mht",
+    "application/rtf": ".rtf",
+    "text/rtf": ".rtf",
+    "text/plain": ".txt",
+}
+_CHUNK_SUFFIXES = {
+    ".htm": ".html",
+    ".html": ".html",
+    ".xhtml": ".xhtml",
+    ".mht": ".mht",
+    ".mhtml": ".mht",
+    ".rtf": ".rtf",
+    ".txt": ".txt",
+}
+
+
+def _chunk_kind(package: Package, part: str, data: bytes) -> str:
+    """The suffix of the reader an imported chunk is read with, or "" for a
+    kind none reads. A Word document is a package and RTF starts as RTF,
+    whatever their content type says."""
+    if data.startswith(b"PK\x03\x04"):
+        return ".docx"
+    if data.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"{\\rtf"):
+        return ".rtf"
+    by_type = _CHUNK_TYPES.get(_content_type(package, part))
+    return by_type or _CHUNK_SUFFIXES.get(posixpath.splitext(part.lower())[1], "")
+
+
+def _content_type(package: Package, part: str) -> str:
+    """A part's content type, from `[Content_Types].xml`: its own, else the
+    one of its extension."""
+    root = package.xml("[Content_Types].xml")
+    if root is None:
+        return ""
+    name = "/" + part.lstrip("/").lower()
+    extension = posixpath.splitext(name)[1].lstrip(".")
+    found = ""
+    for item in root:
+        kind = local(item.tag)
+        if kind == "Override" and (attr(item, "PartName") or "").lower() == name:
+            found = attr(item, "ContentType") or ""
+            break
+        if kind == "Default" and (attr(item, "Extension") or "").lower() == extension:
+            found = found or attr(item, "ContentType") or ""
+    return found.split(";", 1)[0].strip().lower()
 
 
 def docx(data: bytes, ctx: Context) -> Note:
@@ -1250,6 +1416,9 @@ _DATE_FORMATS = {14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 30, 36, 45, 47, 50, 57}
 _DURATION_FORMATS = {46}
 #: Columns beyond this are a sheet's formatting run to its edge, not data.
 _MAX_SHEET_COLUMNS = 16384
+#: How far into a sheet its column settings are looked for: they come before
+#: the first row, within its first few kilobytes.
+_SHEET_HEAD = 1024 * 1024
 _PERCENT_FORMATS = {9, 10}
 
 
@@ -1401,10 +1570,16 @@ class _Workbook:
         self, part: str, base_1904: bool, limit: int | None
     ) -> tuple[dict[int, dict[int, str]], int]:
         """A sheet's non-empty rows, row → column → text, read as a stream,
-        and how many rows beyond `limit` there were."""
+        and how many rows beyond `limit` there were.
+
+        Hidden rows and columns are left out, as hidden sheets are; the rows
+        around a hidden one follow each other, as they do on screen.
+        """
         rows: dict[int, dict[int, str]] = {}
         dropped = 0
         next_row = 0
+        hidden_rows = 0
+        hidden_columns = self._hidden_columns(part)
         for row in self.package.stream_elements(part, "row"):
             try:
                 index = int(attr(row, "r") or 0) - 1
@@ -1413,13 +1588,17 @@ class _Workbook:
             if index < 0:
                 index = next_row
             next_row = index + 1
+            if _on_attr(attr(row, "hidden")):
+                hidden_rows += 1
+                continue
+            index -= hidden_rows
             values: dict[int, str] = {}
             next_column = 0
             for cell in children(row, "c"):
                 ref = _cell_ref(attr(cell, "r") or "")
                 column = ref[1] if ref else next_column
                 next_column = column + 1
-                if column > _MAX_SHEET_COLUMNS:
+                if column > _MAX_SHEET_COLUMNS or hidden_columns[column]:
                     continue
                 text = self._value(cell, base_1904)
                 if text:
@@ -1432,6 +1611,38 @@ class _Workbook:
             self.ctx.cells_left -= len(values)
             rows[index] = values
         return rows, dropped
+
+    def _hidden_columns(self, part: str) -> bytearray:
+        """Which columns a sheet hides, a flag per column, from its column
+        settings (`<cols>`). They come before its rows, if at all: the sheet
+        is looked into that far, not read through twice."""
+        hidden = bytearray(_MAX_SHEET_COLUMNS + 1)
+        found = self.package.find(part)
+        if found is None:
+            return hidden
+        with self.package.zip.open(found) as raw:
+            head = raw.read(_SHEET_HEAD)
+        opening = re.search(rb"<(?:[\w.-]+:)?(cols|sheetData)[\s/>]", head)
+        if opening is None or opening.group(1) != b"cols":
+            return hidden
+        settings = self.package.stream_elements(found, "cols", _SHEET_HEAD)
+        try:
+            cols = next(settings, None)
+        except ConversionError:
+            cols = None
+        finally:
+            settings.close()  # type: ignore[attr-defined]
+        for col in children(cols, "col") if cols is not None else []:
+            if not _on_attr(attr(col, "hidden")):
+                continue
+            try:
+                first = max(int(attr(col, "min") or 0), 1) - 1
+                last = min(int(attr(col, "max") or attr(col, "min") or 0), len(hidden))
+            except ValueError:
+                continue
+            if first < last:
+                hidden[first:last] = b"\x01" * (last - first)
+        return hidden
 
     def _value(self, cell: Element, base_1904: bool) -> str:
         kind = attr(cell, "t") or "n"

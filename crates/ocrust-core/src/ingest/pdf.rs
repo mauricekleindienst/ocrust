@@ -97,6 +97,7 @@ impl Renderer {
                         width,
                         height,
                         pixels_per_point: scale,
+                        rules: layer.rules(),
                     }),
                 })?;
                 continue;

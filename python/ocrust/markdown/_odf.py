@@ -48,6 +48,9 @@ _MAX_REPEAT = 1000
 #: The most rows and columns of a sheet ever written out, whatever the limit.
 _MAX_SHEET_ROWS = 1_000_000
 _MAX_SHEET_COLUMNS = 1024
+#: A row's or column's visibility when it is not shown: collapsed, or hidden
+#: by a filter.
+_HIDDEN = {"collapse", "filter"}
 #: Drawn shapes whose text is read.
 _DRAWN_SHAPES = {
     "custom-shape",
@@ -384,12 +387,18 @@ def _sheet_rows(
     identical rows are one row repeated a thousand times — so they are counted
     as rows, kept up to the limit, and never multiplied past it: a file of two
     kilobytes may claim a million rows of a million cells.
+
+    Hidden rows and columns, collapsed or filtered out, are left out as hidden
+    sheets are; the rows around a hidden one follow each other, as on screen.
     """
     rows: dict[int, dict[int, str]] = {}
     dropped = 0
     index = 0
     cap = limit if limit is not None else _MAX_SHEET_ROWS
+    hidden = _hidden_columns(table)
     for row in _table_rows(table):
+        if attr(row, "visibility") in _HIDDEN:
+            continue
         repeat = _repeat(attr(row, "number-rows-repeated"))
         values: dict[int, str] = {}
         column = 0
@@ -398,10 +407,15 @@ def _sheet_rows(
             if name not in ("table-cell", "covered-table-cell"):
                 continue
             count = _repeat(attr(cell, "number-columns-repeated"))
-            text = "" if name == "covered-table-cell" else plain(reader.cell(cell))
+            span = range(column, min(column + count, _MAX_SHEET_COLUMNS))
+            # A cell only in hidden columns is not read at all, nor its pictures.
+            text = ""
+            if name != "covered-table-cell" and not hidden.issuperset(span):
+                text = plain(reader.cell(cell))
             if text:
-                for offset in range(min(count, max(_MAX_SHEET_COLUMNS - column, 0))):
-                    values[column + offset] = text
+                for place in span:
+                    if place not in hidden:
+                        values[place] = text
             column += count
         if values:
             kept = min(repeat, max(cap - len(rows), 0), reader.ctx.cells_left // len(values))
@@ -414,6 +428,31 @@ def _sheet_rows(
         else:
             index += repeat
     return rows, dropped
+
+
+def _hidden_columns(table: Element) -> set[int]:
+    """The columns a sheet hides, by number."""
+    hidden: set[int] = set()
+    column = 0
+    for node in _table_columns(table):
+        if column >= _MAX_SHEET_COLUMNS:
+            break
+        count = _repeat(attr(node, "number-columns-repeated"))
+        if attr(node, "visibility") in _HIDDEN:
+            hidden.update(range(column, min(column + count, _MAX_SHEET_COLUMNS)))
+        column += count
+    return hidden
+
+
+def _table_columns(table: Element) -> list[Element]:
+    columns: list[Element] = []
+    for node in table:
+        name = local(node.tag)
+        if name == "table-column":
+            columns.append(node)
+        elif name in ("table-header-columns", "table-columns", "table-column-group"):
+            columns.extend(_table_columns(node))
+    return columns
 
 
 def _repeat(value: str | None) -> int:

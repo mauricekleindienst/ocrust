@@ -949,7 +949,7 @@ fn cmp_f32(a: f32, b: f32) -> std::cmp::Ordering {
 
 /// Groups ordered lines into blocks and classifies them.
 pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
-    group(lines, cfg, false, 0.0)
+    group(lines, cfg, false, 0.0, &[])
 }
 
 /// [`group_blocks`] for lines read from a PDF's own text rather than
@@ -961,16 +961,24 @@ pub fn group_blocks(lines: Vec<Line>, cfg: &LayoutConfig) -> Vec<Block> {
 ///
 /// `pixels_per_point` is the page's scale, when it is known (0 otherwise): it
 /// says which print is small — terms of business, footnotes — and so never the
-/// body text a heading stands out from.
+/// body text a heading stands out from. `rules` are the straight lines the
+/// page draws, which say where a table's rows end.
 pub(crate) fn group_exact_blocks(
     lines: Vec<Line>,
     cfg: &LayoutConfig,
     pixels_per_point: f32,
+    rules: &[Rect],
 ) -> Vec<Block> {
-    group(lines, cfg, true, pixels_per_point)
+    group(lines, cfg, true, pixels_per_point, rules)
 }
 
-fn group(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool, pixels_per_point: f32) -> Vec<Block> {
+fn group(
+    lines: Vec<Line>,
+    cfg: &LayoutConfig,
+    exact: bool,
+    pixels_per_point: f32,
+    rules: &[Rect],
+) -> Vec<Block> {
     if lines.is_empty() {
         return Vec::new();
     }
@@ -995,7 +1003,7 @@ fn group(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool, pixels_per_point: f3
             Some(gap) if exact => (gap / 2.0).max(1.0),
             _ => crate::table::gutter_width(&lines, text_height),
         };
-        crate::table::find(&lines, text_height, gutter)
+        crate::table::find(&lines, text_height, gutter, rules)
     } else {
         Vec::new()
     };
@@ -1652,7 +1660,7 @@ mod tests {
             line_at("31.07.2026", 1166.0, 413.0, 1305.0, 447.0),
         ];
         let cfg = LayoutConfig::default();
-        let blocks = group_exact_blocks(reading_order_exact(lines, &cfg), &cfg, 0.0);
+        let blocks = group_exact_blocks(reading_order_exact(lines, &cfg), &cfg, 0.0, &[]);
         assert_eq!(blocks.len(), 1);
         let table = blocks[0].table.as_ref().expect("a table");
         assert_eq!(table.rows, 4);
@@ -1700,7 +1708,7 @@ mod tests {
             ));
         }
         let cfg = LayoutConfig::default();
-        let blocks = group_exact_blocks(reading_order_exact(lines, &cfg), &cfg, 0.0);
+        let blocks = group_exact_blocks(reading_order_exact(lines, &cfg), &cfg, 0.0, &[]);
         let table = blocks
             .iter()
             .find_map(|b| b.table.as_ref())
@@ -1799,7 +1807,7 @@ mod tests {
         let starts = |blocks: &[Block]| -> Vec<String> {
             blocks.iter().map(|b| b.lines[0].text.clone()).collect()
         };
-        let exact = group_exact_blocks(lines.clone(), &cfg, 0.0);
+        let exact = group_exact_blocks(lines.clone(), &cfg, 0.0, &[]);
         assert_eq!(
             starts(&exact),
             [
@@ -1868,7 +1876,7 @@ mod tests {
             ),
         ];
         let cfg = LayoutConfig::default();
-        let exact = group_exact_blocks(lines.clone(), &cfg, 0.0);
+        let exact = group_exact_blocks(lines.clone(), &cfg, 0.0, &[]);
         let table = exact[0].table.as_ref().expect("a table");
         assert_eq!((table.rows, table.columns), (3, 3));
         let last: Vec<&str> = table

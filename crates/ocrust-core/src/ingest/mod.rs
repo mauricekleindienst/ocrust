@@ -74,6 +74,8 @@ pub struct TextPage {
     pub height: u32,
     /// The page's scale: pixels to one point of the PDF.
     pub pixels_per_point: f32,
+    /// The straight lines drawn across or down the page: a table's borders.
+    pub rules: Vec<crate::geom::Rect>,
 }
 
 /// How to rasterize vector input.

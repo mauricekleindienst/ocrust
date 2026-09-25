@@ -886,7 +886,8 @@ fn text_page(
     started: Instant,
 ) -> Page {
     let ordered = layout::reading_order_exact(text.lines, layout_config);
-    let blocks = layout::group_exact_blocks(ordered, layout_config, text.pixels_per_point);
+    let blocks =
+        layout::group_exact_blocks(ordered, layout_config, text.pixels_per_point, &text.rules);
     let signals: Vec<crate::quality::LineSignals> = blocks
         .iter()
         .flat_map(|block| block.lines.iter())

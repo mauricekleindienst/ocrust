@@ -71,6 +71,22 @@ def _key(text: str) -> str:
     return re.sub(r"\d+", "#", " ".join(text.lower().split()))
 
 
+def _keys(line: Line) -> list[str]:
+    """The running heads a margin line may be: itself, and each of its parts
+    when it was merged from several — a browser's date and page title, set on
+    one baseline, are one line on one page and two on the next."""
+    keys = [_key(line.text)]
+    if len(line.segments) >= 2:
+        keys += [_key(segment.text) for segment in line.segments]
+    return keys
+
+
+def _is_boilerplate(line: Line, boilerplate: set[str]) -> bool:
+    """Whether a margin line is a running head, whole or in all its parts."""
+    whole, *parts = _keys(line)
+    return whole in boilerplate or bool(parts) and all(part in boilerplate for part in parts)
+
+
 def _heading_key(text: str) -> str:
     """A heading's identity: its words as they are, numbers included — the
     chapters "Kapitel 1" and "Kapitel 2" are two headings."""
@@ -127,14 +143,15 @@ def _boilerplate(pages: Sequence[Page]) -> set[str]:
     for page in pages:
         seen: set[str] = set()
         for line in _margin_lines(page):
-            key = _key(line.text)
-            if _PAGE_NUMBER.match(line.text.strip()):
-                numbers.add(key)
-            if key not in seen:
-                found.setdefault(key, {})[page.index] = [
-                    int(n) for n in re.findall(r"\d+", line.text)
-                ]
-            seen.add(key)
+            texts = [line.text] + [s.text for s in line.segments if len(line.segments) >= 2]
+            for key, text in zip(_keys(line), texts, strict=True):
+                if _PAGE_NUMBER.match(text.strip()):
+                    numbers.add(key)
+                if key not in seen:
+                    found.setdefault(key, {})[page.index] = [
+                        int(n) for n in re.findall(r"\d+", text)
+                    ]
+                seen.add(key)
         counts.update(seen)
     needed = max(3, len(pages) * _REPEAT_SHARE) if len(pages) >= 3 else len(pages)
     repeated = {
@@ -193,7 +210,7 @@ def _page(
 
     def kept(line: Line) -> bool:
         at_edge = line.box.y1 <= top or line.box.y0 >= bottom
-        return not (at_edge and _key(line.text) in boilerplate)
+        return not (at_edge and _is_boilerplate(line, boilerplate))
 
     def kept_heading(line: Line) -> bool:
         # A page number set large is dropped with the other page numbers.

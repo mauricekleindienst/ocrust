@@ -97,6 +97,13 @@ const MIN_CELL_OVERLAP: f32 = 0.2;
 const MIN_COLUMN_ROWS: usize = 2;
 /// How far apart two rows may sit, in text heights, and still be one table.
 const MAX_ROW_GAP: f32 = 2.0;
+/// How much smaller a line's print has to be than its neighbour's to be the
+/// page's margin rather than a row: a browser prints its date, title and page
+/// number at eight points over ten.
+const SMALLER_PRINT: f32 = 0.87;
+/// How much further apart than any two rows before it, in text heights, a
+/// line may sit and still be the table's.
+const ROW_GAP_JUMP: f32 = 0.5;
 
 /// How close under a row, in text heights, the next line of a cell sits: at
 /// the text's line spacing, up to one and a half lines, with nothing between.
@@ -117,8 +124,16 @@ pub(crate) struct Found {
 /// of lines from the layout's point of view — address, table, totals, terms — so
 /// looking for a table anywhere in a block rather than assuming the whole block
 /// is one is what makes it work on the documents that have tables.
-pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32) -> Vec<Found> {
-    let rows: Vec<Vec<Candidate>> = lines.iter().map(|line| cells_of(line, gutter)).collect();
+///
+/// `rules` are the straight lines the page draws, known when it was read from
+/// its own text: a table's borders, which say where its rows and columns are.
+pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32, rules: &[Rect]) -> Vec<Found> {
+    let rules = Rules::of(rules, text_height);
+    let rows: Vec<Vec<Candidate>> = lines
+        .iter()
+        .map(|line| rules.split(cells_of(line, gutter), line))
+        .collect();
+    let ruled = rules.above(lines, &rows);
     if log::log_enabled!(log::Level::Debug) {
         log::debug!("table scan: text height {text_height:.1}, gutter {gutter:.1}");
         for (index, row) in rows.iter().enumerate() {
@@ -145,17 +160,27 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32) -> Vec<Found> 
             at += 1;
             continue;
         }
-        let (end, candidates) = grow(&rows, lines, at, text_height);
+        let (end, candidates) = grow(&rows, lines, &ruled, &rules, at, text_height);
         log::debug!("  grow from {at}: end {end}, {candidates} candidate rows");
         if candidates >= MIN_ROWS {
-            let continues = continuations(&rows[at..end], &lines[at..end], text_height);
+            let continues = continuations(
+                &rows[at..end],
+                &lines[at..end],
+                &ruled[at..end],
+                text_height,
+            );
             let own_rows: Vec<Vec<Candidate>> = rows[at..end]
                 .iter()
                 .zip(&continues)
                 .filter(|(_, continues)| !**continues)
                 .map(|(row, _)| row.clone())
                 .collect();
-            if let Some(columns) = columns_of(&own_rows, gutter) {
+            // A table drawn with its borders says where its columns are,
+            // however close its cells sit.
+            let ruled_columns = rules
+                .columns(&lines[at..end], &rows[at..end], text_height)
+                .filter(|_| multi_cell_rows(&own_rows));
+            if let Some(columns) = ruled_columns.or_else(|| columns_of(&own_rows, gutter)) {
                 log::debug!(
                     "  run {at}..{end} ({candidates} candidates) -> columns {}",
                     columns
@@ -169,19 +194,33 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32) -> Vec<Found> 
                 // not begin on it. The columns, now known, say where its titles
                 // are. One row only: a table has one header, and everything
                 // above it is the page.
-                let adopted = at > taken && adopts(&rows[at - 1], &columns, gutter);
+                let adopted = at > taken
+                    && !smaller_print(&lines[at - 1], &lines[at])
+                    && adopts(&rows[at - 1], &columns, gutter);
                 let start = if adopted { at - 1 } else { at };
-                found.push(Found {
-                    start,
-                    end,
-                    table: grid(
+                let mut table = grid(
+                    &rows[start..end],
+                    &continuations(
                         &rows[start..end],
-                        &continuations(&rows[start..end], &lines[start..end], text_height),
-                        &columns,
-                        gutter,
-                        adopted,
+                        &lines[start..end],
+                        &ruled[start..end],
+                        text_height,
                     ),
-                });
+                    &columns,
+                    gutter,
+                    adopted,
+                );
+                let start = over_the_header(
+                    &mut table,
+                    lines,
+                    &rows,
+                    start,
+                    taken,
+                    &columns,
+                    gutter,
+                    text_height,
+                );
+                found.push(Found { start, end, table });
                 at = end;
                 taken = end;
                 continue;
@@ -265,40 +304,79 @@ fn gutter_between_groups(gaps: &[f32]) -> Option<f32> {
 ///
 /// Returns one past the last row of the run and how many of its rows carry more
 /// than one cell.
-fn grow(rows: &[Vec<Candidate>], lines: &[Line], start: usize, text_height: f32) -> (usize, usize) {
+fn grow(
+    rows: &[Vec<Candidate>],
+    lines: &[Line],
+    ruled: &[bool],
+    rules: &Rules,
+    start: usize,
+    text_height: f32,
+) -> (usize, usize) {
     let max_row_gap = text_height * MAX_ROW_GAP;
     let mut last = start;
     let mut candidates = 1usize;
-    let mut previous = gutters_of(&rows[start]);
+    // A line in smaller print than the one under it — the date and title a
+    // browser prints over a table running on from the page before — is the
+    // page's margin, not the table's first row.
+    if lines
+        .get(start + 1)
+        .is_some_and(|next| smaller_print(&lines[start], next))
+    {
+        return (start + 1, 1);
+    }
+    let mut previous = &rows[start];
+    // The widest gap between two lines of the run so far.
+    let mut widest: Option<f32> = None;
 
     for (offset, row) in rows.iter().enumerate().skip(start + 1) {
         // Two tables of the same shape on one page are two tables. What separates
-        // them is the white space, so a row far below the last one ends the run.
-        if lines[offset].bbox.y0 - lines[offset - 1].bbox.y1 > max_row_gap {
+        // them is the white space, so a row far below the last one ends the run —
+        // and so does one set clearly further apart than the rows so far: the
+        // subject and salutation under a letter's address are paragraphs.
+        let gap = lines[offset].bbox.y0 - lines[offset - 1].bbox.y1;
+        if gap > max_row_gap || widest.is_some_and(|w| gap > w + text_height * ROW_GAP_JUMP) {
             break;
         }
+        if smaller_print(&lines[offset], &lines[offset - 1]) {
+            // The page's footer under the table, or its footnotes.
+            break;
+        }
+        widest = Some(widest.map_or(gap, |w| w.max(gap)));
         if row.len() >= MIN_COLUMNS {
-            let theirs = gutters_of(row);
-            if !aligns(&previous, &theirs) {
+            // Against the row before, or the run's first — its header, as a
+            // rule, with every column filled: two rows that leave different
+            // cells empty may share no gap at all.
+            if !aligns(previous, row) && !aligns(&rows[start], row) {
                 break;
             }
-            previous = theirs;
+            previous = row;
             candidates += 1;
             last = offset;
         } else if offset == last + 1
             && carries_on(
                 &rows[start..=offset],
                 &lines[start..=offset],
+                &ruled[start..=offset],
                 offset - start,
                 text_height,
             )
         {
             // The next line of a cell that wraps: part of the row above.
             last = offset;
-        } else if spans_the_row(row, &rows[start..=last]) || opens_alone(row, &rows[start..=last]) {
-            // A line across the whole width — a title, a total — or a category
-            // alone in the first column sits inside the table without saying
-            // anything about its columns.
+        } else if ruled[offset]
+            && ruled.get(offset + 1).copied().unwrap_or(false)
+            && row.iter().all(|c| rules.boxed(&c.cell.bbox))
+        {
+            // A row of the table's grid whose other cells are empty: ruled off
+            // above and below, with the table's borders either side.
+            last = offset;
+        } else if spans_the_row(row, &rows[start..=last])
+            || opens_alone(row, &rows[start..=last])
+            || in_a_column(row, &rows[start..=last])
+        {
+            // A line across the whole width — a title, a total — a category
+            // alone in the first column, or a row with one cell filled, sits
+            // inside the table without saying anything about its columns.
             continue;
         } else {
             break;
@@ -321,6 +399,178 @@ fn opens_alone(row: &[Candidate], table: &[Vec<Candidate>]) -> bool {
     };
     let height = row.first().map_or(0.0, |c| c.cell.bbox.height());
     row.len() == 1 && (row[0].cell.bbox.x0 - left).abs() <= height
+}
+
+/// Whether `line` is set in clearly smaller print than `other`: by the median
+/// height of its words, which a superscript does not stretch as it does the
+/// line's box.
+fn smaller_print(line: &Line, other: &Line) -> bool {
+    let size = |line: &Line| {
+        let mut heights: Vec<f32> = line.words.iter().map(|w| w.bbox.height()).collect();
+        heights.sort_by(f32::total_cmp);
+        heights
+            .get(heights.len() / 2)
+            .copied()
+            .unwrap_or(line.bbox.height())
+    };
+    size(line) < size(other) * SMALLER_PRINT
+}
+
+/// Takes in the header's upper row, when the table has two: the line right
+/// above it whose cells each stand centred over a group of columns — the
+/// years over their measures — and a label in the first column set beside
+/// both header rows, where the header leaves its first cell empty. Markdown
+/// has one header row, so each column's title is its group's and its own
+/// (`2024 Umsatz`). Returns where the table now starts.
+#[allow(clippy::too_many_arguments)]
+fn over_the_header(
+    table: &mut Table,
+    lines: &[Line],
+    rows: &[Vec<Candidate>],
+    start: usize,
+    taken: usize,
+    columns: &[(f32, f32)],
+    gutter: f32,
+    text_height: f32,
+) -> usize {
+    let Some(&(first_x0, first_x1)) = columns.first() else {
+        return start;
+    };
+    // The first column's stretch reaches halfway to the second: a label may
+    // be wider than the names under it.
+    let first_reach = columns
+        .get(1)
+        .map_or(first_x1 + gutter, |next| (first_x1 + next.0) / 2.0);
+    let empty_first = !table.cells.iter().any(|c| c.row == 0 && c.column == 0);
+    let mut groups: Option<Vec<(usize, usize, String)>> = None;
+    let mut label: Option<String> = None;
+    let mut top = start;
+    while top > taken && start - top < 2 {
+        let (above, below) = (&lines[top - 1], &lines[top]);
+        if below.bbox.y0 - above.bbox.y1 > text_height || smaller_print(above, below) {
+            break;
+        }
+        let row = &rows[top - 1];
+        let in_first_column =
+            |c: &Candidate| c.cell.bbox.x0 >= first_x0 - gutter && c.cell.bbox.x1 <= first_reach;
+        if label.is_none() && empty_first && row.len() == 1 && in_first_column(&row[0]) {
+            label = Some(row[0].cell.text.clone());
+        } else if groups.is_none() && row.iter().all(|c| c.cell.bbox.x0 > first_x1) {
+            match grouped(row, columns) {
+                Some(found) => groups = Some(found),
+                None => break,
+            }
+        } else {
+            break;
+        }
+        top -= 1;
+    }
+    // A label beside one header row is only a line above the table.
+    if groups.is_none() {
+        return start;
+    }
+    for (from, to, text) in groups.into_iter().flatten() {
+        for (column, &(x0, x1)) in columns.iter().enumerate().take(to + 1).skip(from) {
+            match table
+                .cells
+                .iter_mut()
+                .find(|c| c.row == 0 && c.column <= column && column < c.column + c.column_span)
+            {
+                Some(cell) if !cell.text.starts_with(&text) => {
+                    cell.text = format!("{text} {}", cell.text);
+                }
+                Some(_) => {}
+                None => table.cells.push(Cell {
+                    row: 0,
+                    column,
+                    column_span: 1,
+                    text: text.clone(),
+                    bbox: Rect::new(x0, 0.0, x1, 0.0),
+                    confidence: 1.0,
+                }),
+            }
+        }
+    }
+    if let Some(text) = label {
+        table.cells.push(Cell {
+            row: 0,
+            column: 0,
+            column_span: 1,
+            text,
+            bbox: Rect::new(first_x0, 0.0, first_x1, 0.0),
+            confidence: 1.0,
+        });
+    }
+    table.cells.sort_by_key(|c| (c.row, c.column));
+    top
+}
+
+/// The columns each cell of a group row stands over: the narrowest run of
+/// them whose stretch covers it and is centred on it, one run after the
+/// other. `None` unless every cell finds its run and one of them spans two
+/// columns or more — else the line is not a row of groups.
+fn grouped(row: &[Candidate], columns: &[(f32, f32)]) -> Option<Vec<(usize, usize, String)>> {
+    let n = columns.len();
+    // Where each column's stretch begins and ends: halfway across the gaps.
+    let bound = |i: usize| -> f32 {
+        if i == 0 {
+            columns[0].0 - (columns[0].1 - columns[0].0)
+        } else if i == n {
+            columns[n - 1].1 + (columns[n - 1].1 - columns[n - 1].0)
+        } else {
+            (columns[i - 1].1 + columns[i].0) / 2.0
+        }
+    };
+    let mut out = Vec::new();
+    let mut next = 0usize;
+    for candidate in row {
+        let bbox = &candidate.cell.bbox;
+        let off = |a: usize, b: usize| ((bound(a) + bound(b + 1)) / 2.0 - bbox.center_x()).abs();
+        let width = |a: usize, b: usize| bound(b + 1) - bound(a);
+        let covering: Vec<(usize, usize)> = (next..n)
+            .flat_map(|a| (a..n).map(move |b| (a, b)))
+            .filter(|&(a, b)| bound(a) <= bbox.x0 + 1.0 && bound(b + 1) >= bbox.x1 - 1.0)
+            .collect();
+        // The narrowest run centred on it; a wide one may be centred on it
+        // by chance.
+        let best = covering
+            .iter()
+            .copied()
+            .filter(|&(a, b)| off(a, b) <= width(a, b) * 0.25)
+            .min_by(|&(a, b), &(c, d)| width(a, b).total_cmp(&width(c, d)))
+            .or_else(|| {
+                covering
+                    .iter()
+                    .copied()
+                    .min_by(|&(a, b), &(c, d)| off(a, b).total_cmp(&off(c, d)))
+            })?;
+        next = best.1 + 1;
+        out.push((best.0, best.1, candidate.cell.text.clone()));
+    }
+    out.iter().any(|&(a, b, _)| b > a).then_some(out)
+}
+
+/// Whether a line of one cell sits in one of the table's columns: a row
+/// whose other cells are empty. It lies under a cell of the table, and every
+/// cell it reaches under lies in one column with the others — they all share
+/// a stretch of the page.
+fn in_a_column(row: &[Candidate], table: &[Vec<Candidate>]) -> bool {
+    let [alone] = row else {
+        return false;
+    };
+    let bbox = &alone.cell.bbox;
+    let over: Vec<&Rect> = table
+        .iter()
+        .flatten()
+        .map(|c| &c.cell.bbox)
+        .filter(|c| c.horizontal_overlap(bbox) > 0.0)
+        .collect();
+    let shared = over.iter().map(|c| c.x0).fold(f32::MIN, f32::max)
+        < over.iter().map(|c| c.x1).fold(f32::MAX, f32::min);
+    shared
+        && over
+            .iter()
+            .any(|c| c.horizontal_overlap(bbox) >= 0.5 * c.width().min(bbox.width()))
 }
 
 /// Whether a cell holds a figure — an amount, a date, a phone number — rather
@@ -401,27 +651,46 @@ fn filled(upper: &Candidate, next: &Candidate, table: &[Vec<Candidate>], text_he
 }
 
 /// Which rows of a run carry on the row above (see [`carries_on`]).
-fn continuations(rows: &[Vec<Candidate>], lines: &[Line], text_height: f32) -> Vec<bool> {
+fn continuations(
+    rows: &[Vec<Candidate>],
+    lines: &[Line],
+    ruled: &[bool],
+    text_height: f32,
+) -> Vec<bool> {
     (0..rows.len())
-        .map(|i| carries_on(rows, lines, i, text_height))
+        .map(|i| carries_on(rows, lines, ruled, i, text_height))
         .collect()
 }
 
 /// Whether row `i` of a run is the next line of the row above rather than a
-/// row of its own. It is set right under the line above, and each of its cells
-/// lies under one cell of it. A row starts in the first column: a line that
-/// leaves it empty carries on the row above. A line that fills it is a row of
-/// its own — unless, leaving some column empty, it finishes a first cell that
-/// had filled its column or ends in a word broken with a hyphen; or the
-/// table's rows stand clearly further apart than this line does from the one
-/// above (a line break inside a cell).
-fn carries_on(rows: &[Vec<Candidate>], lines: &[Line], i: usize, text_height: f32) -> bool {
-    if i == 0 {
+/// row of its own. A rule drawn between them ends the row; in a table that
+/// rules off its rows, a line with none above it carries the row on.
+/// Otherwise it is set right under the line above, and each of its cells lies
+/// under one cell of it. It carries the row on when, leaving some column
+/// empty, each of its cells finishes one above that had filled its column or
+/// ended in a word broken with a hyphen; or when the table's rows stand
+/// clearly further apart than this line does from the one above (a line break
+/// inside a cell).
+fn carries_on(
+    rows: &[Vec<Candidate>],
+    lines: &[Line],
+    ruled: &[bool],
+    i: usize,
+    text_height: f32,
+) -> bool {
+    if i == 0 || ruled[i] {
         return false;
     }
     let gap = |j: usize| lines[j].bbox.y0 - lines[j - 1].bbox.y1;
-    if gap(i) > text_height * CONTINUATION_GAP || under_one_each(&rows[i], &rows[i - 1]).is_none() {
+    if gap(i) > text_height * CONTINUATION_GAP {
         return false;
+    }
+    let Some(uppers) = under_one_each(&rows[i], &rows[i - 1]) else {
+        return false;
+    };
+    let rules_off = ruled.iter().skip(1).filter(|&&r| r).count();
+    if rules_off >= 2 && rules_off * 3 >= rows.len() - 1 {
+        return true;
     }
     let left = rows
         .iter()
@@ -432,19 +701,20 @@ fn carries_on(rows: &[Vec<Candidate>], lines: &[Line], i: usize, text_height: f3
         row.iter()
             .position(|c| c.cell.bbox.x0 <= left + text_height)
     };
-    let Some(opening) = first(&rows[i]) else {
-        return true;
-    };
-    let Some(upper) = first(&rows[i - 1]) else {
+    let opens = first(&rows[i]).is_some();
+    if opens && first(&rows[i - 1]).is_none() {
         return false;
-    };
-    let (upper, opening) = (&rows[i - 1][upper], &rows[i][opening]);
+    }
+
     // A line with a cell in every column is a row, however full the cell
     // above it looks: in a table set tight, the columns crowd each other.
+    // Each cell has to finish the one above it: an e-mail address under
+    // another is the next row's, with its phone number left empty.
     let fullest = rows.iter().map(Vec::len).max().unwrap_or(0);
     if rows[i].len() < fullest
-        && (broken_word(&upper.cell.text, &opening.cell.text)
-            || filled(upper, opening, rows, text_height))
+        && rows[i].iter().zip(&uppers).all(|(cell, upper)| {
+            broken_word(&upper.cell.text, &cell.cell.text) || filled(upper, cell, rows, text_height)
+        })
     {
         return true;
     }
@@ -457,6 +727,164 @@ fn carries_on(rows: &[Vec<Candidate>], lines: &[Line], i: usize, text_height: f3
     row_gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let usual = row_gaps.get(row_gaps.len() * 3 / 4).copied().unwrap_or(0.0);
     usual > text_height * CONTINUATION_GAP && gap(i) < usual * 0.5
+}
+
+/// The straight lines a page draws, as they bear on its tables: those across
+/// it, which end rows, and those down it, which stand between columns.
+#[derive(Default)]
+struct Rules {
+    /// Across the page, sorted by height.
+    across: Vec<Rect>,
+    down: Vec<Rect>,
+}
+
+impl Rules {
+    /// Keeps the rules at most half a line thick and at least most of a line
+    /// long: shorter strokes are a letter's or a mark's.
+    fn of(rules: &[Rect], text_height: f32) -> Self {
+        let (thin, long) = (text_height * 0.5, text_height * 0.8);
+        let mut across: Vec<Rect> = rules
+            .iter()
+            .filter(|r| r.height() <= thin && r.width() >= long)
+            .copied()
+            .collect();
+        across.sort_by(|a, b| a.center_y().total_cmp(&b.center_y()));
+        let down = rules
+            .iter()
+            .filter(|r| r.width() <= thin && r.height() >= long)
+            .copied()
+            .collect();
+        Rules { across, down }
+    }
+
+    /// For each line, whether a rule runs between it and the line before,
+    /// under one of its cells.
+    fn above(&self, lines: &[Line], rows: &[Vec<Candidate>]) -> Vec<bool> {
+        (0..lines.len())
+            .map(|k| {
+                k > 0
+                    && rows[k]
+                        .iter()
+                        .any(|c| self.between(&lines[k - 1].bbox, &lines[k].bbox, &c.cell.bbox))
+            })
+            .collect()
+    }
+
+    /// Whether a rule runs between `upper` and `lower` under at least half of
+    /// `span`. Between means below the upper line's descenders, where its
+    /// underlines are not, and above the lower line's capitals.
+    fn between(&self, upper: &Rect, lower: &Rect, span: &Rect) -> bool {
+        let top = upper.y1 - upper.height() / 12.0;
+        let bottom = lower.y0 + lower.height() / 4.0;
+        if bottom < top || span.width() <= 0.0 {
+            return false;
+        }
+        let from = self.across.partition_point(|r| r.center_y() < top);
+        self.across[from..]
+            .iter()
+            .take_while(|r| r.center_y() <= bottom)
+            .any(|r| r.horizontal_overlap(span) >= 0.5 * span.width())
+    }
+
+    /// Cuts cells where a rule down the page stands between two of their
+    /// words: two cells of a table drawn with its borders, however close.
+    fn split(&self, row: Vec<Candidate>, line: &Line) -> Vec<Candidate> {
+        let y = line.bbox.center_y();
+        let standing: Vec<f32> = self
+            .down
+            .iter()
+            .filter(|r| r.y0 <= y && r.y1 >= y)
+            .map(Rect::center_x)
+            .collect();
+        if standing.is_empty() {
+            return row;
+        }
+        let mut out = Vec::new();
+        for candidate in row {
+            let mut pieces = Vec::new();
+            let mut run: Vec<&crate::doc::Word> = Vec::new();
+            for word in &candidate.words {
+                let parted = run.last().is_some_and(|previous| {
+                    standing
+                        .iter()
+                        .any(|&x| x > previous.bbox.x1 - 0.5 && x < word.bbox.x0 + 0.5)
+                });
+                if parted {
+                    pieces.push(self::candidate(&run, candidate.cell.bbox));
+                    run.clear();
+                }
+                run.push(word);
+            }
+            if pieces.is_empty() {
+                out.push(candidate);
+            } else {
+                pieces.push(self::candidate(&run, candidate.cell.bbox));
+                out.extend(pieces);
+            }
+        }
+        out
+    }
+
+    /// The columns a table's borders draw: the stretches between the rules
+    /// that stand down the page beside `lines`, which hold `rows`, and that
+    /// hold a cell. `None` when fewer than three rules stand there or a cell
+    /// sits outside them. A table set to the page's width has its borders far
+    /// from its text, so they are not looked for near it.
+    fn columns(
+        &self,
+        lines: &[Line],
+        rows: &[Vec<Candidate>],
+        text_height: f32,
+    ) -> Option<Vec<(f32, f32)>> {
+        let (top, bottom) = (
+            lines.first()?.bbox.center_y(),
+            lines.last()?.bbox.center_y(),
+        );
+        let mut xs: Vec<f32> = self
+            .down
+            .iter()
+            .filter(|r| r.y0 < bottom && r.y1 > top)
+            .map(Rect::center_x)
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        xs.dedup_by(|a, b| *a - *b <= text_height * 0.5);
+        if xs.len() < MIN_COLUMNS + 1 {
+            return None;
+        }
+        let inside = rows
+            .iter()
+            .flatten()
+            .all(|c| c.cell.bbox.center_x() > xs[0] && c.cell.bbox.center_x() < xs[xs.len() - 1]);
+        let columns: Vec<(f32, f32)> = xs
+            .windows(2)
+            .map(|pair| (pair[0], pair[1]))
+            .filter(|&(x0, x1)| {
+                rows.iter()
+                    .flatten()
+                    .any(|c| c.cell.bbox.center_x() > x0 && c.cell.bbox.center_x() < x1)
+            })
+            .collect();
+        (inside && (MIN_COLUMNS..=MAX_COLUMNS).contains(&columns.len())).then_some(columns)
+    }
+
+    /// Whether rules stand either side of `cell` at its height: a cell of a
+    /// table drawn with its borders.
+    fn boxed(&self, cell: &Rect) -> bool {
+        let (y, slack) = (cell.center_y(), cell.height() * 0.5);
+        let side = |left: bool| {
+            self.down.iter().any(|r| {
+                let x = r.center_x();
+                r.y0 <= y
+                    && r.y1 >= y
+                    && if left {
+                        x <= cell.x0 + slack
+                    } else {
+                        x >= cell.x1 - slack
+                    }
+            })
+        };
+        side(true) && side(false)
+    }
 }
 
 /// The gaps between one row's cells.
@@ -473,14 +901,36 @@ fn gutters_of(cells: &[Candidate]) -> Vec<(f32, f32)> {
 /// Every gap of the row with fewer of them has to line up with one of the
 /// other's. A row of a table may merge two columns — a header often does — but it
 /// cannot put a gap where the table has none.
-fn aligns(a: &[(f32, f32)], b: &[(f32, f32)]) -> bool {
-    let (fewer, more) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+///
+/// A row that leaves a cell empty has its gaps elsewhere: where the empty
+/// cell is, one wide gap, or none before its first cell. Such rows align too
+/// when they share a gap and neither sets a cell across the middle of one of
+/// the other's.
+fn aligns(a: &[Candidate], b: &[Candidate]) -> bool {
+    let (ga, gb) = (gutters_of(a), gutters_of(b));
+    let (fewer, more) = if ga.len() <= gb.len() {
+        (&ga, &gb)
+    } else {
+        (&gb, &ga)
+    };
     if fewer.is_empty() {
         return false;
     }
-    fewer
-        .iter()
-        .all(|&(from, to)| more.iter().any(|&(f, t)| to.min(t) > from.max(f)))
+    let meets = |(from, to): (f32, f32), gaps: &[(f32, f32)]| {
+        gaps.iter().any(|&(f, t)| to.min(t) > from.max(f))
+    };
+    if fewer.iter().all(|&gap| meets(gap, more)) {
+        return true;
+    }
+    let crosses = |cells: &[Candidate], gaps: &[(f32, f32)]| {
+        gaps.iter().any(|&(from, to)| {
+            let middle = (from + to) / 2.0;
+            cells
+                .iter()
+                .any(|c| c.cell.bbox.x0 < middle && c.cell.bbox.x1 > middle)
+        })
+    };
+    ga.iter().any(|&gap| meets(gap, &gb)) && !crosses(a, &gb) && !crosses(b, &ga)
 }
 
 /// Whether a single-cell row covers the width the table has reached.
@@ -507,8 +957,7 @@ fn columns_of(rows: &[Vec<Candidate>], gutter: f32) -> Option<Vec<(f32, f32)>> {
     if extent.width() <= 0.0 {
         return None;
     }
-    let multi = rows.iter().filter(|row| row.len() >= MIN_COLUMNS).count();
-    if (multi as f32) < rows.len() as f32 * MIN_MULTI_CELL_SHARE {
+    if !multi_cell_rows(rows) {
         return None;
     }
     // The columns are what the table's fullest rows say they are. A summary row's
@@ -527,6 +976,12 @@ fn columns_of(rows: &[Vec<Candidate>], gutter: f32) -> Option<Vec<(f32, f32)>> {
     (MIN_COLUMNS..=MAX_COLUMNS)
         .contains(&columns.len())
         .then_some(columns)
+}
+
+/// Whether enough of a run's rows carry more than one cell to be a table's.
+fn multi_cell_rows(rows: &[Vec<Candidate>]) -> bool {
+    let multi = rows.iter().filter(|row| row.len() >= MIN_COLUMNS).count();
+    multi as f32 >= rows.len() as f32 * MIN_MULTI_CELL_SHARE
 }
 
 /// Whether the row above a table is its header.
@@ -942,7 +1397,7 @@ mod tests {
 
     /// Every table in `lines`, with the gutter measured from them.
     fn find_here(lines: &[Line]) -> Vec<Found> {
-        find(lines, TEXT_HEIGHT, gutter_width(lines, TEXT_HEIGHT))
+        find(lines, TEXT_HEIGHT, gutter_width(lines, TEXT_HEIGHT), &[])
     }
 
     #[test]
@@ -1015,7 +1470,7 @@ mod tests {
 
     /// The one table in `lines`, when there is exactly one.
     fn detect(lines: &[Line], text_height: f32) -> Option<Table> {
-        let mut found = find(lines, text_height, gutter_width(lines, text_height));
+        let mut found = find(lines, text_height, gutter_width(lines, text_height), &[]);
         (found.len() == 1).then(|| found.remove(0).table)
     }
 
@@ -1053,6 +1508,228 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    /// A line of one cell, built from words at the given x ranges.
+    fn worded(y: f32, words: &[(&str, f32, f32)]) -> Line {
+        let text: Vec<&str> = words.iter().map(|w| w.0).collect();
+        let (x0, x1) = (words[0].1, words[words.len() - 1].2);
+        let mut line = row(y, &[(&text.join(" "), x0, x1)]);
+        line.words = words
+            .iter()
+            .map(|(text, x0, x1)| Word {
+                text: (*text).into(),
+                bbox: Rect::new(*x0, y, *x1, y + TEXT_HEIGHT),
+                confidence: 0.95,
+            })
+            .collect();
+        line
+    }
+
+    /// A rule across the page under the line at `y`, from `x0` to `x1`.
+    fn across(y: f32, x0: f32, x1: f32) -> Rect {
+        Rect::new(x0, y + TEXT_HEIGHT + 1.0, x1, y + TEXT_HEIGHT + 2.0)
+    }
+
+    /// A rule down the page at `x`, from `y0` to `y1`.
+    fn down(x: f32, y0: f32, y1: f32) -> Rect {
+        Rect::new(x, y0, x + 1.0, y1)
+    }
+
+    #[test]
+    fn a_rule_between_two_lines_ends_a_row_and_none_carries_it_on() {
+        // A contact list drawn with its borders and set tight: Maximilian has
+        // no phone number, and Eva's street wraps onto a second line.
+        let lines = vec![
+            row(
+                0.0,
+                &[
+                    ("Name", 0.0, 40.0),
+                    ("Telefon", 200.0, 260.0),
+                    ("E-Mail", 300.0, 350.0),
+                ],
+            ),
+            row(
+                12.0,
+                &[
+                    ("Eva Roth", 0.0, 60.0),
+                    ("030 1234", 200.0, 260.0),
+                    ("eva@example.de", 300.0, 420.0),
+                ],
+            ),
+            row(22.0, &[("Hauptstr. 1", 0.0, 80.0)]),
+            row(
+                34.0,
+                &[
+                    ("Maximilian Berger", 0.0, 150.0),
+                    ("max@example.de", 300.0, 420.0),
+                ],
+            ),
+            row(46.0, &[("Jan Ott", 0.0, 50.0), ("030 9876", 200.0, 260.0)]),
+        ];
+        let rules: Vec<Rect> = [0.0, 22.0, 34.0, 46.0]
+            .iter()
+            .map(|&y| across(y, -5.0, 430.0))
+            .chain(
+                [-5.0, 190.0, 290.0, 430.0]
+                    .iter()
+                    .map(|&x| down(x, -2.0, 60.0)),
+            )
+            .collect();
+        let mut found = find(&lines, TEXT_HEIGHT, 20.0, &rules);
+        assert_eq!(found.len(), 1);
+        let table = found.remove(0).table;
+        assert_eq!(table.rows, 4);
+        assert_eq!(
+            table.row_text(1),
+            ["Eva Roth Hauptstr. 1", "030 1234", "eva@example.de"]
+        );
+        assert_eq!(
+            table.row_text(2),
+            ["Maximilian Berger", "", "max@example.de"]
+        );
+        assert_eq!(table.row_text(3), ["Jan Ott", "030 9876", ""]);
+    }
+
+    #[test]
+    fn a_rule_down_the_page_parts_two_cells_however_close() {
+        // A right-aligned amount and the left-aligned remark beside it, only
+        // the cells' padding apart: the border between them is the cut.
+        let lines = vec![
+            worded(0.0, &[("Betrag", 0.0, 60.0), ("Bemerkung", 72.0, 150.0)]),
+            worded(
+                12.0,
+                &[
+                    ("1.169,93", 0.0, 60.0),
+                    ("Konzept", 72.0, 130.0),
+                    ("Backup", 134.0, 190.0),
+                ],
+            ),
+            worded(24.0, &[("835,22", 10.0, 60.0), ("Wartung", 72.0, 140.0)]),
+        ];
+        let rules = vec![
+            down(-3.0, -2.0, 40.0),
+            down(66.0, -2.0, 40.0),
+            down(200.0, -2.0, 40.0),
+        ];
+        let mut found = find(&lines, TEXT_HEIGHT, 20.0, &rules);
+        assert_eq!(found.len(), 1);
+        let table = found.remove(0).table;
+        assert_eq!(table.row_text(1), ["1.169,93", "Konzept Backup"]);
+        assert_eq!(table.row_text(2), ["835,22", "Wartung"]);
+    }
+
+    #[test]
+    fn a_line_in_smaller_print_over_a_table_is_the_pages_margin() {
+        // A browser's date and title over a table running on from the page
+        // before, set at eight points over ten.
+        let mut header = row(
+            -14.0,
+            &[("9/25/26, 1:07 AM", 0.0, 90.0), ("Inventar", 400.0, 450.0)],
+        );
+        header.bbox = Rect::new(0.0, -14.0, 450.0, -6.0);
+        for segment in &mut header.segments {
+            segment.bbox.y1 = -6.0;
+        }
+        let mut lines = vec![header];
+        lines.extend(price_list());
+        let table = detect(&lines, TEXT_HEIGHT).expect("a table");
+        assert_eq!(table.rows, 3);
+        assert_eq!(table.row_text(0), ["Artikel", "Menge", "Preis"]);
+    }
+
+    #[test]
+    fn the_subject_under_a_letters_address_is_not_a_row_of_its_table() {
+        // Address and reference data side by side, set line under line; then
+        // the subject and salutation a paragraph apart; then the items.
+        let mut lines = vec![
+            row(
+                0.0,
+                &[("Herrn", 0.0, 40.0), ("Datum: 14.09.2026", 400.0, 500.0)],
+            ),
+            row(
+                11.0,
+                &[
+                    ("Firma Beispiel AG", 0.0, 110.0),
+                    ("Kundennummer: K-4711", 400.0, 520.0),
+                ],
+            ),
+            row(
+                22.0,
+                &[
+                    ("Hauptstraße 12", 0.0, 90.0),
+                    ("Telefon: 030 1234", 400.0, 505.0),
+                ],
+            ),
+            row(40.0, &[("Rechnung Nr. 815", 0.0, 100.0)]),
+            row(58.0, &[("Sehr geehrte Frau Schmidt,", 0.0, 160.0)]),
+        ];
+        lines.extend(price_list().into_iter().map(|mut line| {
+            line.bbox.y0 += 76.0;
+            line.bbox.y1 += 76.0;
+            for segment in &mut line.segments {
+                segment.bbox.y0 += 76.0;
+                segment.bbox.y1 += 76.0;
+            }
+            line
+        }));
+        let found = find_here(&lines);
+        let spans: Vec<(usize, usize)> = found.iter().map(|f| (f.start, f.end)).collect();
+        assert_eq!(spans.last(), Some(&(5, 8)), "{spans:?}");
+        assert!(
+            spans.iter().all(|&(start, end)| end <= 3 || start >= 5),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn a_header_of_two_rows_is_one_header() {
+        // Years centred over their two measures each, and the rows' label
+        // centred beside both header rows.
+        let columns = [
+            (0.0, 60.0),
+            (100.0, 150.0),
+            (180.0, 230.0),
+            (260.0, 310.0),
+            (340.0, 390.0),
+        ];
+        let mut lines = vec![
+            row(0.0, &[("2024", 150.0, 180.0), ("2025", 310.0, 340.0)]),
+            row(6.0, &[("Region", 0.0, 50.0)]),
+            row(
+                12.0,
+                &[
+                    ("Umsatz", 100.0, 150.0),
+                    ("Gewinn", 180.0, 230.0),
+                    ("Umsatz", 260.0, 310.0),
+                    ("Gewinn", 340.0, 390.0),
+                ],
+            ),
+        ];
+        for (i, name) in ["Nord", "Süd", "West"].iter().enumerate() {
+            let y = 24.0 + i as f32 * 12.0;
+            let cells: Vec<(&str, f32, f32)> = std::iter::once((*name, columns[0].0, 40.0))
+                .chain(
+                    columns[1..]
+                        .iter()
+                        .map(|&(x0, x1)| ("1.200", x0 + 10.0, x1)),
+                )
+                .collect();
+            lines.push(row(y, &cells));
+        }
+        let found = find_here(&lines);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].start, 0);
+        assert_eq!(
+            found[0].table.row_text(0),
+            [
+                "Region",
+                "2024 Umsatz",
+                "2024 Gewinn",
+                "2025 Umsatz",
+                "2025 Gewinn"
+            ]
+        );
     }
 
     /// Three rows of a price list: name, quantity, price.
