@@ -122,7 +122,57 @@ _SKIP = {
     "link",
     "title",
 }
-_INLINE = {
+#: MathML's elements, and those MathJax sets around it. A formula is part of
+#: the line it stands in, and so is every piece of it: an `<mi>` is not a
+#: paragraph of its own.
+_MATHML = {
+    "math",
+    "annotation",
+    "annotation-xml",
+    "maction",
+    "menclose",
+    "merror",
+    "mfenced",
+    "mfrac",
+    "mglyph",
+    "mi",
+    "mlabeledtr",
+    "mlongdiv",
+    "mmultiscripts",
+    "mn",
+    "mo",
+    "mover",
+    "mpadded",
+    "mphantom",
+    "mprescripts",
+    "mroot",
+    "mrow",
+    "ms",
+    "mscarries",
+    "mscarry",
+    "msgroup",
+    "msline",
+    "mspace",
+    "msqrt",
+    "msrow",
+    "mstack",
+    "mstyle",
+    "msub",
+    "msubsup",
+    "msup",
+    "mtable",
+    "mtd",
+    "mtext",
+    "mtr",
+    "munder",
+    "munderover",
+    "none",
+    "semantics",
+    # MathJax's own, around the MathML it keeps for screen readers.
+    "mjx-assistive-mml",
+    "mjx-container",
+}
+_INLINE = _MATHML | {
     "a",
     "abbr",
     "acronym",
@@ -196,11 +246,11 @@ class Element:
 #: Elements open inside one another at most. A generated page that opens a
 #: `<font>` or a `<div>` on every line and never closes one is read as a
 #: browser shows it, not refused as nested too deeply: past this depth, text
-#: formatting and plain containers are let go and their content stays where it
-#: is. Everything that decides what is read — a script, a hidden element, a
-#: table — keeps its place.
+#: formatting, plain containers and the pieces of a formula are let go and
+#: their content stays where it is. Everything that decides what is read — a
+#: script, a hidden element, a table — keeps its place.
 _MAX_DEPTH = 100
-_LET_GO = {
+_LET_GO = _MATHML | {
     "a",
     "article",
     "blockquote",
@@ -233,6 +283,17 @@ _LET_GO = {
 }
 
 
+def _tag(tag: str) -> str:
+    """An element's name. MathML in an e-book's XHTML may carry a prefix —
+    `<m:math>`, `<mml:mi>` — and is read as the element it is."""
+    tag = tag.lower()
+    if ":" in tag:
+        local = tag.rsplit(":", 1)[1]
+        if local in _MATHML:
+            return local
+    return tag
+
+
 class _Builder(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -252,7 +313,7 @@ class _Builder(HTMLParser):
                 return
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        tag = tag.lower()
+        tag = _tag(tag)
         if tag in _CLOSES_P:
             self._close(
                 {"p"}, {"div", "td", "th", "li", "blockquote", "section", "article", "body"}
@@ -270,12 +331,12 @@ class _Builder(HTMLParser):
             self.let_go[tag] = self.let_go.get(tag, 0) + 1
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        tag = tag.lower()
+        tag = _tag(tag)
         node = Element(tag, {k.lower(): v or "" for k, v in attrs})
         self.stack[-1].children.append(node)
 
     def handle_endtag(self, tag: str) -> None:
-        tag = tag.lower()
+        tag = _tag(tag)
         if self.let_go.get(tag):
             self.let_go[tag] -= 1
             return
@@ -317,10 +378,17 @@ def data_uri(src: str) -> tuple[bytes, str] | None:
 
 
 class _Converter:
-    def __init__(self, ctx: Context, resolve: Resolver | None, base: str) -> None:
+    def __init__(
+        self,
+        ctx: Context,
+        resolve: Resolver | None,
+        base: str,
+        formulas: _Formulas | None = None,
+    ) -> None:
         self.ctx = ctx
         self.resolve = resolve
         self.base = base
+        self.formulas = formulas if formulas is not None else _Formulas()
 
     # -- blocks
 
@@ -339,8 +407,13 @@ class _Converter:
 
         for child in node.children:
             # A `<font>` around a table, the way old pages and mails are set,
-            # holds blocks: those are read as blocks, not as one line.
-            if isinstance(child, str) or (child.tag in _INLINE and not child.has_any(_STRUCTURE)):
+            # holds blocks: those are read as blocks, not as one line. So does
+            # a formula set apart from the text around it.
+            if isinstance(child, str) or (
+                child.tag in _INLINE
+                and not child.has_any(_STRUCTURE)
+                and id(child) not in self.formulas.displayed
+            ):
                 pending.append(child)
                 continue
             flush()
@@ -371,14 +444,19 @@ class _Converter:
 
     def block(self, node: Element) -> list[Block]:
         tag = node.tag
-        if tag in _SKIP or node.attrs.get("hidden") is not None or _invisible(node):
+        if tag in _SKIP:
             return []
+        if _invisible(node):
+            copy = self.formulas.copies.get(id(node))
+            return self.formula_block(copy) if copy is not None else []
+        if tag == "math":
+            return self.formula_block(node)
         if tag in _HEADINGS:
             extras: list[Block] = []
             content = self.inlines(node.children, extras)
             return ([Heading(_HEADINGS[tag], content)] if not is_empty(content) else []) + extras
         if tag == "p":
-            if node.has_any(_STRUCTURE | {"div", "p"}):
+            if node.has_any(_STRUCTURE | {"div", "p"}) or id(node) in self.formulas.displayed:
                 return self.blocks(node)
             extras = []
             content = self.inlines(node.children, extras)
@@ -552,12 +630,22 @@ class _Converter:
             runs.append((text, fmt, link))
             return
         tag = node.tag
-        if tag in _SKIP or _invisible(node):
+        if tag in _SKIP:
+            return
+        if _invisible(node):
+            copy = self.formulas.copies.get(id(node))
+            if copy is not None:
+                self.formula(copy, runs, fmt, link)
+            return
+        if tag == "math":
+            self.formula(node, runs, fmt, link)
             return
         if tag == "br":
             runs.append((Break(), frozenset(), link))
             return
         if tag == "img":
+            if id(node) in self.formulas.pictures:
+                return
             picture = self.image(node)
             if picture is not None:
                 extras.append(picture)
@@ -594,6 +682,22 @@ class _Converter:
             runs.append(("”", frozenset(inner), link))
         if block_like:
             runs.append((Break(), frozenset(), link))
+
+    def formula(self, node: Element, runs: list[Run], fmt: frozenset[str], link: str) -> None:
+        """A `<math>` as one formula in TeX, set apart where it says so."""
+        tex = _tex(node)
+        if not tex:
+            return
+        if runs and isinstance(runs[-1][0], Span) and runs[-1][0].kind in _FORMULA_KINDS:
+            # Two formulas that touch would be joined into one.
+            runs.append((" ", fmt, link))
+        kind = "displaymath" if _display(node) else "math"
+        runs.append((Span(kind, [tex]), fmt, link))
+
+    def formula_block(self, node: Element) -> list[Block]:
+        runs: list[Run] = []
+        self.formula(node, runs, frozenset(), "")
+        return [Paragraph(assemble(runs))] if runs else []
 
     def image(self, node: Element) -> Image | None:
         alt = _WHITESPACE.sub(" ", node.attrs.get("alt", "")).strip()
@@ -640,6 +744,238 @@ def _invisible(node: Element) -> bool:
         or "visibility:hidden" in style
         or node.attrs.get("aria-hidden") == "true"
     )
+
+
+# -- formulas
+
+#: A formula as inline content: `$…$` in its line, `$$…$$` set apart.
+_FORMULA_KINDS = ("math", "displaymath")
+#: The encoding of an annotation that holds the TeX a formula was written in.
+_TEX_ENCODING = re.compile(r"(?<![a-z])(?:la)?tex(?![a-z])", re.I)
+_TEX_STYLE = re.compile(r"\{\\(?:display|text)style(?![A-Za-z])\s*(.*)\}", re.S)
+_TOKENS = {"mi", "mn", "mo", "ms", "mtext"}
+#: The scripts of each kind, in the order MathML gives them: `x_{i}^{2}`.
+_SCRIPTS = {
+    "msub": "_",
+    "msup": "^",
+    "msubsup": "_^",
+    "munder": "_",
+    "mover": "^",
+    "munderover": "_^",
+}
+#: What TeX reads as markup, as the characters it is; and the invisible
+#: operators MathML sets between a function and its argument, which TeX does
+#: without.
+_TEX_TEXT = str.maketrans(
+    {
+        "\\": "\\backslash ",
+        "{": "\\{",
+        "}": "\\}",
+        "$": "\\$",
+        "%": "\\%",
+        "#": "\\#",
+        "&": "\\&",
+        "_": "\\_",
+        "^": "\\hat{}",
+        "~": "\\sim ",
+        "⁡": "",
+        "⁢": "",
+        "⁣": "",
+        "⁤": "",
+    }
+)
+
+
+def _display(math: Element) -> bool:
+    """Whether a formula is set apart from the text: `display="block"`, or
+    MathML 1's `mode="display"`."""
+    return (
+        math.attrs.get("display", "").strip().lower() == "block"
+        or math.attrs.get("mode", "").strip().lower() == "display"
+    )
+
+
+def _tex(math: Element) -> str:
+    """A formula as TeX. Wikipedia, KaTeX, MathJax and Pandoc keep the TeX it
+    was written in as an annotation, some pages in `alttext`; only where
+    neither says is it read from the MathML's elements."""
+    parts = [child for child in math.children if isinstance(child, Element)]
+    if len(parts) == 1 and parts[0].tag == "semantics":
+        for note in parts[0].children:
+            if (
+                isinstance(note, Element)
+                and note.tag == "annotation"
+                and _TEX_ENCODING.search(note.attrs.get("encoding", ""))
+            ):
+                tex = _unwrapped(note.text())
+                if tex:
+                    return tex
+    alttext = _unwrapped(math.attrs.get("alttext", ""))
+    return alttext or _WHITESPACE.sub(" ", _linear(math)).strip()
+
+
+def _unwrapped(tex: str) -> str:
+    """TeX without the `{\\displaystyle …}` MediaWiki wraps every formula in."""
+    tex = _WHITESPACE.sub(" ", tex).strip()
+    match = _TEX_STYLE.fullmatch(tex)
+    if match and _balanced(match.group(1)):
+        return match.group(1).strip()
+    return tex
+
+
+def _balanced(tex: str) -> bool:
+    """Whether every brace in `tex` that closes was opened in it, and every
+    one that opens is closed."""
+    depth = 0
+    for char in re.sub(r"\\.", "", tex, flags=re.S):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _linear(node: Element) -> str:
+    """MathML read as TeX from its elements: a superscript as `^{}`, a
+    subscript as `_{}`, a fraction as `\\frac{}{}`, a root as `\\sqrt{}`, a
+    matrix row by row, and the rest as the text it holds. A piece that is
+    missing is left out, not guessed: malformed MathML still reads as its text.
+    """
+    tag = node.tag
+    if tag in _TOKENS:
+        text = _WHITESPACE.sub(" ", node.text())
+        if tag != "mtext":
+            return text.strip().translate(_TEX_TEXT)
+        # Words in a formula, `if` and `for all`, keep the spaces around them.
+        return f"\\text{{{text.translate(_TEX_TEXT)}}}" if text.strip() else ""
+    if tag in _SKIP or tag in ("annotation", "annotation-xml", "mphantom", "mprescripts", "none"):
+        return ""
+    if tag == "mspace":
+        return " "
+    if tag == "mglyph":
+        return node.attrs.get("alt", "").translate(_TEX_TEXT)
+    if tag == "mtable":
+        rows: list[str] = []
+        for row in node.children:
+            if not isinstance(row, Element):
+                continue
+            cells = [c for c in row.children if isinstance(c, Element)]
+            if row.tag == "mlabeledtr":
+                cells = cells[1:]
+            elif row.tag != "mtr":
+                cells = [row]
+            rows.append(" & ".join(_linear(cell) for cell in cells))
+        return "\\begin{matrix} " + " \\\\ ".join(rows) + " \\end{matrix}"
+    args = [
+        _linear(child)
+        if isinstance(child, Element)
+        else _WHITESPACE.sub(" ", child).strip().translate(_TEX_TEXT)
+        for child in node.children
+        if isinstance(child, Element) or child.strip()
+    ]
+    if tag in _SCRIPTS and len(args) > 1:
+        scripts = zip(_SCRIPTS[tag], args[1:])
+        return _group(args[0]) + "".join(f"{mark}{{{script}}}" for mark, script in scripts)
+    if tag == "mfrac" and len(args) > 1:
+        return f"\\frac{{{args[0]}}}{{{args[1]}}}"
+    if tag == "msqrt":
+        return f"\\sqrt{{{''.join(args)}}}"
+    if tag == "mroot" and len(args) > 1:
+        return f"\\sqrt[{args[1]}]{{{args[0]}}}"
+    if tag == "maction":
+        # What it shows until it is clicked.
+        return args[0] if args else ""
+    if tag == "mfenced":
+        separators = "".join(node.attrs.get("separators", ",").split())
+        inner = args[:1]
+        for index, arg in enumerate(args[1:]):
+            if separators:
+                inner.append(separators[min(index, len(separators) - 1)].translate(_TEX_TEXT))
+            inner.append(arg)
+        opening = node.attrs.get("open", "(").translate(_TEX_TEXT)
+        return opening + "".join(inner) + node.attrs.get("close", ")").translate(_TEX_TEXT)
+    return "".join(args)
+
+
+def _group(tex: str) -> str:
+    """`tex` as one piece for a script to stand on: `c^{2}`, but `{ab}^{2}`."""
+    return tex if len(tex) <= 1 or re.fullmatch(r"\\(?:[A-Za-z]+ ?|.)", tex) else f"{{{tex}}}"
+
+
+@dataclass
+class _Formulas:
+    """Where a page's formulas are, found before it is read.
+
+    Wikipedia shows a formula as a picture, hidden from screen readers, and
+    keeps its MathML beside it for them, hidden from the eye. Read as it is,
+    the formula would be lost twice over; its MathML is read instead, once,
+    and the picture is not.
+    """
+
+    #: The hidden elements that hold such a formula's MathML, by id: its `<math>`.
+    copies: dict[int, Element] = field(default_factory=dict)
+    #: The pictures shown in their place, by id.
+    pictures: set[int] = field(default_factory=set)
+    #: The elements that show a formula set apart from the text, by id: the
+    #: paragraph around one is split there.
+    displayed: set[int] = field(default_factory=set)
+
+
+#: What an element holds, for :func:`_find_formulas`: hidden MathML (the
+#: hidden element and its `<math>`), pictures, whether it shows anything else —
+#: text, or a formula of its own — and whether it shows a formula set apart.
+_Held = tuple[list[tuple[Element, Element]], list[Element], bool, bool]
+
+
+def _find_formulas(root: Element) -> _Formulas:
+    """The formulas of a page (see :class:`_Formulas`). A hidden `<math>` is
+    read when an element holds it and pictures and nothing else — a formula,
+    and the picture of it. MathML hidden where no picture stands for it is
+    hidden content like any other."""
+    found = _Formulas()
+
+    def visit(node: Element) -> _Held:
+        if node.tag in _SKIP:
+            return [], [], False, False
+        if _invisible(node):
+            maths = [node] if node.tag == "math" else node.find_all("math")
+            copies = [(node, maths[0])] if len(maths) == 1 else []
+            return copies, [node] if node.tag == "img" else [], False, False
+        if node.tag == "math":
+            if _display(node):
+                found.displayed.add(id(node))
+            return [], [], True, _display(node)
+        if node.tag == "img":
+            return [], [node], False, False
+        copies: list[tuple[Element, Element]] = []
+        pictures: list[Element] = []
+        shown = display = False
+        for child in node.children:
+            if isinstance(child, str):
+                shown = shown or bool(child.strip())
+                continue
+            held = visit(child)
+            copies += held[0]
+            pictures += held[1]
+            shown = shown or held[2]
+            display = display or held[3]
+        if len(copies) == 1 and pictures and not shown:
+            hidden, math = copies[0]
+            found.copies[id(hidden)] = math
+            found.pictures.update(id(picture) for picture in pictures)
+            display = _display(math)
+            if display:
+                found.displayed.add(id(hidden))
+            shown = True
+        if display:
+            found.displayed.add(id(node))
+        # What shows anything else is never one formula, and nor is what holds it.
+        return ([], [], True, display) if shown else (copies, pictures, False, display)
+
+    visit(root)
+    return found
 
 
 def _table_rows(table: Element) -> list[list[Element]]:
@@ -706,7 +1042,7 @@ def html_blocks(
     text: str, ctx: Context, resolve: Resolver | None = None, base: str = ""
 ) -> tuple[list[Block], dict[str, Any]]:
     root = parse(text)
-    converter = _Converter(ctx, resolve, base)
+    converter = _Converter(ctx, resolve, base, _find_formulas(root))
     return converter.blocks(_content_root(root)), metadata(root)
 
 

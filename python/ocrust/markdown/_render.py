@@ -101,14 +101,22 @@ def escape(text: str) -> str:
     return "".join(out)
 
 
-def inline(content: Iterable[Inline], *, breaks: str = "  \n") -> str:
-    """Inline content as Markdown; `breaks` is what a line break becomes."""
+def inline(content: Iterable[Inline], *, breaks: str = "  \n", dollars: bool | None = None) -> str:
+    """Inline content as Markdown; `breaks` is what a line break becomes.
+
+    A dollar sign in text is left as it is, except beside a formula, where it
+    would open or close one and is escaped. `dollars` says whether it is, for
+    content inside other markup; by default the content is looked through for
+    a formula.
+    """
     items = _peeled(_joined_code(normalize(list(content))))
+    if dollars is None:
+        dollars = _holds_formula(items)
     out: list[str] = []
     for index, item in enumerate(items):
         after = _first_char(items[index + 1]) if index + 1 < len(items) else ""
         before = out[-1][-1:] if out and out[-1] else ""
-        text = _inline(item, breaks, before, after)
+        text = _inline(item, breaks, before, after, dollars)
         if out and text:
             previous = out[-1]
             if text.startswith("[") and previous.endswith("!") and not previous.endswith("\\!"):
@@ -218,19 +226,27 @@ def _last_char(item: Inline) -> str:
     return "]" if isinstance(item, FootnoteRef) else ""
 
 
-def _inline(item: Inline, breaks: str, before: str = "", after: str = "") -> str:
+def _inline(
+    item: Inline, breaks: str, before: str = "", after: str = "", dollars: bool = False
+) -> str:
     if isinstance(item, str):
-        return escape(clean(item))
+        text = escape(clean(item))
+        # `escape` leaves every dollar sign as it is and adds none.
+        return text.replace("$", "\\$") if dollars else text
     if isinstance(item, Break):
         return breaks
     if isinstance(item, FootnoteRef):
         return f"[^{_label(item.label)}]"
     if item.kind == "code":
         return _code_span(plain(item.children) if item.children else "")
+    if item.kind in _FORMULAS:
+        tex = _tex(plain(item.children))
+        fence = "$$" if item.kind == "displaymath" else "$"
+        return f"{fence}{tex}{fence}" if tex else ""
     if item.kind == "image":
-        alt = _brackets(inline(item.children, breaks=" "))
+        alt = _brackets(inline(item.children, breaks=" ", dollars=dollars))
         return f"![{alt}]({file_target(item.url)})"
-    inner = inline(item.children, breaks=breaks)
+    inner = inline(item.children, breaks=breaks, dollars=dollars)
     if item.kind == "link":
         # Like emphasis: the white space around a link's text is outside it.
         core = inner.strip()
@@ -301,6 +317,29 @@ def _code_span(text: str) -> str:
     return f"{fence}{pad}{text}{pad}{fence}"
 
 
+#: A formula in TeX: `$…$` in its line, `$$…$$` set apart — what Obsidian,
+#: GitHub, Pandoc and the math extensions of other Markdown tools read.
+_FORMULAS = ("math", "displaymath")
+_BARE_DOLLAR = re.compile(r"(?<!\\)((?:\\\\)*)\$")
+
+
+def _tex(text: str) -> str:
+    """A formula's TeX as it can stand between dollar signs: on one line, a
+    dollar sign of its own escaped — it would end the formula early — and
+    without a backslash at its end, which would escape the closing one."""
+    tex = _BARE_DOLLAR.sub(r"\1\\$", clean(text).strip())
+    if (len(tex) - len(tex.rstrip("\\"))) % 2:
+        tex = tex[:-1].rstrip()
+    return tex
+
+
+def _holds_formula(items: Iterable[Inline]) -> bool:
+    return any(
+        isinstance(item, Span) and (item.kind in _FORMULAS or _holds_formula(item.children))
+        for item in items
+    )
+
+
 def _link(text: str, url: str) -> str:
     url = url.strip()
     if not url:
@@ -334,7 +373,14 @@ def _line_start(text: str) -> str:
 
 
 def _paragraph(content: list[Inline]) -> str:
-    text = inline(strip(content))
+    content = strip(content)
+    if len(content) == 1 and isinstance(content[0], Span) and content[0].kind == "displaymath":
+        # A formula set apart is a block of its own, its dollar signs on
+        # lines of their own: that is how every Markdown tool with math
+        # reads one.
+        tex = _tex(plain(content[0].children))
+        return f"$$\n{tex}\n$$" if tex else ""
+    text = inline(content)
     return "\n".join(_line_start(line) for line in text.split("\n"))
 
 
