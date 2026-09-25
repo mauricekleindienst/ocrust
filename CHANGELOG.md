@@ -120,6 +120,28 @@ PDF is now read from its own text: exact, and in milliseconds a page.
 - **Office documents**: Word's ruby keeps its text and reading, legacy form
   fields show their state and choice, `altChunk` content is read in place, and
   hidden rows and columns of spreadsheets are left out like hidden sheets.
+- **Paragraphs stay whole across the page's layout**: one running over a
+  column break is one paragraph, as over a page break; text beside a floated
+  fact box goes on under it, the box after it and no longer read as rows of
+  a table; two columns between a lead and a closing line are read column by
+  column; and a manuscript's or a paper's indented first lines start
+  paragraphs where no space parts them.
+- **Tables ruled only in places keep their rows**: a rule under the header
+  and one over the totals no longer glue the items between into one row,
+  while a grid's wrapped cells, at their top or foot, stay one row; totals or
+  a second table set a little apart leave the header its own row; a header of
+  two rows with one group keeps its label; a table in German with Arabic or
+  Hebrew names in its cells is not turned round; and a bullet list in
+  Chinese or Japanese over a table stays a list.
+- **Text in more scripts and fonts reads right**: Chrome's `ActualText` gives
+  Hindi, Thai and Arabic their letters as written, combining marks stay on
+  their letter, TeX's accents drawn over a letter make the accented letter
+  (`ü`, `é`), a numbered list written right to left keeps its numbers apart,
+  and a line mixing German and an Arabic name reads the way its page does.
+- **Code and formulas**: shell commands, Dockerfiles and CI files in a
+  monospaced font are code blocks again, prose typed in Courier is not, and
+  MathML in web pages and e-mails becomes `$…$` / `$$…$$` instead of being
+  dropped or torn into lines.
 
 ## 0.2.7 — 2026-09-24
 

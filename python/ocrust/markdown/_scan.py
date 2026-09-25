@@ -256,11 +256,14 @@ def _page(
         [_extent(ls) for _, ls in blocks],
     )
     out: list[Block] = []
+    spots: list[_Spot | None] = []
     items: list[_Item] = []
 
     def flush_list() -> None:
         if items:
-            out.extend(_nest(items))
+            nested = _nest(items)
+            out.extend(nested)
+            spots.extend([None] * len(nested))
             items.clear()
 
     for block, lines in blocks:
@@ -272,22 +275,229 @@ def _page(
             rows = block.table.as_rows()
             if block.table.columns >= 2 and rows:
                 out.append(Table([[[cell] for cell in row] for row in rows]))
+                spots.append(_Spot(_extent(lines)))
                 continue
         if block.kind == "heading":
             text = " ".join(line.text.strip() for line in lines)
             level = levels.get(round(lines[0].box.height, 1), 2)
             out.append(Heading(level, [text]))
+            spots.append(None)
             continue
         listing = _listing(lines)
         if listing is not None:
             out.append(Code(listing))
+            spots.append(None)
             continue
         if _right_to_left(lines):
             out.append(Paragraph(_joined(lines, _left_edge(lines, columns), rtl=True)))
+            spots.append(_Spot(_extent(lines)))
         else:
-            out.append(Paragraph(_joined(lines, _right_edge(lines, columns))))
+            right = _right_edge(lines, columns)
+            for part in _indented_paragraphs(lines, right):
+                out.append(Paragraph(_joined(part, right)))
+                spots.append(_Spot(_extent(part), part[0], part[-1], right, _leading(part)))
     flush_list()
+    return _join_across_columns(out, spots)
+
+
+def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
+    """A block's lines cut where a paragraph set without space around it
+    begins: at a line indented by an em or a few, after one that ends its
+    sentence, filling the column as the lines after it do from the left
+    edge again — a book's, a manuscript's or a paper's paragraphs."""
+    height = statistics.median(line.box.height for line in lines)
+    left = min(line.box.x0 for line in lines)
+    flush = [abs(line.box.x0 - left) <= _FLUSH * height for line in lines]
+    if len(lines) < 3 or sum(flush) * 5 < len(lines) * 3:
+        return [lines]
+    parts: list[list[Line]] = [[lines[0]]]
+    for index in range(1, len(lines)):
+        line = lines[index]
+        indent = line.box.x0 - left
+        if (
+            _INDENT_MIN * height <= indent <= _INDENT_MAX * height
+            and _ENDS_SENTENCE.search(lines[index - 1].text.strip())
+            and index + 1 < len(lines)
+            and flush[index + 1]
+            and right - line.box.x1 <= _first_word_width(lines[index + 1]) + 0.35 * height
+        ):
+            parts.append([])
+        parts[-1].append(line)
+    return parts
+
+
+#: How far a paragraph's first line is indented, in line heights, at least
+#: and at most.
+_INDENT_MIN = 0.8
+_INDENT_MAX = 6.0
+
+
+@dataclass
+class _Spot:
+    """Where a block sat on its page: its extent, and for a paragraph set
+    left to right its first and last line, where its column ends, how far
+    apart its lines stand, and whether a paragraph goes on right under it."""
+
+    extent: tuple[float, float, float, float]
+    first: Line | None = None
+    last: Line | None = None
+    right: float = 0.0
+    leading: float | None = None
+    under: bool = False
+
+
+def _leading(lines: Sequence[Line]) -> float | None:
+    """How far apart a paragraph's lines stand, or None for one line."""
+    gaps = [lower.box.y0 - upper.box.y1 for upper, lower in zip(lines, lines[1:])]
+    return statistics.median(gaps) if gaps else None
+
+
+def _join_across_columns(blocks: list[Block], spots: list[_Spot | None]) -> list[Block]:
+    """Joins a paragraph a column break or a box set beside it cut in two.
+
+    As over a page break, the first half ends without closing its sentence
+    and the second starts in lower case; and the first half's last line is
+    full — the next word would not have fitted. The second half either goes
+    on right under the first, past a box set beside it — a fact box, a
+    sidebar — which then follows the paragraph, or, when nothing does, heads
+    the next column, starting higher up to the right of the first.
+    """
+    found = [spot for spot in spots if spot is not None]
+    for spot in found:
+        if spot.last is not None:
+            spot.under = any(_right_under(spot, other) for other in found if other is not spot)
+    out: list[Block] = []
+    placed: list[_Spot | None] = []
+    for block, spot in zip(blocks, spots, strict=True):
+        if (
+            placed
+            and isinstance(block, Paragraph)
+            and spot is not None
+            and spot.first
+            and _carried_on(out, placed, block, spot, found)
+        ):
+            continue
+        out.append(block)
+        placed.append(spot)
     return out
+
+
+def _carried_on(
+    out: list[Block],
+    placed: list[_Spot | None],
+    tail: Paragraph,
+    spot: _Spot,
+    page: list[_Spot],
+) -> bool:
+    """Joins `tail` onto the paragraph among the blocks already placed that
+    it carries on, if one does; the boxes set beside that paragraph then
+    follow it. `page` is where every block on the page sat."""
+    at = len(out) - 1
+    while True:
+        head, head_spot = out[at], placed[at]
+        if head_spot is None or not isinstance(head, (Paragraph, Table)):
+            return False
+        boxes = [where for where in placed[at + 1 :] if where is not None]
+        if (
+            isinstance(head, Paragraph)
+            and head_spot.last is not None
+            and len(boxes) == len(out) - at - 1
+            and _carries_on(head_spot, spot, boxes, page)
+        ):
+            break
+        at -= 1
+        if at < 0 or len(out) - at > _BOXES_BESIDE:
+            return False
+    # A paragraph of several lines run on without a break, down to a full
+    # last line, goes on whatever the next word begins with; so does one
+    # that goes on right under itself past a box. And lines that go on under
+    # a full line, a line's spacing down and not indented, are one paragraph
+    # whatever it ends with, as they would be with no box beside them.
+    unbroken = not any(isinstance(part, Break) for part in head.content)
+    running = unbroken and (head_spot.first is not head_spot.last or bool(boxes))
+    flush = abs(spot.extent[0] - head_spot.extent[0]) < _FLUSH * head_spot.last.box.height
+    joined = _join(head, tail, capital=running, anyway=unbroken and bool(boxes) and flush)
+    if joined is None:
+        return False
+    moved = list(zip(out[at + 1 :], placed[at + 1 :], strict=True))
+    del out[at:], placed[at:]
+    out.append(joined)
+    placed.append(dataclasses.replace(spot, first=head_spot.first))
+    for block, where in moved:
+        out.append(block)
+        placed.append(where)
+    return True
+
+
+#: How many blocks — a box's caption, its table, a note under it — may stand
+#: beside a paragraph that goes on under them.
+_BOXES_BESIDE = 4
+#: How far off the start of the lines over it, in line heights, a line may
+#: start and still not be indented.
+_FLUSH = 0.3
+#: How much further apart or closer, in line heights, two lines may stand
+#: than a paragraph's lines do and still be lines of it.
+_SAME_LEADING = 0.1
+#: How wide, as a share of a paragraph's, a paragraph beside it may be and
+#: still be a box set beside the text — wider, it is the next column.
+_BOX_WIDTH = 0.75
+
+
+def _right_under(head: _Spot, other: _Spot) -> bool:
+    """Whether `other` starts where `head` does, as far under it as the
+    lines of either stand apart: a paragraph's next line, where a paragraph
+    of its own stands further off."""
+    assert head.last is not None
+    leading = head.leading if head.leading is not None else other.leading
+    if leading is None:
+        return False
+    height = head.last.box.height
+    hx0, _, _, hy1 = head.extent
+    ox0, oy0, _, _ = other.extent
+    return abs(oy0 - hy1 - leading) <= _SAME_LEADING * height and abs(ox0 - hx0) < height
+
+
+def _carries_on(head: _Spot, tail: _Spot, boxes: list[_Spot], page: list[_Spot]) -> bool:
+    """Whether `tail` goes on from `head` on the page: right under it past
+    the `boxes` set beside it, or, with none, at the head of the next
+    column. `head`'s last line is full either way."""
+    assert head.last is not None and tail.first is not None
+    last, first = head.last.box, tail.first.box
+    hx0, _, hx1, _ = head.extent
+    tx0 = tail.extent[0]
+    height = last.height
+    if boxes:
+        if not _right_under(head, tail):
+            return False
+        if not all(box.extent[0] >= hx1 - 1 or box.extent[2] <= hx0 + 1 for box in boxes):
+            return False
+        # Paragraphs beside it as wide as its own are the next column: the
+        # text under both goes on from that.
+        if any(
+            box.first is not None and box.extent[2] - box.extent[0] >= _BOX_WIDTH * (hx1 - hx0)
+            for box in boxes
+        ):
+            return False
+        # The column beside the boxes ends where the paragraphs beside them
+        # end, a margin short of the boxes.
+        limit = min((box.extent[0] for box in boxes if box.extent[0] >= hx1 - 1), default=hx1)
+        edge = max(
+            [hx1]
+            + [
+                other.extent[2]
+                for other in page
+                if other.last is not None
+                and abs(other.extent[0] - hx0) < height
+                and other.extent[2] <= limit
+            ]
+        )
+    else:
+        if head.under or not (first.y0 < last.y0 and tx0 >= hx1 - 0.5 * height):
+            return False
+        # The paragraph's own widest line, when it has more than one, says
+        # where its column ends.
+        edge = hx1 if head.first is not head.last else head.right
+    return edge - last.x1 <= _first_word_width(tail.first) + 0.35 * height
 
 
 def _column_edges(blocks: list[tuple[ScanBlock, list[Line]]]) -> list[tuple[float, float]]:
@@ -323,32 +533,37 @@ def _right_edge(lines: list[Line], columns: _Columns) -> float:
     Grüßen`, then a name — is narrower than the column, and measured against
     itself its first line would look full. The column is that of the
     paragraphs starting where the block starts: a column beside it, or under
-    an indented abstract, is another. Nor does it reach past a block set
-    beside it: a paragraph beside a fact box ends where the box begins.
+    an indented abstract, is another. Nor does it reach up to a block set
+    beside it: a paragraph beside a fact box ends a margin short of the box,
+    where the paragraphs beside the box end.
     """
     x0, y0, x1, y1 = _extent(lines)
-    right = x1
-    same_start = 2 * max(line.box.height for line in lines)
-    for left, end in columns.paragraphs:
-        overlap = min(x1, end) - max(x0, left)
-        if overlap > 0.5 * min(x1 - x0, end - left) and abs(left - x0) <= same_start:
-            right = max(right, end)
     beside = [
         bx0
         for bx0, by0, _, by1 in columns.blocks
         if bx0 >= x1 - 1 and min(y1, by1) - max(y0, by0) > 0
     ]
-    if beside:
-        right = max(x1, min(right, min(beside)))
+    limit = min(beside) if beside else float("inf")
+    right = x1
+    same_start = 2 * max(line.box.height for line in lines)
+    for left, end in columns.paragraphs:
+        overlap = min(x1, end) - max(x0, left)
+        if (
+            overlap > 0.5 * min(x1 - x0, end - left)
+            and abs(left - x0) <= same_start
+            and end <= limit
+        ):
+            right = max(right, end)
     return right
 
 
-#: What code is written with and prose hardly ever: brackets, operators, and
-#: the marks of identifiers and comments.
-_CODE_SYMBOLS = frozenset("(){}[]=;<>_\\|#$@*&%+`~^")
-#: How many of a block's characters have to be such symbols for it to read as
-#: code rather than text typed in a monospaced font.
-_CODE_SYMBOL_SHARE = 0.04
+#: A word of running text: letters, hyphenated or not, with the punctuation
+#: and quotes around it.
+_WORD = re.compile(r"[(\"'„“‚«»]*[^\W\d_]+(?:[-'’][^\W\d_]+)*[.,;:!?)\"'“”‘’«»]*")
+#: Words a line of running text carries at least, as the middle line has it.
+_PROSE_WORDS = 5
+#: How many of a text's tokens are words, at least.
+_PROSE_SHARE = 0.85
 
 
 def _advance(line: Line) -> float | None:
@@ -390,12 +605,24 @@ def _listing(lines: Sequence[Line]) -> str | None:
         return line.words[0].box.x0 if line.words else line.box.x0
 
     left = min(start(line) for line in lines)
-    indents = [max(round((start(line) - left) / advance), 0) for line in lines]
-    chars = "".join(line.text for line in lines).replace(" ", "")
-    symbols = sum(c in _CODE_SYMBOLS for c in chars)
-    if symbols < _CODE_SYMBOL_SHARE * len(chars) and sum(i >= 2 for i in indents) < 2:
+    if _prose(lines):
         return None
+    indents = [max(round((start(line) - left) / advance), 0) for line in lines]
     return "\n".join(" " * i + line.text.strip() for i, line in zip(indents, lines, strict=True))
+
+
+def _prose(lines: Sequence[Line]) -> bool:
+    """Whether monospaced lines are running text — a letter or a manuscript
+    typed in Courier — rather than code or commands: their lines carry five
+    words and more, and nearly every word is one, where commands are short
+    and made of flags, paths and names (`--nginx`, `example.org`)."""
+    tokens = [line.text.split() for line in lines]
+    counts = sorted(len(t) for t in tokens)
+    words = [token for line in tokens for token in line]
+    if not words or counts[len(counts) // 2] < _PROSE_WORDS:
+        return False
+    plain = sum(bool(_WORD.fullmatch(token)) for token in words)
+    return plain >= _PROSE_SHARE * len(words)
 
 
 #: Letters of the scripts written right to left: Hebrew and Arabic.
@@ -575,12 +802,45 @@ def _abbreviation_hyphen(text: str) -> bool:
     return sum(c.isalpha() for c in word) >= 2 and all(c.isupper() or c.isdigit() for c in word)
 
 
+def _join(
+    first: Paragraph, second: Paragraph, *, capital: bool = False, anyway: bool = False
+) -> Paragraph | None:
+    """The two halves of a paragraph a break cut in two as one, or None when
+    they are two: the first half ends without closing its sentence, and the
+    second starts in lower case — or, when the page says so otherwise
+    (`capital`), with a capital: a noun, in German. When the page says they
+    are one `anyway`, they are."""
+    head, tail = plain(first.content), plain(second.content)
+    unspaced = _glue(head, tail) == ""
+    if not (head and tail):
+        return None
+    if not anyway and _ENDS_SENTENCE.search(head):
+        return None
+    if not (anyway or tail[0].islower() or unspaced or (capital and tail[0].isalpha())):
+        return None
+    content = list(first.content)
+    if unspaced or (_abbreviation_hyphen(head) and not _SUSPENDED.match(tail)):
+        # Chinese or Japanese runs on without a space; `IT-` over
+        # `basierten` keeps the compound's own hyphen.
+        content.extend(second.content)
+    elif head.endswith("-") and len(head) > 1 and head[-2].isalpha():
+        # A word hyphenated across the break.
+        last = content[-1]
+        if isinstance(last, str) and last.endswith("-"):
+            content[-1] = last[:-1]
+            content.extend(second.content)
+        else:
+            content.extend([" ", *second.content])
+    else:
+        content.extend([" ", *second.content])
+    return Paragraph(content)
+
+
 def _join_across_pages(blocks: list[Block]) -> list[Block]:
     """Joins a paragraph a page break cut in two.
 
-    The first half ends without closing its sentence, and the second starts in
-    lower case. The joined paragraph stands before the marker of the page it
-    ends on, on the page it began.
+    The joined paragraph stands before the marker of the page it ends on, on
+    the page it began.
     """
     out: list[Block] = []
     index = 0
@@ -592,30 +852,9 @@ def _join_across_pages(blocks: list[Block]) -> list[Block]:
             and isinstance(blocks[index + 1], Marker)
             and isinstance(blocks[index + 2], Paragraph)
         ):
-            head, tail = plain(block.content), plain(blocks[index + 2].content)
-            unspaced = _glue(head, tail) == ""
-            if (
-                head
-                and tail
-                and not _ENDS_SENTENCE.search(head)
-                and (tail[0].islower() or unspaced)
-            ):
-                content = list(block.content)
-                if unspaced or (_abbreviation_hyphen(head) and not _SUSPENDED.match(tail)):
-                    # Chinese or Japanese runs on without a space; `IT-` over
-                    # `basierten` keeps the compound's own hyphen.
-                    content.extend(blocks[index + 2].content)
-                elif head.endswith("-") and len(head) > 1 and head[-2].isalpha():
-                    # A word hyphenated across the page break.
-                    last = content[-1]
-                    if isinstance(last, str) and last.endswith("-"):
-                        content[-1] = last[:-1]
-                        content.extend(blocks[index + 2].content)
-                    else:
-                        content.extend([" ", *blocks[index + 2].content])
-                else:
-                    content.extend([" ", *blocks[index + 2].content])
-                out.append(Paragraph(content))
+            joined = _join(block, blocks[index + 2])
+            if joined is not None:
+                out.append(joined)
                 out.append(blocks[index + 1])
                 index += 3
                 continue

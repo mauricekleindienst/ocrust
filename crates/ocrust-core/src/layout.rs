@@ -453,6 +453,9 @@ const TWO_FLOWS_SIZE: f32 = 0.92;
 /// How far off a line's baseline across the gutter, in line heights, a line
 /// may sit and still be a cell of its row.
 const TWO_FLOWS_DRIFT: f32 = 0.2;
+/// [`TWO_FLOWS_DRIFT`] for a gutter narrower than the region's widest, which
+/// only cuts the region where the two sides are plainly set on their own.
+const TWO_FLOWS_DRIFT_NARROWER: f32 = 0.1;
 /// How long a label before a colon may be: `Leistungszeitraum`, `Ihr Zeichen`.
 const LABEL_CHARS: usize = 32;
 
@@ -690,10 +693,20 @@ fn xy_cut(
             (cfg.column_gap_factor, cfg.column_gap_min_fraction)
         };
         let min_gap = (scale * factor).max(content_width * fraction);
-        if let Some((split, gap)) = find_gap(&lines, min_gap, |l| (l.bbox.x0, l.bbox.x1)) {
+        // The widest gutter first; on a page read from its own text, where a
+        // fact box's label and value columns may leave a wider gutter than
+        // the one between the box and the text beside it, the others in turn
+        // — each only where the lines either side are set on their own.
+        let mut gaps = find_gaps(&lines, min_gap, |l| (l.bbox.x0, l.bbox.x1));
+        if !sheet.exact {
+            gaps.truncate(1);
+        }
+        for (nth, &(split, gap)) in gaps.iter().enumerate() {
             let in_turn = !sheet.exact || read_in_turn(&lines, &[split]);
-            let (left, right): (Vec<Line>, Vec<Line>) =
-                lines.into_iter().partition(|l| l.bbox.center_x() < split);
+            let (left, right): (Vec<Line>, Vec<Line>) = lines
+                .iter()
+                .cloned()
+                .partition(|l| l.bbox.center_x() < split);
             // A letter's reference block, each line with its own label, is
             // no column of values whose labels stand beside it; nor is a
             // list beside a paragraph a column of a table — a paragraph, its
@@ -738,26 +751,32 @@ fn xy_cut(
             // Text set beside a box — a fact box, a sidebar — shares its
             // baselines only by chance: the box is set smaller, or at a pitch
             // of its own, where a row's cells share size and baseline. And a
-            // letter's reference block is no column of a table either.
-            let two_flows =
-                self_labelled || (sheet.exact && two_flows(&left, &right, cfg.baseline_overlap));
+            // letter's reference block is no column of a table either. A
+            // gutter past the widest cuts only where the two sides are set on
+            // their own; that is told there from lines a tenth of a line off
+            // each other's baselines already.
+            let drift = if nth == 0 {
+                TWO_FLOWS_DRIFT
+            } else {
+                TWO_FLOWS_DRIFT_NARROWER
+            };
+            let two_flows = self_labelled
+                || (sheet.exact && two_flows(&left, &right, cfg.baseline_overlap, drift));
             if thin_side
                 || !in_turn
+                || (nth > 0 && !two_flows)
                 || (straddled >= cfg.column_shared_baseline_veto
                     && (too_narrow || crowded)
                     && !two_flows)
             {
                 // The gutter runs through rows, not between columns.
-                emit_leaf(lines_from(left, right), cfg, max_merge_gap, out);
-                return;
+                continue;
             }
             if !left.is_empty() && !right.is_empty() {
                 xy_cut(left, sheet, cfg, max_merge_gap, depth + 1, out);
                 xy_cut(right, sheet, cfg, max_merge_gap, depth + 1, out);
                 return;
             }
-            return_sorted(lines_from(left, right), cfg, max_merge_gap, out);
-            return;
         }
     }
 
@@ -773,29 +792,17 @@ fn spanning_edge(lines: &[Line], scale: f32, min_gap: f32) -> Option<f32> {
     let mut sorted: Vec<&Line> = lines.iter().collect();
     sorted.sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0));
     let n = sorted.len();
-    let cut = |edge: &[&Line], rest: &[&Line], edge_is_top: bool| -> Option<f32> {
-        let (edge_side, rest_side) = if edge_is_top {
-            (
-                edge.iter().map(|l| l.bbox.y1).fold(f32::MIN, f32::max),
-                rest.iter().map(|l| l.bbox.y0).fold(f32::MAX, f32::min),
-            )
-        } else {
-            (
-                edge.iter().map(|l| l.bbox.y0).fold(f32::MAX, f32::min),
-                rest.iter().map(|l| l.bbox.y1).fold(f32::MIN, f32::max),
-            )
-        };
-        let clear = if edge_is_top {
-            edge_side <= rest_side + scale * 0.3
-        } else {
-            edge_side >= rest_side - scale * 0.3
-        };
-        if !clear {
-            return None;
-        }
+    // The gutter of `rest` that the lines of `across` cross — each group of
+    // them but its last line, which a paragraph may end short under the
+    // others, not beside them — with two lines of `rest` at least on either
+    // side.
+    let gutter = |groups: &[&[&Line]], rest: &[&Line]| -> bool {
         let mut spans: Vec<(f32, f32)> = rest.iter().map(|l| (l.bbox.x0, l.bbox.x1)).collect();
         spans.sort_by(|a, b| cmp_f32(a.0, b.0));
-        let mut reach = spans.first()?.1;
+        let Some(&(_, first_end)) = spans.first() else {
+            return false;
+        };
+        let mut reach = first_end;
         for &(start, end) in &spans[1..] {
             let (from, to) = (reach, start);
             reach = reach.max(end);
@@ -804,25 +811,55 @@ fn spanning_edge(lines: &[Line], scale: f32, min_gap: f32) -> Option<f32> {
             }
             let split = (from + to) / 2.0;
             let left = rest.iter().filter(|l| l.bbox.center_x() < split).count();
-            let crossed = edge.iter().all(|l| l.bbox.x0 < from && l.bbox.x1 > to);
-            if left >= 2 && rest.len() - left >= 2 && crossed {
-                return Some((edge_side + rest_side) / 2.0);
+            let crosses = |l: &&Line| l.bbox.x0 < from && l.bbox.x1 > to;
+            let across = groups.iter().all(|group| match group.split_last() {
+                Some((last, before)) => {
+                    let under = before
+                        .iter()
+                        .all(|l| last.bbox.y0 >= l.bbox.y1 - l.bbox.height() * 0.3);
+                    before.iter().all(crosses) && (crosses(last) || (!before.is_empty() && under))
+                }
+                None => true,
+            });
+            if left >= 2 && rest.len() - left >= 2 && across {
+                return true;
             }
         }
-        None
+        false
     };
-    for k in 1..n.saturating_sub(3) {
-        if let Some(split) = cut(&sorted[..k], &sorted[k..], true) {
-            return Some(split);
-        }
-    }
-    for k in 1..n.saturating_sub(3) {
-        if let Some(split) = cut(&sorted[n - k..], &sorted[..n - k], false) {
-            return Some(split);
+    let bottom_of = |ls: &[&Line]| ls.iter().map(|l| l.bbox.y1).fold(f32::MIN, f32::max);
+    let top_of = |ls: &[&Line]| ls.iter().map(|l| l.bbox.y0).fold(f32::MAX, f32::min);
+    // A few lines across the top and a few across the bottom, the columns
+    // between them: either set may be empty, not both. The most lines across
+    // the top first: a lead's short last line over the columns is the lead's.
+    let most = SPANNING_LINES.min(n);
+    for head in 0..=most {
+        for tail in 0..=most {
+            if head + tail == 0 || head + tail + 4 > n {
+                continue;
+            }
+            let (top, rest, bottom) = (
+                &sorted[..head],
+                &sorted[head..n - tail],
+                &sorted[n - tail..],
+            );
+            let clear_top = head == 0 || bottom_of(top) <= top_of(rest) + scale * 0.3;
+            let clear_bottom = tail == 0 || top_of(bottom) >= bottom_of(rest) - scale * 0.3;
+            if clear_top && clear_bottom && gutter(&[top, bottom], rest) {
+                return Some(if head > 0 {
+                    (bottom_of(top) + top_of(rest)) / 2.0
+                } else {
+                    (bottom_of(rest) + top_of(bottom)) / 2.0
+                });
+            }
         }
     }
     None
 }
+
+/// How many lines across the full width, above or below two columns, are
+/// looked for at most: a lead of a dozen lines.
+const SPANNING_LINES: usize = 12;
 
 /// Emits one region of the page: boxes on a shared baseline become one line.
 fn emit_leaf(mut lines: Vec<Line>, cfg: &LayoutConfig, max_merge_gap: f32, out: &mut Vec<Line>) {
@@ -1020,7 +1057,7 @@ fn labels_and_values(columns: &[Vec<&Line>], scale: f32, cfg: &LayoutConfig) -> 
 /// from it in size, or sit off its baseline by a fifth of a line. The cells
 /// of a table's row are set in one size on one baseline; a paragraph beside
 /// a fact box set at 88 % is not.
-fn two_flows(left: &[Line], right: &[Line], min_overlap: f32) -> bool {
+fn two_flows(left: &[Line], right: &[Line], min_overlap: f32, drift: f32) -> bool {
     let mut pairs = 0usize;
     let mut apart = 0usize;
     for l in left {
@@ -1038,7 +1075,7 @@ fn two_flows(left: &[Line], right: &[Line], min_overlap: f32) -> bool {
         );
         pairs += 1;
         if short / tall < TWO_FLOWS_SIZE
-            || (l.bbox.center_y() - r.bbox.center_y()).abs() > short * TWO_FLOWS_DRIFT
+            || (l.bbox.center_y() - r.bbox.center_y()).abs() > short * drift
         {
             apart += 1;
         }
