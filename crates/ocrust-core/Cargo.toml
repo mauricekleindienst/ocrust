@@ -27,12 +27,13 @@ serde_json.workspace = true
 sha2 = { workspace = true, optional = true }
 thiserror.workspace = true
 tiff.workspace = true
+unicode-normalization = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 
 [features]
 default = ["pdf", "download"]
 # Rasterize and read PDFs with the pure-Rust `hayro` renderer.
-pdf = ["dep:hayro", "dep:lopdf", "dep:kurbo"]
+pdf = ["dep:hayro", "dep:lopdf", "dep:kurbo", "dep:unicode-normalization"]
 # Fetch model files over HTTPS into the local model cache.
 download = ["dep:ureq", "dep:sha2"]
 # ONNX Runtime execution providers. Each needs the matching runtime build.

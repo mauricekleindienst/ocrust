@@ -19,14 +19,19 @@ use std::collections::{HashMap, HashSet};
 
 use hayro::hayro_interpret::font::Glyph;
 use hayro::hayro_interpret::hayro_cmap::{BfString, CMap};
+use hayro::hayro_interpret::hayro_syntax::content::ops::TypedInstruction;
 use hayro::hayro_interpret::hayro_syntax::content::TypedIter;
-use hayro::hayro_interpret::hayro_syntax::object::{Array, Dict, Name, Stream};
+use hayro::hayro_interpret::hayro_syntax::object::{
+    Array, Dict, Name, Object, Stream, String as PdfString,
+};
 use hayro::hayro_interpret::hayro_syntax::page::{Page, Resources};
 use hayro::hayro_interpret::{
     BlendMode, CacheKey, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache,
     InterpreterSettings, Paint, PathDrawMode, SoftMask, TransformExt,
 };
 use kurbo::{Affine, BezPath, PathEl, Point as KPoint, Vec2};
+use unicode_normalization::char::{canonical_combining_class, is_combining_mark};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::doc::{Line, Segment, Word};
 use crate::geom::{Point, Quad, Rect};
@@ -87,6 +92,11 @@ struct TextGlyph {
     up: Vec2,
     visible: bool,
     mapped: bool,
+    /// Whether `text` is what the page says the glyph is (`/ActualText`, see
+    /// [`Collector::read_actual_text`]) rather than the character drawn: it
+    /// is in the order it is read, and a bracket in it faces the way it
+    /// reads, where the one drawn in text read right to left is mirrored.
+    actual: bool,
 }
 
 impl TextGlyph {
@@ -421,12 +431,12 @@ impl TextLayer {
             .filter(|g| g.visible == visible && g.size() >= 1.0)
             .filter(on_page)
             .collect();
-        let glyphs = drop_twins(glyphs);
+        let glyphs = cluster_marks(drop_twins(glyphs));
 
         // Runs in drawing order: a PDF draws a line's glyphs one after the
         // other, far more often than not.
         let mut runs: Vec<Run> = Vec::new();
-        for glyph in glyphs {
+        for glyph in &glyphs {
             let joined = runs.last_mut().is_some_and(|run| run.take(glyph));
             if !joined {
                 runs.push(Run::new(glyph));
@@ -457,8 +467,9 @@ impl TextLayer {
         let gaps_are_cells = spaces >= SPACES_SET || spaces * 3 >= gaps.max(1);
         let runs = merge_runs(runs);
         let runs = join_word_gaps(runs, gaps_are_cells);
+        let direction = page_direction(&runs);
         runs.into_iter()
-            .filter_map(|run| run.into_line(gaps_are_cells))
+            .filter_map(|run| run.into_line(gaps_are_cells, direction))
             .collect()
     }
 
@@ -595,6 +606,8 @@ struct Letter {
     /// Where the glyph starts on its baseline.
     origin: KPoint,
     size: f64,
+    /// Whether `text` is as it is read (see [`TextGlyph::actual`]).
+    actual: bool,
 }
 
 /// What a run is made of, left to right.
@@ -626,6 +639,11 @@ struct Run {
     size: f64,
     /// Whether the last glyph was a space the document set itself.
     after_space: bool,
+    /// Whether the first glyph was: the run has no piece for it, and the
+    /// text drawn before it is a word apart however near it ends — a
+    /// list's number, drawn with the space after it and apart from its
+    /// item, is set right of the item in a line read right to left.
+    opens_with_space: bool,
     /// The letter spacing the run is set with, in ems (see [`Run::settle`]).
     tracking: f64,
 }
@@ -673,6 +691,7 @@ impl Run {
             angle: glyph.angle(),
             size: glyph.size(),
             after_space: false,
+            opens_with_space: glyph.text.trim().is_empty(),
             tracking: 0.0,
         };
         run.push(glyph);
@@ -689,6 +708,7 @@ impl Run {
                 bbox: glyph.bbox(),
                 origin: glyph.origin,
                 size: glyph.size(),
+                actual: glyph.actual,
             }));
         }
         self.last_origin = glyph.origin;
@@ -955,12 +975,13 @@ impl Run {
     ///
     /// The words stay in the order they stand on the page, which is what
     /// their boxes are measured by; their text is in the order it is read
-    /// (see [`reading_order`]).
-    fn into_line(self, gaps_are_cells: bool) -> Option<Line> {
+    /// (see [`reading_order`]), the way the page's lines read (`page`,
+    /// right to left where `true`) where the line alone does not say.
+    fn into_line(self, gaps_are_cells: bool, page: Option<bool>) -> Option<Line> {
         // Where each piece is read: its place in reading order, and whether
         // it stands in text read right to left.
         let mut rank: Vec<(usize, bool)> = (0..self.pieces.len()).map(|i| (i, false)).collect();
-        if let Some(order) = reading_order(&self.pieces) {
+        if let Some(order) = reading_order(&self.pieces, page) {
             for (place, &(piece, backwards)) in order.iter().enumerate() {
                 rank[piece] = (place, backwards);
             }
@@ -972,7 +993,9 @@ impl Run {
             let mut text = String::new();
             for i in ids {
                 match &self.pieces[i] {
-                    Piece::Char(l) if rank[i].1 => text.extend(l.text.chars().map(mirrored)),
+                    Piece::Char(l) if rank[i].1 && !l.actual => {
+                        text.extend(l.text.chars().map(mirrored))
+                    }
                     Piece::Char(l) => text.push_str(&l.text),
                     _ if !text.is_empty() && !text.ends_with(' ') => text.push(' '),
                     _ => {}
@@ -1113,7 +1136,9 @@ fn merge_runs(mut runs: Vec<Run>) -> Vec<Run> {
                     let size = run.size.max(next.size);
                     let tracking = run.tracking.max(next.tracking);
                     let gap = (next.start - run.last_end).dot(run.baseline());
-                    if gap > (SPACE_GAP_EM + tracking) * size {
+                    if next.opens_with_space {
+                        run.space(Piece::Space);
+                    } else if gap > (SPACE_GAP_EM + tracking) * size {
                         run.space(Piece::Gap);
                     }
                     run.pieces.extend(next.pieces);
@@ -1343,6 +1368,276 @@ fn drop_twins(glyphs: Vec<&TextGlyph>) -> Vec<&TextGlyph> {
     kept
 }
 
+/// How far, in ems, a mark's middle may fall past the advance of the letter
+/// it goes with.
+const MARK_REACH_EM: f64 = 0.3;
+
+/// Puts each mark with the letter it is drawn on, as one glyph: Arabic's
+/// vowel signs, Hebrew's points, the vowel signs and viramas of the scripts
+/// of India, Thai's tone marks — where a page draws them as glyphs of their
+/// own, without saying what the cluster is (see
+/// [`Collector::read_actual_text`]) — and the accents TeX draws over a
+/// letter in fonts without accented letters (OT1: `¨`, a kern back, `u`).
+/// Read as drawn, a mark moved up or down onto its letter starts a line of
+/// its own, one drawn before its letter is read before it in text written
+/// right to left, and `M¨unchen` is not `München`.
+///
+/// A mark goes with the letter before or after it in drawing order that it
+/// stands over, [`MARK_REACH_EM`] away at most: the one after it only where
+/// its middle falls across that one's advance and not the other's. Its
+/// text follows the letter's,
+/// composed where Unicode composes the two (NFC). A spacing accent (see
+/// [`spacing_accent`]) goes only with a letter it is drawn over: beside
+/// one, it is a character of its own. A vowel sign written before the
+/// consonant it follows in the text (see [`pre_base`]) goes after the
+/// consonant, and after the consonants joined to it by a virama.
+fn cluster_marks(glyphs: Vec<&TextGlyph>) -> Vec<TextGlyph> {
+    let mut out: Vec<TextGlyph> = Vec::with_capacity(glyphs.len());
+    // Marks drawn before the letter they go with, and their text.
+    let mut before: Vec<&TextGlyph> = Vec::new();
+    let mut pending = String::new();
+    let mut i = 0;
+    while i < glyphs.len() {
+        let glyph = glyphs[i];
+        if let Some(last) = pre_base_cluster(&glyphs, i) {
+            let mut cluster = glyphs[i + 1].clone();
+            for &other in &glyphs[i + 2..=last] {
+                absorb(&mut cluster, other, true);
+                cluster.text.push_str(&other.text);
+            }
+            absorb(&mut cluster, glyph, true);
+            cluster.text.push_str(&glyph.text);
+            cluster.mapped &= glyphs[i..=last].iter().all(|g| g.mapped);
+            out.push(cluster);
+            i = last + 1;
+            continue;
+        }
+        if let Some((text, spacing)) = mark_of(glyph) {
+            let reach = if spacing { 0.0 } else { MARK_REACH_EM };
+            let carries = |letter: &TextGlyph| {
+                let mut chars = letter.text.chars();
+                let fits = match (chars.next(), chars.next()) {
+                    (Some(c), None) if spacing => c.is_alphabetic(),
+                    _ => !spacing && !letter.text.trim().is_empty() && !combining(&letter.text),
+                };
+                fits.then(|| off_letter(letter, glyph))
+                    .flatten()
+                    .filter(|&d| d <= reach)
+            };
+            let on_last = out.last().and_then(carries);
+            let on_next = glyphs[i + 1..]
+                .iter()
+                .take(4)
+                .find(|g| mark_of(g).is_none())
+                .and_then(|g| carries(g));
+            // The letter after it where the mark stands over that one and
+            // not over the one before; a mark between the two, or where
+            // one ends and the other starts, follows its letter as the
+            // text does.
+            let next = match (on_last, on_next) {
+                (Some(last), Some(next)) => next == 0.0 && last > 0.02,
+                (last, next) => last.is_none() && next.is_some(),
+            };
+            if next {
+                before.push(glyph);
+                pending.push_str(&text);
+                i += 1;
+                continue;
+            }
+            if let (Some(_), Some(letter)) = (on_last, out.last_mut()) {
+                absorb(letter, glyph, false);
+                letter.text = compose(&letter.text, &text);
+                letter.mapped &= glyph.mapped;
+                i += 1;
+                continue;
+            }
+        }
+        let mut glyph = glyph.clone();
+        if !pending.is_empty() && mark_of(&glyph).is_none() {
+            for mark in before.drain(..) {
+                absorb(&mut glyph, mark, false);
+                glyph.mapped &= mark.mapped;
+            }
+            glyph.text = compose(&glyph.text, &pending);
+            pending.clear();
+        }
+        out.push(glyph);
+        i += 1;
+    }
+    // Marks whose letter never came, as they were.
+    out.extend(before.into_iter().cloned());
+    out
+}
+
+/// Whether `text` is nothing but combining marks: a vowel sign, a point, an
+/// accent, a tone mark drawn as a glyph of its own.
+fn combining(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(is_combining_mark)
+}
+
+/// A glyph's text as the marks it sets on a letter, if it is a mark, and
+/// whether it is a spacing accent.
+fn mark_of(glyph: &TextGlyph) -> Option<(String, bool)> {
+    if combining(&glyph.text) {
+        return Some((glyph.text.clone(), false));
+    }
+    let mut chars = glyph.text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => spacing_accent(c).map(|mark| (mark.to_string(), true)),
+        _ => None,
+    }
+}
+
+/// The combining mark a spacing accent stands for where it is drawn over a
+/// letter: TeX's fonts without accented letters (OT1) draw `ü` as `¨` set
+/// over a `u`, `é` as `´` over an `e`.
+fn spacing_accent(c: char) -> Option<char> {
+    Some(match c {
+        '`' | 'ˋ' => '\u{300}',
+        '´' | 'ˊ' => '\u{301}',
+        '^' | 'ˆ' => '\u{302}',
+        '~' | '˜' => '\u{303}',
+        '¯' | 'ˉ' => '\u{304}',
+        '˘' => '\u{306}',
+        '˙' => '\u{307}',
+        '¨' => '\u{308}',
+        '˚' => '\u{30A}',
+        '˝' => '\u{30B}',
+        'ˇ' => '\u{30C}',
+        '¸' => '\u{327}',
+        '˛' => '\u{328}',
+        _ => return None,
+    })
+}
+
+/// `letter` with `marks` set on it, composed where Unicode composes them
+/// (NFC): `u` and a diaeresis are `ü`, a letter with no accented form keeps
+/// the mark after it. A dotless `ı` under an accent above is the `i` TeX
+/// draws that way.
+fn compose(letter: &str, marks: &str) -> String {
+    let above = marks.chars().any(|c| canonical_combining_class(c) == 230);
+    let letter = match letter {
+        "ı" if above => "i",
+        "ȷ" if above => "j",
+        other => other,
+    };
+    letter.chars().chain(marks.chars()).nfc().collect()
+}
+
+/// How far, in ems, the middle of `mark` is from the advance of `letter`
+/// along its baseline — 0 where it falls across it — where the two stand on
+/// one line.
+fn off_letter(letter: &TextGlyph, mark: &TextGlyph) -> Option<f64> {
+    let size = letter.size();
+    let turn = (mark.angle() - letter.angle() + 540.0).rem_euclid(360.0) - 180.0;
+    if turn.abs() > 3.0 || mark.size() > 2.0 * size || mark.size() < 0.4 * size {
+        return None;
+    }
+    let b = letter.baseline();
+    let n = Vec2::new(-b.y, b.x);
+    let middle = mark.origin + (mark.end - mark.origin) * 0.5;
+    if (middle - letter.origin).dot(n).abs() > size {
+        return None;
+    }
+    let along = (middle - letter.origin).dot(b);
+    let advance = (letter.end - letter.origin).dot(b);
+    Some((-along).max(along - advance).max(0.0) / size.max(f64::EPSILON))
+}
+
+/// Widens `glyph` along its baseline over where `other`, a glyph it takes
+/// in, starts, and over its advance where it is `whole` or `other` starts
+/// where `glyph` ends: a spacing vowel sign after its consonant. A mark set
+/// over a letter is as wide as the letter.
+fn absorb(glyph: &mut TextGlyph, other: &TextGlyph, whole: bool) {
+    let b = glyph.baseline();
+    let from = glyph.origin;
+    let advance = (glyph.end - from).dot(b);
+    let start = (other.origin - from).dot(b);
+    let (mut lo, mut hi) = (0.0f64.min(start), advance.max(start));
+    if whole || start >= advance - 0.1 * glyph.size() {
+        let end = (other.end - from).dot(b);
+        lo = lo.min(end);
+        hi = hi.max(end);
+    }
+    glyph.origin = from + b * lo;
+    glyph.end = from + b * hi;
+}
+
+/// Whether `c` is a vowel sign written after its consonant and drawn before
+/// it: Hindi's `ि`, its likes in Bengali, Gurmukhi and Gujarati, and the
+/// `e` and `ai` signs of Bengali, Oriya, Tamil and Malayalam.
+fn pre_base(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x093F
+            | 0x09BF
+            | 0x09C7
+            | 0x09C8
+            | 0x0A3F
+            | 0x0ABF
+            | 0x0B47
+            | 0x0B48
+            | 0x0BC6..=0x0BC8
+            | 0x0D46..=0x0D48
+    )
+}
+
+/// Where the vowel sign at `i`, drawn before its consonant (see
+/// [`pre_base`]), has its cluster: the glyphs right after it, up to the
+/// consonant it follows in the text — the last of those that a virama
+/// joins. `None` where no consonant of its script follows it.
+fn pre_base_cluster(glyphs: &[&TextGlyph], i: usize) -> Option<usize> {
+    let sign = glyphs[i];
+    let mut chars = sign.text.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    if !pre_base(c) {
+        return None;
+    }
+    // Drawn back over the letter before it, the sign was drawn in the
+    // text's order, after its consonant: a mark like any other.
+    if let Some(prev) = i.checked_sub(1).map(|j| glyphs[j]) {
+        let b = prev.baseline();
+        let n = Vec2::new(-b.y, b.x);
+        let along = (sign.origin - prev.origin).dot(b);
+        let advance = (prev.end - prev.origin).dot(b);
+        if (sign.origin - prev.origin).dot(n).abs() <= 0.3 * prev.size()
+            && (-0.1 * prev.size()..advance - 0.1 * prev.size()).contains(&along)
+        {
+            return None;
+        }
+    }
+    // Each of these scripts has its virama at the same place in its block.
+    let block = c as u32 >> 7;
+    let virama = char::from_u32((block << 7) | 0x4D)?;
+    let mut last = i;
+    while let Some(&next) = glyphs.get(last + 1) {
+        let prev = glyphs[last];
+        let size = prev.size().max(next.size());
+        let b = prev.baseline();
+        let n = Vec2::new(-b.y, b.x);
+        let Some(first) = next.text.chars().next() else {
+            break;
+        };
+        let script = next.text.chars().all(|c| c as u32 >> 7 == block);
+        let letter = first.is_alphabetic() && !is_combining_mark(first);
+        let joined = last > i && combining(&next.text);
+        if !script
+            || !(letter || joined)
+            || (next.origin - prev.end).dot(b).abs() > 0.4 * size
+            || (next.origin - prev.origin).dot(n).abs() > 0.3 * size
+        {
+            break;
+        }
+        last += 1;
+        if !next.text.ends_with(virama) {
+            break;
+        }
+    }
+    (last > i).then_some(last)
+}
+
 /// A character as Unicode has it raised, where it does: the digits, the
 /// signs and `n` that the other readers write raised too.
 fn superscript(c: char) -> Option<char> {
@@ -1447,6 +1742,62 @@ fn mirrored(c: char) -> char {
     }
 }
 
+/// How the characters of a piece take part in its line's direction.
+fn direction(text: &str) -> Direction {
+    if text.chars().any(right_to_left) {
+        Direction::Right
+    } else if text.chars().any(char::is_alphabetic) {
+        Direction::Left
+    } else if text.chars().any(char::is_numeric) {
+        Direction::Number
+    } else {
+        Direction::Neutral
+    }
+}
+
+/// The way a line reads where the letters at its two ends agree on it —
+/// right to left where `true` — and `None` where they do not, or it has
+/// no letters. A line with a single letter reads that letter's way.
+fn ends(class: &[Direction]) -> Option<bool> {
+    let strong = |c: &&Direction| matches!(c, Direction::Right | Direction::Left);
+    match (class.iter().find(strong), class.iter().rev().find(strong)) {
+        (Some(Direction::Right), Some(Direction::Right)) => Some(true),
+        (Some(Direction::Left), Some(Direction::Left)) => Some(false),
+        _ => None,
+    }
+}
+
+/// The way a page's lines read, where they clearly do: right to left where
+/// `true`. Of the lines whose letters at both ends agree on a direction,
+/// at least two, and four in five, read that way; a German letter with a
+/// Hebrew line in it reads left to right, an Arabic one quoting an English
+/// title right to left. A bilingual page does not say.
+fn page_direction(runs: &[Run]) -> Option<bool> {
+    let (mut rtl, mut ltr) = (0usize, 0usize);
+    for run in runs {
+        let class: Vec<Direction> = run
+            .pieces
+            .iter()
+            .map(|p| match p {
+                Piece::Char(l) => direction(&l.text),
+                _ => Direction::Neutral,
+            })
+            .collect();
+        match ends(&class) {
+            Some(true) => rtl += 1,
+            Some(false) => ltr += 1,
+            None => {}
+        }
+    }
+    if ltr >= 2 && ltr >= 4 * rtl {
+        Some(false)
+    } else if rtl >= 2 && rtl >= 4 * ltr {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// The order a run's pieces are read in, where it holds text written right
 /// to left: each piece's index, and whether it stands in text read right to
 /// left, where its brackets are drawn mirrored. `None` where the run holds
@@ -1461,26 +1812,16 @@ fn mirrored(c: char) -> char {
 /// and what stands around it; and every stretch at a level or higher is
 /// turned around, the highest level first, as rule L2 does. Turned around,
 /// the order the page shows is the order the text is read in.
-fn reading_order(pieces: &[Piece]) -> Option<Vec<(usize, bool)>> {
+///
+/// `page` is the way the page's lines read where they clearly do (see
+/// [`page_direction`]), right to left where `true`.
+fn reading_order(pieces: &[Piece], page: Option<bool>) -> Option<Vec<(usize, bool)>> {
     use Direction::{ArabicNumber, Left, Neutral, Number, Right};
     let text = |i: usize| match &pieces[i] {
         Piece::Char(l) => l.text.as_str(),
         _ => "",
     };
-    let mut class: Vec<Direction> = (0..pieces.len())
-        .map(|i| {
-            let text = text(i);
-            if text.chars().any(right_to_left) {
-                Right
-            } else if text.chars().any(char::is_alphabetic) {
-                Left
-            } else if text.chars().any(char::is_numeric) {
-                Number
-            } else {
-                Neutral
-            }
-        })
-        .collect();
+    let mut class: Vec<Direction> = (0..pieces.len()).map(|i| direction(text(i))).collect();
     let rights = class.iter().filter(|&&c| c == Right).count();
     if rights == 0 {
         return None;
@@ -1488,14 +1829,17 @@ fn reading_order(pieces: &[Piece]) -> Option<Vec<(usize, bool)>> {
     // The line's direction: a paragraph starts with a letter of its own
     // direction, which stands at the right end of a line read right to left
     // and at the left end of one read left to right. Where the letters at
-    // both ends agree, so does the line; where not, most of its words say —
-    // words, not letters: a web address at the end of a Hebrew sentence has
-    // more letters than the sentence's words.
-    let mut strong = class.iter().filter(|&&c| matches!(c, Right | Left));
-    let rtl = match (strong.next(), strong.next_back()) {
-        (Some(Right), Some(Right)) => true,
-        (Some(Left), Some(Left)) => false,
-        _ => {
+    // both ends agree, so does the line. Where not, the line alone is
+    // ambiguous — `Kontakt: Frau` and a Hebrew name after it, or a Hebrew
+    // sentence ending in a German word — and the page's other lines say
+    // which way its text runs. On a page that does not say, most of the
+    // line's words do — words, not letters: a web address at the end of a
+    // Hebrew sentence has more letters than the sentence's words — and on
+    // a tie, its leftmost letter, as a line read left to right starts at its
+    // left end.
+    let rtl = match (ends(&class), page) {
+        (Some(rtl), _) | (None, Some(rtl)) => rtl,
+        (None, None) => {
             let (mut right_words, mut left_words) = (0usize, 0usize);
             let mut word: Option<Direction> = None;
             for (i, piece) in pieces.iter().enumerate() {
@@ -1514,7 +1858,12 @@ fn reading_order(pieces: &[Piece]) -> Option<Vec<(usize, bool)>> {
                 Some(Left) => left_words += 1,
                 _ => {}
             }
-            right_words >= left_words
+            match right_words.cmp(&left_words) {
+                std::cmp::Ordering::Equal => {
+                    class.iter().find(|&&c| matches!(c, Right | Left)) == Some(&Right)
+                }
+                more => more.is_gt(),
+            }
         }
     };
     // The nearest letter from `i` towards `step`, if any.
@@ -1631,6 +1980,14 @@ struct Collector {
     unnamed: HashMap<u128, (usize, Vec<(usize, char)>)>,
     /// What the page's fonts do not say with each glyph they draw.
     facts: FontFacts,
+    /// The tag of every marked-content sequence begun, in the order the
+    /// interpreter began them (see [`marked_content`]).
+    marked: Vec<Vec<u8>>,
+    /// The sequences open, the innermost last, by their place in `marked`.
+    open: Vec<usize>,
+    /// Of each glyph drawn, in order: the sequences open around it, the
+    /// outermost first, and whether its font gave it an advance.
+    drawn: Vec<(Vec<usize>, bool)>,
 }
 
 /// Rules a page keeps at most: a map or a chart draws thousands of strokes,
@@ -1679,6 +2036,273 @@ impl Collector {
             glyph.mapped = true;
         }
     }
+
+    /// Puts the text a marked-content sequence says it is (`/ActualText`)
+    /// in place of the glyphs drawn in it. A browser shapes Arabic, Hindi
+    /// and Thai into glyphs that are not one letter each — a conjunct, a
+    /// letter and its vowel signs moved up or down onto it, a vowel sign
+    /// drawn before the consonant it follows in the text — and says with
+    /// each such cluster what text it is. Read glyph by glyph, letters are
+    /// lost, vowel signs stand before their consonants, and marks start
+    /// lines of their own. The outermost sequence with a text of its own
+    /// decides; one that says nothing (an empty text) leaves its glyphs be.
+    ///
+    /// `sequences` are the page's sequences as [`marked_content`] reads
+    /// them, which the interpreter began in the same order with the same
+    /// tags: where the two do not agree — a form the interpreter left
+    /// hidden — no text can be told from another's, and none is used.
+    fn read_actual_text(&mut self, sequences: &[Marked]) {
+        let agree = sequences.len() == self.marked.len()
+            && sequences
+                .iter()
+                .zip(&self.marked)
+                .all(|(s, tag)| s.tag == *tag);
+        if !agree {
+            return;
+        }
+        let said = |k: &usize| sequences[*k].text.as_deref().is_some_and(|t| !t.is_empty());
+        let spans: Vec<Option<usize>> = self
+            .drawn
+            .iter()
+            .map(|(open, _)| open.iter().copied().find(said))
+            .collect();
+        if spans.iter().all(Option::is_none) {
+            return;
+        }
+        let glyphs = std::mem::take(&mut self.layer.glyphs);
+        let mut out = Vec::with_capacity(glyphs.len());
+        let mut i = 0;
+        while i < glyphs.len() {
+            let Some(k) = spans.get(i).copied().flatten() else {
+                out.push(glyphs[i].clone());
+                i += 1;
+                continue;
+            };
+            let mut end = i + 1;
+            while spans.get(end).copied().flatten() == Some(k) {
+                end += 1;
+            }
+            let advanced: Vec<bool> = self.drawn[i..end].iter().map(|d| d.1).collect();
+            let text = sequences[k].text.as_deref().unwrap_or_default();
+            match stand_in(&glyphs[i..end], &advanced, text) {
+                Some(glyph) => out.push(glyph),
+                None => out.extend_from_slice(&glyphs[i..end]),
+            }
+            i = end;
+        }
+        self.layer.glyphs = out;
+    }
+}
+
+/// The glyph that stands for `glyphs`, drawn in one marked-content sequence
+/// that says it is `text` (see [`Collector::read_actual_text`]): on the
+/// baseline of the widest of them that is no mark — marks are moved up and
+/// down onto their letter — and across all of them. A glyph its font gave
+/// no advance (`advanced`) covers only where it starts. `None` where they
+/// are no piece of one line: a sequence around a word broken over two
+/// lines says what the word is, and neither line holds it all. And `None`
+/// where the glyphs say `text` already, none of them a mark: they keep
+/// their places. A mark is kept with its letter here, as it is known to
+/// go with it.
+fn stand_in(glyphs: &[TextGlyph], advanced: &[bool], text: &str) -> Option<TextGlyph> {
+    if glyphs.iter().all(|g| mark_of(g).is_none())
+        && glyphs.iter().map(|g| g.text.as_str()).collect::<String>() == text
+    {
+        return None;
+    }
+    let width = |i: usize| {
+        let g = &glyphs[i];
+        if advanced[i] {
+            (g.end - g.origin).hypot()
+        } else {
+            0.0
+        }
+    };
+    let wider = |&a: &usize, &b: &usize| width(a).total_cmp(&width(b));
+    let widest = (0..glyphs.len())
+        .filter(|&i| !combining(&glyphs[i].text))
+        .max_by(wider)
+        .or_else(|| (0..glyphs.len()).max_by(wider))?;
+    let base = &glyphs[widest];
+    let size = base.size();
+    let b = base.baseline();
+    let n = Vec2::new(-b.y, b.x);
+    let (mut lo, mut hi) = (0.0f64, width(widest));
+    for (g, &advanced) in glyphs.iter().zip(advanced) {
+        let turn = (g.angle() - base.angle() + 540.0).rem_euclid(360.0) - 180.0;
+        if turn.abs() > 3.0 || (g.origin - base.origin).dot(n).abs() > size {
+            return None;
+        }
+        let from = (g.origin - base.origin).dot(b);
+        let to = if advanced {
+            (g.end - base.origin).dot(b)
+        } else {
+            from
+        };
+        lo = lo.min(from.min(to));
+        hi = hi.max(from.max(to));
+    }
+    if hi - lo > (glyphs.len() as f64 + 1.0) * size {
+        return None;
+    }
+    // Nothing but marks, none of them wide: as wide as a glyph of unknown
+    // width is taken to be.
+    if hi - lo < 0.05 * size {
+        hi = lo + 0.5 * size;
+    }
+    let text = arabic_letters(unligature(text.to_string()));
+    Some(TextGlyph {
+        mapped: text.chars().all(readable),
+        visible: glyphs.iter().any(|g| g.visible),
+        origin: base.origin + b * lo,
+        end: base.origin + b * hi,
+        up: base.up,
+        text,
+        actual: true,
+    })
+}
+
+/// A marked-content sequence as a content stream begins it: its tag, and
+/// the text it says it is (`/ActualText`), where it says.
+struct Marked {
+    tag: Vec<u8>,
+    text: Option<String>,
+}
+
+/// How deeply forms drawn in forms are followed, as the interpreter does.
+const MAX_FORM_DEPTH: u32 = 50;
+
+/// The marked-content sequences of `page`, in the order the interpreter
+/// begins them: those of its content, of each form it draws where and as
+/// often as it draws it, and of its annotations' appearances. hayro tells a
+/// device where a sequence begins and ends and what its tag is, but not
+/// what its properties say; the streams are read again for that. `None`
+/// once there are more than `limit`: the two readings do not agree.
+fn marked_content(page: &Page<'_>, limit: usize) -> Option<Vec<Marked>> {
+    let mut out = Vec::new();
+    let resources = page.resources();
+    marked_in(page.typed_operations(), resources, 0, limit, &mut out)?;
+    for annot in page
+        .raw()
+        .get::<Array<'_>>(b"Annots")
+        .iter()
+        .flat_map(|annots| annots.iter::<Dict<'_>>())
+    {
+        // As the interpreter draws them: shown, placed, a single look.
+        let hidden = annot.get::<u32>(b"F").unwrap_or(0) & 2 != 0;
+        let look = annot
+            .get::<Dict<'_>>(b"AP")
+            .and_then(|ap| ap.get::<Stream<'_>>(b"N"));
+        if let (false, Some(_), Some(look)) = (hidden, annot.get::<[f64; 4]>(b"Rect"), look) {
+            marked_in_form(&look, resources, 1, limit, &mut out)?;
+        }
+    }
+    Some(out)
+}
+
+/// Adds the marked-content sequences `ops` begins to `out` (see
+/// [`marked_content`]).
+fn marked_in<'a>(
+    mut ops: TypedIter<'_>,
+    resources: &Resources<'a>,
+    depth: u32,
+    limit: usize,
+    out: &mut Vec<Marked>,
+) -> Option<()> {
+    while let Some(op) = ops.next() {
+        match op {
+            TypedInstruction::BeginMarkedContent(bmc) => out.push(Marked {
+                tag: bmc.0.as_ref().to_vec(),
+                text: None,
+            }),
+            TypedInstruction::BeginMarkedContentWithProperties(bdc) => {
+                let properties = match bdc.1 {
+                    Object::Dict(dict) => Some(dict.clone()),
+                    Object::Name(name) => resources.properties.get::<Dict<'_>>(name.as_ref()),
+                    _ => None,
+                };
+                let text = properties
+                    .and_then(|p| p.get::<PdfString<'_>>(b"ActualText"))
+                    .map(|s| text_string(s.as_bytes()));
+                out.push(Marked {
+                    tag: bdc.0.as_ref().to_vec(),
+                    text,
+                });
+            }
+            TypedInstruction::XObject(x) => {
+                let form = resources.get_x_object(x.0).filter(|s| {
+                    s.dict()
+                        .get::<Name<'_>>(b"Subtype")
+                        .is_some_and(|t| t.as_str() == "Form")
+                });
+                if let Some(form) = form {
+                    marked_in_form(&form, resources, depth + 1, limit, out)?;
+                }
+            }
+            _ => {}
+        }
+        if out.len() > limit {
+            return None;
+        }
+    }
+    Some(())
+}
+
+/// Adds the marked-content sequences of the form `form` to `out`, where the
+/// interpreter draws it: it has a box, and is not nested too deeply.
+fn marked_in_form<'a>(
+    form: &Stream<'a>,
+    resources: &Resources<'a>,
+    depth: u32,
+    limit: usize,
+    out: &mut Vec<Marked>,
+) -> Option<()> {
+    let dict = form.dict();
+    if depth > MAX_FORM_DEPTH || dict.get::<[f32; 4]>(b"BBox").is_none() {
+        return Some(());
+    }
+    let Ok(content) = form.decoded() else {
+        return Some(());
+    };
+    let own = dict.get::<Dict<'_>>(b"Resources").unwrap_or_default();
+    let resources = Resources::from_parent(own, resources.clone());
+    marked_in(TypedIter::new(&content), &resources, depth, limit, out)
+}
+
+/// A PDF text string as text: UTF-16 after its byte order mark, UTF-8
+/// after its own (PDF 2.0), PDFDocEncoding without one.
+fn text_string(bytes: &[u8]) -> String {
+    let utf16 = |rest: &[u8], big: bool| -> String {
+        let units = rest.chunks_exact(2).map(|p| {
+            if big {
+                u16::from_be_bytes([p[0], p[1]])
+            } else {
+                u16::from_le_bytes([p[0], p[1]])
+            }
+        });
+        char::decode_utf16(units)
+            .map(|c| c.unwrap_or('\u{FFFD}'))
+            .collect()
+    };
+    match bytes {
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, true),
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, false),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        _ => bytes.iter().map(|&b| pdf_doc_char(b)).collect(),
+    }
+}
+
+/// A byte of PDFDocEncoding: Latin-1, but for the accents it has below the
+/// space and the punctuation and letters it has from 0x80 on.
+fn pdf_doc_char(byte: u8) -> char {
+    const ACCENTS: &str = "˘ˇˆ˙˝˛˚˜";
+    const HIGH: &str = "•†‡…—–ƒ⁄‹›−‰„“”‘’‚™ﬁﬂŁŒŠŸŽıłœšž\u{FFFD}€";
+    match byte {
+        0x18..=0x1F => ACCENTS.chars().nth(usize::from(byte - 0x18)),
+        0x80..=0xA0 => HIGH.chars().nth(usize::from(byte - 0x80)),
+        _ => Some(char::from(byte)),
+    }
+    .unwrap_or('\u{FFFD}')
 }
 
 impl<'a> Device<'a> for Collector {
@@ -1759,15 +2383,13 @@ impl<'a> Device<'a> for Collector {
             return;
         }
         let unicode = glyph.as_unicode();
-        let advance = match glyph {
+        let width = match glyph {
             Glyph::Outline(g) => g.advance_width().map(f64::from),
             Glyph::Type3(_) => unicode
                 .as_ref()
                 .and_then(|u| self.facts.type3_advance(&bf_text(u))),
-        }
-        .filter(|w: &f64| w.is_finite() && *w > 0.0)
-        .unwrap_or(0.5 * UNITS_PER_EM);
-        let end = full * KPoint::new(advance, 0.0);
+        };
+        let advanced = width.is_some_and(|w| w.is_finite() && w > 0.0);
         let (font, key) = match glyph {
             Glyph::Outline(g) => {
                 let key = g.font_cache_key();
@@ -1805,6 +2427,33 @@ impl<'a> Device<'a> for Collector {
             }
             (None, None) => ("\u{FFFD}".to_string(), false),
         };
+        // A glyph of unknown width is taken to be half an em wide; a mark
+        // whose font gives it no width has none: it is set over its letter.
+        let advance = match width {
+            Some(w) if advanced => w,
+            _ if combining(&text) => 0.0,
+            _ => 0.5 * UNITS_PER_EM,
+        };
+        let end = full * KPoint::new(advance, 0.0);
+        // A mark is where it is inked, on its baseline: where the pen stood
+        // says little, as a font draws a mark left or right of it onto the
+        // letter it goes with, and the advance it gives the mark is one the
+        // shaper took back. (Not a vowel sign drawn before its consonant: its
+        // stroke reaches over the consonant, and it goes by its pen.)
+        let (origin, end) = match glyph {
+            Glyph::Outline(g) if combining(&text) && !text.chars().any(pre_base) => {
+                let ink = kurbo::Shape::bounding_box(&g.outline());
+                if ink.width() > 0.0 && ink.x0.is_finite() && ink.x1.is_finite() {
+                    (
+                        full * KPoint::new(ink.x0, 0.0),
+                        full * KPoint::new(ink.x1, 0.0),
+                    )
+                } else {
+                    (origin, end)
+                }
+            }
+            _ => (origin, end),
+        };
         if let (SymbolFont::Other, Some(key)) = (font, key) {
             let entry = self.unnamed.entry(key).or_default();
             entry.0 += 1;
@@ -1815,6 +2464,7 @@ impl<'a> Device<'a> for Collector {
                 }
             }
         }
+        self.drawn.push((self.open.clone(), advanced));
         self.layer.glyphs.push(TextGlyph {
             text,
             origin,
@@ -1822,7 +2472,17 @@ impl<'a> Device<'a> for Collector {
             up,
             visible: !matches!(draw_mode, GlyphDrawMode::Invisible),
             mapped,
+            actual: false,
         });
+    }
+
+    fn begin_marked_content(&mut self, tag: &[u8], _: Option<i32>) {
+        self.open.push(self.marked.len());
+        self.marked.push(tag.to_vec());
+    }
+
+    fn end_marked_content(&mut self) {
+        self.open.pop();
     }
 
     fn draw_image(&mut self, _: Image<'a, '_>, transform: Affine) {
@@ -2132,6 +2792,7 @@ fn form_boxes(page: &Page<'_>, initial: Affine) -> Vec<TextGlyph> {
             up: initial * KPoint::new(x0, y1) - origin,
             visible: true,
             mapped: true,
+            actual: false,
         });
     }
     boxes
@@ -2380,10 +3041,18 @@ pub(crate) fn read<'a>(page: &'a Page<'a>, cache: &InterpreterCache<'a>, scale: 
         fonts: HashMap::new(),
         unnamed: HashMap::new(),
         facts: font_facts(page, cache),
+        marked: Vec::new(),
+        open: Vec::new(),
+        drawn: Vec::new(),
     };
     hayro::hayro_interpret::interpret_page(page, &mut context, &mut device);
     device.layer.glyphs.extend(form_boxes(page, initial));
     device.settle_unnamed_fonts();
+    if !device.marked.is_empty() {
+        if let Some(sequences) = marked_content(page, device.marked.len()) {
+            device.read_actual_text(&sequences);
+        }
+    }
     device.layer.stand_vertical_text();
     device.layer.turn_upright();
     device.layer
@@ -2401,6 +3070,7 @@ mod tests {
             up: Vec2::new(0.0, -size),
             visible: true,
             mapped: true,
+            actual: false,
         }
     }
 
@@ -2773,6 +3443,7 @@ mod tests {
                 up: Vec2::new(-14.0, -14.0),
                 visible: true,
                 mapped: true,
+                actual: false,
             });
         }
         let texts: Vec<String> = layer(glyphs)
@@ -3223,5 +3894,203 @@ mod tests {
         let mut page = layer(rows);
         page.stand_vertical_text();
         assert!(page.glyphs.iter().all(|g| g.angle().abs() < 1.0));
+    }
+
+    #[test]
+    fn a_cluster_is_read_as_the_text_its_marked_content_says_it_is() {
+        // As Chrome prints Hindi and Arabic: each cluster in a `/Span` with
+        // its `/ActualText`. Hindi's `हि` draws its vowel sign first; an
+        // Arabic letter with its vowel mark draws the mark first, moved up
+        // onto the letter with `Td`; `ß` stands for two glyphs, its text
+        // in PDFDocEncoding. (Helvetica's glyphs stand in for the script's.)
+        let file = pdf(
+            "/Font << /F1 5 0 R >>",
+            "",
+            "BT /F1 12 Tf 72 700 Td \
+             /Span <</ActualText <FEFF0939093F>>> BDC (ih) Tj EMC \
+             /Span <</ActualText <FEFF0928>>> BDC (n) Tj EMC ET \
+             BT /F1 12 Tf 72 680 Td \
+             /Span <</ActualText <FEFF0645064E>>> BDC 3 6 Td (') Tj -3 -6 Td (m) Tj EMC ET \
+             BT /F1 12 Tf 72 660 Td (Stra) Tj /Span <</ActualText (\\337)>> BDC (ss) Tj EMC (e) Tj ET",
+            &["<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string()],
+        );
+        let lines = read_pdf(file).lines(false);
+        assert_eq!(texts(&lines), ["हिन", "مَ", "Straße"]);
+        assert_eq!(text_string(b"\xFE\xFF\x00\x41\x00\xFC"), "Aü");
+        assert_eq!(text_string(b"Stra\xDFe \x93"), "Straße ﬁ");
+
+        // Hebrew's brackets are drawn mirrored, and Chrome says what each
+        // is: that text is not mirrored back.
+        let glyphs = spaced("(םלוע) םולש", 100.0, 200.0, 20.0)
+            .into_iter()
+            .map(|mut g| {
+                if "()".contains(g.text.as_str()) {
+                    g.text = mirrored(g.text.chars().next().unwrap_or(' ')).to_string();
+                    g.actual = true;
+                }
+                g
+            })
+            .collect();
+        assert_eq!(texts(&layer(glyphs).lines(false)), ["שלום (עולם)"]);
+
+        // A sequence around a word broken over two lines says what the
+        // word is; neither line holds it all, and its glyphs stay.
+        let mut glyphs = word("Silben-", 100.0, 200.0, 20.0);
+        glyphs.extend(word("trennung", 100.0, 230.0, 20.0));
+        let advanced = vec![true; glyphs.len()];
+        assert!(stand_in(&glyphs, &advanced, "Silbentrennung").is_none());
+        // Where the sequences read again are not the ones the interpreter
+        // began, no text is told from another's.
+        let mut device = Collector {
+            layer: layer(word("ih", 100.0, 200.0, 20.0)),
+            fonts: HashMap::new(),
+            unnamed: HashMap::new(),
+            facts: FontFacts::default(),
+            marked: vec![b"Span".to_vec()],
+            open: Vec::new(),
+            drawn: vec![(vec![0], true), (vec![0], true)],
+        };
+        let said = |tag: &[u8]| Marked {
+            tag: tag.to_vec(),
+            text: Some("हि".to_string()),
+        };
+        device.read_actual_text(&[said(b"P")]);
+        assert_eq!(device.layer.glyphs.len(), 2);
+        device.read_actual_text(&[said(b"Span")]);
+        assert_eq!(texts(&device.layer.lines(false)), ["हि"]);
+    }
+
+    /// A glyph of `text` from `x` to `end` on the baseline `y`, raised by
+    /// `raised` pixels.
+    fn placed(text: &str, x: f64, end: f64, y: f64, raised: f64) -> TextGlyph {
+        TextGlyph {
+            end: KPoint::new(end, y - raised),
+            ..glyph(text, x, y - raised, 20.0)
+        }
+    }
+
+    #[test]
+    fn a_mark_drawn_as_a_glyph_of_its_own_stays_with_its_letter() {
+        // Arabic `كَتَبَ` as drawn, left to right: each letter, then its
+        // fatha set over it half an em up, with no advance of its own.
+        let mut glyphs = Vec::new();
+        for (i, letter) in ["ب", "ت", "ك"].iter().enumerate() {
+            let x = 100.0 + 10.0 * i as f64;
+            glyphs.push(placed(letter, x, x + 10.0, 200.0, 0.0));
+            glyphs.push(placed("\u{64E}", x + 4.0, x + 4.0, 200.0, 10.0));
+        }
+        // Hindi `किताब`: the vowel sign `ि` drawn before its consonant, and
+        // `ा`, a spacing sign, after its own.
+        glyphs.push(placed("ि", 100.0, 105.0, 250.0, 0.0));
+        for (i, letter) in ["क", "त"].iter().enumerate() {
+            let x = 105.0 + 10.0 * i as f64;
+            glyphs.push(placed(letter, x, x + 10.0, 250.0, 0.0));
+        }
+        glyphs.push(placed("ा", 125.0, 130.0, 250.0, 0.0));
+        glyphs.push(placed("ब", 130.0, 140.0, 250.0, 0.0));
+        // Thai `เช่น`: the tone mark where its letter ends, raised, and the
+        // next letter drawn from the same place.
+        glyphs.push(placed("เ", 100.0, 110.0, 300.0, 0.0));
+        glyphs.push(placed("ช", 110.0, 120.0, 300.0, 0.0));
+        glyphs.push(placed("\u{E48}", 120.0, 120.0, 300.0, 12.0));
+        glyphs.push(placed("น", 120.0, 130.0, 300.0, 0.0));
+        // Hebrew `שָׁלוֹם` drawn right to left's way, each point after its
+        // letter: the qamats under the shin, the shin dot over it, the
+        // holam over the vav.
+        glyphs.push(placed("ם", 100.0, 110.0, 350.0, 0.0));
+        glyphs.push(placed("ו", 110.0, 115.0, 350.0, 0.0));
+        glyphs.push(placed("\u{5B9}", 112.0, 112.0, 350.0, 16.0));
+        glyphs.push(placed("ל", 115.0, 125.0, 350.0, 0.0));
+        glyphs.push(placed("ש", 125.0, 137.0, 350.0, 0.0));
+        glyphs.push(placed("\u{5B8}", 130.0, 130.0, 350.0, -6.0));
+        glyphs.push(placed("\u{5C1}", 135.0, 135.0, 350.0, 16.0));
+        // Hindi `कित` drawn in the text's order: `ि` after its consonant,
+        // moved back over it; it is not the next one's.
+        glyphs.push(placed("क", 100.0, 110.0, 400.0, 0.0));
+        glyphs.push(placed("ि", 101.0, 106.0, 400.0, 0.0));
+        glyphs.push(placed("त", 110.0, 120.0, 400.0, 0.0));
+        let lines = layer(glyphs).lines(false);
+        let nfc = |s: &str| s.nfc().collect::<String>();
+        assert_eq!(
+            texts(&lines),
+            [
+                nfc("كَتَبَ"),
+                nfc("किताब"),
+                nfc("เช่น"),
+                nfc("שָׁלוֹם"),
+                nfc("कित")
+            ]
+        );
+    }
+
+    #[test]
+    fn an_accent_tex_draws_over_a_letter_is_the_accented_letter() {
+        // OT1 has no `ü`: pdfTeX draws `¨`, kerns back and draws `u` under
+        // it. `é` the other way round: the `e`, then `´` back over it. `í`
+        // is `´` over a dotless `ı`.
+        let over = |accent: &str, letter: &str, x: f64, first: bool| {
+            let accent = placed(accent, x + 2.0, x + 8.0, 200.0, 0.0);
+            let letter = placed(letter, x, x + 10.0, 200.0, 0.0);
+            if first {
+                vec![accent, letter]
+            } else {
+                vec![letter, accent]
+            }
+        };
+        let mut glyphs = word("M", 100.0, 200.0, 20.0);
+        glyphs.extend(over("¨", "u", 110.0, true));
+        glyphs.extend(word("nchen", 120.0, 200.0, 20.0));
+        glyphs.extend(word("Poincar", 100.0, 250.0, 20.0));
+        glyphs.extend(over("´", "e", 170.0, false).into_iter().map(|mut g| {
+            g.origin.y += 50.0;
+            g.end.y += 50.0;
+            g
+        }));
+        glyphs.extend(word("Mart", 100.0, 300.0, 20.0));
+        glyphs.extend(over("´", "ı", 140.0, true).into_iter().map(|mut g| {
+            g.origin.y += 100.0;
+            g.end.y += 100.0;
+            g
+        }));
+        glyphs.extend(word("n", 150.0, 300.0, 20.0));
+        // An accent beside a letter, with its own advance, is a character.
+        glyphs.extend(word("a^b", 100.0, 350.0, 20.0));
+        let lines = layer(glyphs).lines(false);
+        assert_eq!(texts(&lines), ["München", "Poincaré", "Martín", "a^b"]);
+    }
+
+    #[test]
+    fn a_right_to_left_list_keeps_the_space_after_its_number() {
+        // Chrome draws an item's marker apart from the item: the space and
+        // the full stop, then the number, at the item's right end.
+        let mut glyphs = vec![
+            glyph(" ", 250.0, 200.0, 20.0),
+            glyph(".", 255.0, 200.0, 20.0),
+            glyph("1", 260.0, 200.0, 20.0),
+        ];
+        glyphs.extend(spaced("הכרב ירבדו החיתפ", 100.0, 200.0, 20.0));
+        let lines = layer(glyphs).lines(false);
+        assert_eq!(texts(&lines), ["1. פתיחה ודברי ברכה"]);
+    }
+
+    #[test]
+    fn a_line_whose_ends_disagree_reads_the_way_its_page_does() {
+        // A German line ending in an Arabic name, as many words each way:
+        // it starts at its left end.
+        let visual = "Ansprechpartner: Herr يلعلا دمحم";
+        let lines = layer(spaced(visual, 100.0, 200.0, 20.0)).lines(false);
+        assert_eq!(texts(&lines), ["Ansprechpartner: Herr محمد العلي"]);
+        // Fewer German words than Arabic ones, on a German page.
+        let mut glyphs = spaced("Die Beratung ist kostenlos.", 100.0, 100.0, 20.0);
+        glyphs.extend(spaced("Übersetzung: مكب ابحرم", 100.0, 200.0, 20.0));
+        glyphs.extend(spaced("Wir freuen uns auf Sie.", 100.0, 300.0, 20.0));
+        let lines = layer(glyphs).lines(false);
+        assert_eq!(texts(&lines)[1], "Übersetzung: مرحبا بكم");
+        // A Hebrew sentence ending in a product's name, on a Hebrew page.
+        let mut glyphs = spaced("םויה בשחמב שומיש", 100.0, 100.0, 20.0);
+        glyphs.extend(spaced("Microsoft Office ןימז חודה", 100.0, 200.0, 20.0));
+        glyphs.extend(spaced("הבוט הדובע", 100.0, 300.0, 20.0));
+        let lines = layer(glyphs).lines(false);
+        assert_eq!(texts(&lines)[1], "הדוח זמין Microsoft Office");
     }
 }
