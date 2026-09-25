@@ -200,23 +200,26 @@ fn body_text_height(
     }
     // A listing is set in a monospaced font, as a rule smaller than the
     // text; however many lines it has, the text around it is the body. A
-    // size is the listing's when most of its lines that can be told are
-    // monospaced — a line of a word or two cannot, and goes with its size.
+    // size is the listing's when what its lines say of their font's advance
+    // agrees — short lines, a YAML file's or a small function's, together.
     let same_size = |a: f32, b: f32| a.max(b) <= a.min(b) * 1.05;
-    let listing: Vec<f32> = chosen
-        .iter()
-        .filter(|l| monospace_verdict(l) == Some(true))
-        .map(|l| size(l))
-        .filter(|&height| {
-            let verdicts: Vec<bool> = chosen
-                .iter()
-                .filter(|l| same_size(size(l), height))
-                .filter_map(|l| monospace_verdict(l))
-                .collect();
-            let mono = verdicts.iter().filter(|&&m| m).count();
-            mono >= 3 && mono * 4 >= verdicts.len() * 3
-        })
-        .collect();
+    let mut listing: Vec<f32> = Vec::new();
+    let mut judged: Vec<f32> = Vec::new();
+    for line in &chosen {
+        let height = size(line);
+        if judged.iter().any(|&h| same_size(h, height)) {
+            continue;
+        }
+        judged.push(height);
+        let told: Vec<f32> = chosen
+            .iter()
+            .filter(|l| same_size(size(l), height))
+            .flat_map(|l| advances(l))
+            .collect();
+        if monospaced(told) {
+            listing.push(height);
+        }
+    }
     let in_listing = |l: &Line| listing.iter().any(|&height| same_size(size(l), height));
     if chosen.iter().any(|l| !in_listing(l)) {
         chosen.retain(|l| !in_listing(l));
@@ -336,38 +339,80 @@ fn order(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Line> {
     out
 }
 
-/// Whether a line is set in a monospaced font, as code is: from one word to
-/// the next, its words advance by the same width for each character of the
-/// text between them. The first word is left out: the others' boxes begin
-/// halfway across the space before them, its box where its text does.
-/// `None` for a line of too few words to tell, or one mostly in Chinese or
-/// Japanese, whose characters are all one width whatever the font.
-fn monospace_verdict(line: &Line) -> Option<bool> {
-    let letters = line.text.chars().filter(|c| !c.is_whitespace()).count();
-    if line.text.chars().filter(|&c| unspaced(c)).count() * 2 >= letters {
-        return None;
+/// What a line says of its font's advance per character, were it set in a
+/// monospaced font as code is: from its second word on, each word that has
+/// letters, with the space after it, over its characters (the first word's
+/// box begins where its text does, the others' halfway across the space
+/// before them); and, for a line mostly of letters, its width over its
+/// characters. Figures say nothing: a text font sets them all one width
+/// too. Nor does a line mostly in Chinese or Japanese, whose characters are
+/// all one width whatever the font.
+fn advances(line: &Line) -> Vec<f32> {
+    let text = line.text.trim();
+    let marks = text.chars().filter(|c| !c.is_whitespace()).count();
+    if marks == 0 || text.chars().filter(|&c| unspaced(c)).count() * 2 >= marks {
+        return Vec::new();
     }
     let mut offsets = Vec::with_capacity(line.words.len());
     let mut from = 0usize;
     for word in &line.words {
-        let at = line.text[from..].find(word.text.as_str())?;
-        offsets.push((line.text[..from + at].chars().count(), word.bbox.x0));
+        let Some(at) = line.text[from..].find(word.text.as_str()) else {
+            return Vec::new();
+        };
+        let lettered = word.text.chars().any(char::is_alphabetic);
+        offsets.push((
+            line.text[..from + at].chars().count(),
+            word.bbox.x0,
+            lettered,
+        ));
         from += at + word.text.len();
     }
-    let steps: Vec<f32> = offsets
+    let mut told: Vec<f32> = offsets
         .windows(2)
         .skip(1)
-        .filter(|pair| pair[1].0 > pair[0].0)
+        .filter(|pair| pair[1].0 > pair[0].0 && pair[0].2)
         .map(|pair| (pair[1].1 - pair[0].1) / (pair[1].0 - pair[0].0) as f32)
         .collect();
-    let (least, most) = steps
-        .iter()
-        .fold((f32::MAX, f32::MIN), |(lo, hi), &w| (lo.min(w), hi.max(w)));
-    (steps.len() >= 2).then_some(least > 0.0 && most <= least * MONOSPACED_SPREAD)
+    let letters = text.chars().filter(|c| c.is_alphabetic()).count();
+    let figures = text.chars().filter(|c| c.is_numeric()).count();
+    let chars = text.chars().count();
+    if chars >= PITCH_CHARS && letters as f32 >= PITCH_LETTERS * (letters + figures) as f32 {
+        // From where its text begins: a box may take in the spaces before.
+        let begin = line.words.first().map_or(line.bbox.x0, |w| w.bbox.x0);
+        told.push((line.bbox.x1 - begin) / chars as f32);
+    }
+    told
 }
 
-/// How far a monospaced line's advance per character may spread: rounding.
-const MONOSPACED_SPREAD: f32 = 1.03;
+/// Whether what some lines say of their font's advance per character
+/// agrees, as a monospaced font's does: four things at least, nearly all
+/// within a thirtieth of each other. A text font's words and lines are as
+/// wide as their letters make them.
+fn monospaced(mut told: Vec<f32>) -> bool {
+    if told.len() < MONOSPACED_SAMPLES {
+        return false;
+    }
+    told.sort_by(|a, b| cmp_f32(*a, *b));
+    let advance = told[told.len() / 2];
+    if told[0] <= 0.0 {
+        return false;
+    }
+    let agree = told
+        .iter()
+        .filter(|&&t| (t - advance).abs() <= MONOSPACED_SPREAD * advance)
+        .count();
+    agree as f32 >= MONOSPACED_AGREE * told.len() as f32
+}
+
+/// How long a line is at least, and how much of its letters and figures are
+/// letters, for its width over its characters to tell its font's advance.
+const PITCH_CHARS: usize = 4;
+const PITCH_LETTERS: f32 = 0.6;
+/// How many things lines have to say of their advance, how far those may
+/// spread (rounding), and how many of them have to agree.
+const MONOSPACED_SAMPLES: usize = 4;
+const MONOSPACED_SPREAD: f32 = 0.015;
+const MONOSPACED_AGREE: f32 = 0.9;
 
 /// How far from the page's own angle, in degrees, a line is set at another.
 const TURNED_DEGREES: f32 = 5.0;
@@ -2717,7 +2762,8 @@ mod tests {
                 ("factor=0)", 607.4, 762.3),
             ],
         );
-        assert_eq!(monospace_verdict(&code), Some(true));
+        let code_told = advances(&code);
+        assert!(!code_told.is_empty());
         let prose = with_words(
             "Run the processing function over",
             &[
@@ -2728,7 +2774,8 @@ mod tests {
                 ("over", 472.9, 540.4),
             ],
         );
-        assert_eq!(monospace_verdict(&prose), Some(false));
+        assert!(monospaced([code_told.clone(), code_told].concat()));
+        assert!(!monospaced([advances(&prose), advances(&prose)].concat()));
     }
 
     #[test]

@@ -142,6 +142,18 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   monospaced font are code blocks again, prose typed in Courier is not, and
   MathML in web pages and e-mails becomes `$…$` / `$$…$$` instead of being
   dropped or torn into lines.
+- **A column goes on only from its own kind**: a paragraph is joined over a
+  column break only into a column as wide, in the same size and language, and
+  long enough to be running text — not a sidebar, the other language of a
+  bilingual page, a slide's second box or a caption; a figure or table heading
+  the next column is passed over to the text under it. A letter's address
+  beside its reference block keeps a line each, and a drop cap's lines start
+  no paragraph.
+- **Code is told by its font and its look**: phone lists, bank details and
+  addresses in a text font are no code blocks; install commands naming
+  packages, and short listings — YAML, INI, a small function — are, with their
+  indents and blank lines, and the text above them is no heading; JSON, INI
+  files and shell commands are code in any font.
 
 ## 0.2.7 — 2026-09-24
 
