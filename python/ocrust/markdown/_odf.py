@@ -4,10 +4,12 @@ public administrations exchange)."""
 from __future__ import annotations
 
 import contextlib
+import posixpath
 import re
 from xml.etree.ElementTree import Element
 
 from ._context import Context
+from ._html import mathml_tex
 from ._ir import (
     Block,
     Break,
@@ -30,8 +32,9 @@ from ._ir import (
     plain,
     verbatim,
 )
-from ._office import _sheet_blocks
+from ._office import _set_apart, _sheet_blocks
 from ._package import (
+    XML_LIMIT,
     ConversionError,
     Package,
     attr,
@@ -170,9 +173,9 @@ class _Reader:
                     if style in ("title",):
                         out.append(Heading(1, content))
                     elif style in ("quotations", "quote"):
-                        out.append(Quote([Paragraph(content)]))
+                        out.append(Quote([Paragraph(_set_apart(content))]))
                     else:
-                        out.append(Paragraph(content))
+                        out.append(Paragraph(_set_apart(content)))
                 out.extend(extras)
             elif name == "list":
                 style = attr(node, "style-name") or list_style
@@ -246,7 +249,14 @@ class _Reader:
                     self.notes.append(Footnote(label, self.blocks(body)))
                     runs.append((FootnoteRef(label), frozenset(), ""))
             elif name == "frame":
-                extras.extend(self.frame(node))
+                tex = self.formula(node)
+                if not tex:
+                    extras.extend(self.frame(node))
+                else:
+                    if runs and isinstance(runs[-1][0], Span) and runs[-1][0].kind == "math":
+                        # Two formulas that touch would be joined into one.
+                        runs.append((" ", fmt, link))
+                    runs.append((Span("math", [tex]), fmt, link))
             elif name in (
                 "tracked-changes",
                 "annotation",
@@ -293,6 +303,10 @@ class _Reader:
         return title, out
 
     def frame(self, frame: Element) -> list[Block]:
+        tex = self.formula(frame)
+        if tex:
+            # A formula on a slide, or anchored to the page: set apart.
+            return [Paragraph([Span("displaymath", [tex])])]
         out: list[Block] = []
         box = child(frame, "text-box")
         if box is not None:
@@ -308,6 +322,29 @@ class _Reader:
                 if picture is not None:
                     out.append(picture)
         return out
+
+    def formula(self, frame: Element) -> str:
+        """The TeX of the formula a frame shows, or "" when it shows none.
+
+        LibreOffice keeps each formula as a document of its own inside the
+        file — `Object 1/content.xml`, MathML — which the frame points to,
+        with a picture of it beside for programs that cannot read it. The
+        MathML is read, and the picture is not needed. An object that is not
+        a formula — a chart — has no MathML, and one that cannot be read is
+        left out, not the document.
+        """
+        embedded = child(frame, "object")
+        href = attr(embedded, "href") or "" if embedded is not None else ""
+        if not href or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href):
+            return ""
+        folder = posixpath.normpath(href.strip()).lstrip("/")
+        try:
+            data = self.package.read(f"{folder}/content.xml", XML_LIMIT)
+            if not data or not re.search(rb"<(?:[\w.-]+:)?math[\s/>]", data):
+                return ""
+            return mathml_tex(data)
+        except Exception:  # noqa: BLE001 - one formula must not sink the document
+            return ""
 
     def table(self, table: Element) -> list[Block]:
         rows: list[list[list[Inline]]] = []

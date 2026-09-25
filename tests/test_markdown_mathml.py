@@ -73,9 +73,81 @@ def test_mathml_without_tex_is_read_from_its_elements():
     assert body(f"<p>Mittel {formula} hier.</p>") == (
         "Mittel $x_{i}=\\frac{1}{\\sqrt{n}}+{(a+b)}^{2}$ hier."
     )
-    # Without an annotation, its `alttext` is the TeX.
-    alt = '<p>Summe <math alttext="{\\displaystyle a+b}"><mi>q</mi></math>.</p>'
-    assert body(alt) == "Summe $a+b$."
+    # A function's name is TeX's own.
+    sine = "<math><mi>sin</mi><mo>\u2061</mo><mi>x</mi><mo>+</mo><mi>log</mi><mi>y</mi></math>"
+    assert body(f"<p>Also {sine}.</p>") == "Also $\\sin x+\\log y$."
+
+
+@pytest.mark.parametrize(
+    ("mathml", "tex"),
+    [
+        pytest.param("<mover accent='true'><mi>x</mi><mo>^</mo></mover>", "\\hat{x}", id="hat"),
+        pytest.param("<mover><mi>v</mi><mo>⃗</mo></mover>", "\\vec{v}", id="vector"),
+        pytest.param("<mover><mi>z</mi><mo>¯</mo></mover>", "\\overline{z}", id="overline"),
+        pytest.param("<munder><mi>a</mi><mo>⏟</mo></munder>", "\\underbrace{a}", id="brace"),
+        pytest.param("<mover><mi>x</mi><mi>n</mi></mover>", "x^{n}", id="over-is-no-accent"),
+        pytest.param(
+            "<munderover><mo>∑</mo><mrow><mi>i</mi><mo>=</mo><mn>1</mn></mrow><mi>n</mi>"
+            "</munderover><mi>i</mi>",
+            "\\sum_{i=1}^{n}i",
+            id="sum",
+        ),
+        pytest.param(
+            "<mrow><mo>(</mo><mfrac><mi>a</mi><mi>b</mi></mfrac><mo>)</mo></mrow>",
+            "\\left(\\frac{a}{b}\\right)",
+            id="brackets-grow-around-a-fraction",
+        ),
+        pytest.param(
+            "<mrow><mo stretchy='false'>(</mo><mfrac><mi>a</mi><mi>b</mi></mfrac>"
+            "<mo stretchy='false'>)</mo></mrow>",
+            "(\\frac{a}{b})",
+            id="brackets-that-say-they-do-not-grow",
+        ),
+        pytest.param(
+            "<mfenced open='⟨' close='⟩'><mi>u</mi><mi>v</mi></mfenced>",
+            "\\langle u,v\\rangle",
+            id="fenced",
+        ),
+    ],
+)
+def test_mathml_accents_large_operators_and_brackets_as_tex(mathml, tex):
+    assert body(f"<p>F <math>{mathml}</math>.</p>") == f"F ${tex}$."
+
+
+def test_alttext_in_words_is_what_a_screen_reader_says_not_the_formula():
+    pythagoras = (
+        '<math alttext="a squared plus b squared equals c squared"><msup><mi>a</mi><mn>2</mn></msup>'
+        "<mo>+</mo><msup><mi>b</mi><mn>2</mn></msup><mo>=</mo><msup><mi>c</mi><mn>2</mn></msup></math>"
+    )
+    assert body(f"<p>Es gilt {pythagoras}.</p>") == "Es gilt $a^{2}+b^{2}=c^{2}$."
+    root = (
+        '<math display="block" alttext="x equals the square root of y"><mi>x</mi><mo>=</mo>'
+        "<msqrt><mi>y</mi></msqrt></math>"
+    )
+    assert body(f"<p>Lösung</p>{root}") == "Lösung\n\n$$\nx=\\sqrt{y}\n$$"
+    # The MathML is read before an `alttext` in TeX, too; that is read only
+    # where the elements give nothing, and words there never are.
+    assert body('<p>A <math alttext="{\\displaystyle a+b}"><mi>q</mi></math>.</p>') == "A $q$."
+    assert body('<p>A <math alttext="{\\displaystyle a+b}"></math>.</p>') == "A $a+b$."
+    assert body('<p>A <math alttext="x_i squared plus one"><mspace/></math>.</p>') == "A ."
+    # A TeX annotation is the TeX it was written in, whatever `alttext` says.
+    annotated = (
+        '<math alttext="E equals m c squared"><semantics><mi>E</mi>'
+        '<annotation encoding="application/x-tex">E=mc^2</annotation></semantics></math>'
+    )
+    assert body(f"<p>A {annotated}.</p>") == "A $E=mc^2$."
+
+
+def test_a_formula_set_apart_in_a_list_item_or_a_table_cell_stays_on_its_line():
+    half = '<math display="block"><mfrac><mn>1</mn><mn>2</mn></mfrac></math>'
+    page = (
+        f"<ul><li>eins</li><li>{half}</li><li>drei</li></ul>"
+        f"<table><tr><th>Formel</th><th>Wert</th></tr><tr><td>{half}</td><td>0,5 $</td></tr></table>"
+    )
+    assert body(page).split("\n\n") == [
+        "- eins\n- $$\\frac{1}{2}$$\n- drei",
+        "| Formel | Wert |\n| --- | --- |\n| $\\frac{1}{2}$ | 0,5 $ |",
+    ]
 
 
 def test_a_sentence_with_inline_math_stays_one_paragraph():
@@ -169,5 +241,10 @@ def test_malformed_mathml_still_reads(formula, expected):
 
 
 def test_a_formula_ending_in_a_backslash_or_holding_a_dollar_stays_one_formula():
-    page = '<p>t <math alttext="\\text{5 $} x\\"><mi>q</mi></math> u</p>'
+    page = (
+        "<p>t <math><semantics><mi>q</mi><annotation encoding='application/x-tex'>"
+        "\\text{5 $} x\\</annotation></semantics></math> u</p>"
+    )
     assert body(page) == "t $\\text{5 \\$} x$ u"
+    # So does one whose `alttext` is read.
+    assert body('<p>t <math alttext="\\text{5 $} x\\"></math> u</p>') == "t $\\text{5 \\$} x$ u"

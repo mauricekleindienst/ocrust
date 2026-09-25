@@ -154,6 +154,11 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   packages, and short listings — YAML, INI, a small function — are, with their
   indents and blank lines, and the text above them is no heading; JSON, INI
   files and shell commands are code in any font.
+- **Formulas from office documents**: Word's and PowerPoint's equations
+  become TeX — fractions, roots, sums and integrals with their limits,
+  matrices, brackets — instead of being flattened into their characters, and
+  LibreOffice's formula objects are read instead of left out; a web page's
+  spoken `alttext` no longer stands in for its formula.
 
 ## 0.2.7 — 2026-09-24
 

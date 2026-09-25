@@ -13,11 +13,22 @@ import datetime as _dt
 import math
 import posixpath
 import re
+import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from xml.etree.ElementTree import Element
 
 from ._context import Context
+from ._html import (
+    _ACCENTS,
+    _FUNCTIONS,
+    _LARGE_OPERATORS,
+    _TEX_TEXT,
+    _fence,
+    _fenced,
+    _group,
+    _joined,
+)
 from ._ir import (
     Block,
     Break,
@@ -492,6 +503,8 @@ class _Word:
             para.heading = 1
         elif level > 0:
             para.heading = min(level + (1 if self.titled else 0), 6)
+        if not para.heading and para.style not in ("subtitle", "caption"):
+            para.content = _set_apart(para.content)
 
         numbering = None
         num = child(ppr, "numPr")
@@ -570,9 +583,7 @@ class _Word:
                 if choice is not None:
                     self._walk(choice, runs, extras, link, state)
             elif name in ("oMath", "oMathPara"):
-                text = "".join(t.text or "" for t in descendants(node, "t"))
-                if text:
-                    runs.append((text, frozenset(), link))
+                _formula(runs, node, link)
 
     def _run(
         self,
@@ -1104,6 +1115,238 @@ def _smartart(package: Package, part: str) -> list[Block]:
 
 
 # --------------------------------------------------------------------------
+# Equations
+#
+# Word keeps an equation as markup of its own (OMML): each piece — a fraction,
+# a root, a sum — is an element holding its parts, its settings in a `…Pr`
+# element beside them. Each piece has its one TeX, and the equation is written
+# as that, `$…$` in its line and `$$…$$` set apart, as the MathML of a web page
+# is. PowerPoint keeps the same markup.
+
+#: Equations nested deeper than this are read as their text from there on: no
+#: real one is, and every level is one more call.
+_EQUATION_DEPTH = 100
+#: Letters in Unicode's mathematical italic, which PowerPoint keeps: TeX sets
+#: a letter in a formula in italic anyway.
+_MATH_ITALIC = re.compile("[\U0001d434-\U0001d467\U0001d6e2-\U0001d71b\u210e]")
+#: Letters set in a font of their own (`m:scr`) or bold (`m:sty`), as TeX sets them.
+_LETTER_STYLES = {
+    "double-struck": "\\mathbb",
+    "fraktur": "\\mathfrak",
+    "script": "\\mathcal",
+    "sans-serif": "\\mathsf",
+    "monospace": "\\mathtt",
+    "b": "\\mathbf",
+    "bi": "\\boldsymbol",
+}
+
+
+def _formula(runs: list[Run], node: Element, link: str) -> None:
+    """An equation as one formula in TeX: `m:oMath` in its line, and
+    `m:oMathPara` — an equation on a line of its own — set apart. Lines of
+    the same equation stay one formula, one under the other."""
+    if local(node.tag) == "oMathPara":
+        lines = [line for line in map(_equation, children(node, "oMath")) if line]
+        if len(lines) > 1:
+            tex = "\\begin{gathered} " + " \\\\ ".join(lines) + " \\end{gathered}"
+        else:
+            tex = lines[0] if lines else ""
+        kind = "displaymath"
+    else:
+        tex, kind = _equation(node), "math"
+    if not tex:
+        return
+    if runs and isinstance(runs[-1][0], Span) and runs[-1][0].kind in ("math", "displaymath"):
+        # Two formulas that touch would be joined into one.
+        runs.append((" ", frozenset(), link))
+    runs.append((Span(kind, [tex]), frozenset(), link))
+
+
+def _set_apart(content: list[Inline]) -> list[Inline]:
+    """A paragraph that is one formula and nothing else: it is shown on a line
+    of its own, and is written set apart, `$$…$$`."""
+    items = strip(content)
+    if len(items) == 1 and isinstance(items[0], Span) and items[0].kind == "math":
+        return [Span("displaymath", items[0].children)]
+    return content
+
+
+def _equation(node: Element) -> str:
+    """One equation, `m:oMath`, as TeX on one line."""
+    return re.sub(r"\s+", " ", _omml(node, 0)).strip()
+
+
+def _omml(element: Element, depth: int) -> str:
+    """A piece of an equation as TeX, its parts first. A part that is missing
+    is left out, not guessed: a broken equation still reads as its text."""
+    name = local(element.tag)
+    if name.endswith("Pr") or name in ("del", "moveFrom"):
+        # A piece's settings, and what a tracked change took out.
+        return ""
+    if name == "r":
+        return _math_run(element)
+    if depth > _EQUATION_DEPTH:
+        return "".join(t.text or "" for t in descendants(element, "t")).translate(_TEX_TEXT)
+
+    def part(key: str) -> str:
+        found = child(element, key)
+        return _omml(found, depth + 1) if found is not None else ""
+
+    if name == "f":
+        numerator, denominator = part("num"), part("den")
+        kind = _setting(element, "type")
+        if kind in ("lin", "skw"):
+            # Written on the line, as `a/b`.
+            return f"{_group(numerator)}/{_group(denominator)}"
+        if kind == "noBar":
+            # One over the other without a line: a binomial coefficient.
+            return f"{{{numerator} \\atop {denominator}}}"
+        return f"\\frac{{{numerator}}}{{{denominator}}}"
+    if name in ("sSub", "sSup", "sSubSup"):
+        # `x_{i}^{2}`: the subscript first, as MathML gives them.
+        scripts = (("_", "sub"), ("^", "sup"))
+        return _group(part("e")) + "".join(
+            f"{mark}{{{part(key)}}}" for mark, key in scripts if child(element, key) is not None
+        )
+    if name == "sPre":
+        # Scripts before what they belong to.
+        return f"{{}}_{{{part('sub')}}}^{{{part('sup')}}}{part('e')}"
+    if name == "rad":
+        hidden = _on(child(child(element, "radPr"), "degHide"))
+        degree = "" if hidden else part("deg").strip()
+        return f"\\sqrt[{degree}]{{{part('e')}}}" if degree else f"\\sqrt{{{part('e')}}}"
+    if name == "nary":
+        # A sum, a product, an integral — an integral where it does not say.
+        sign = _setting(element, "chr") or "∫"
+        operator = _LARGE_OPERATORS.get(sign, sign.translate(_TEX_TEXT))
+        settings = child(element, "naryPr")
+        for mark, key in (("_", "sub"), ("^", "sup")):
+            limit = "" if _on(child(settings, f"{key}Hide")) else part(key).strip()
+            if limit:
+                operator += f"{mark}{{{limit}}}"
+        return f"{operator} {part('e')}"
+    if name == "d":
+        return _delimited(element, depth)
+    if name == "m":
+        rows = [
+            " & ".join(_omml(cell, depth + 1) for cell in children(row, "e"))
+            for row in children(element, "mr")
+        ]
+        return "\\begin{matrix} " + " \\\\ ".join(rows) + " \\end{matrix}"
+    if name == "eqArr":
+        # Lines of an equation one under the other; an `&` in them is where
+        # they line up.
+        rows = [_omml(row, depth + 1) for row in children(element, "e")]
+        if any("\\&" in row for row in rows):
+            rows = [row.replace("\\&", "&") for row in rows]
+            return "\\begin{aligned} " + " \\\\ ".join(rows) + " \\end{aligned}"
+        return "\\begin{gathered} " + " \\\\ ".join(rows) + " \\end{gathered}"
+    if name == "func":
+        return _joined([_function_name(part("fName").strip()), part("e")])
+    if name in ("limLow", "limUpp"):
+        # `lim` with what goes under it.
+        mark = "_" if name == "limLow" else "^"
+        return f"{_group(part('e').strip())}{mark}{{{part('lim')}}}"
+    if name == "acc":
+        mark = _setting(element, "chr") or "\u0302"
+        accent = _ACCENTS.get(mark)
+        if accent:
+            return f"{accent}{{{part('e')}}}"
+        return f"\\overset{{{mark.translate(_TEX_TEXT)}}}{{{part('e')}}}"
+    if name == "bar":
+        line = "\\overline" if _setting(element, "pos") == "top" else "\\underline"
+        return f"{line}{{{part('e')}}}"
+    if name == "groupChr":
+        # A brace under or over a part, or another character set there.
+        mark = _setting(element, "chr") or "⏟"
+        brace = {"⏟": "\\underbrace", "⏞": "\\overbrace"}.get(mark)
+        if brace:
+            return f"{brace}{{{part('e')}}}"
+        place = "\\overset" if _setting(element, "pos") == "top" else "\\underset"
+        return f"{place}{{{mark.translate(_TEX_TEXT)}}}{{{part('e')}}}"
+    if name == "borderBox":
+        return f"\\boxed{{{part('e')}}}"
+    if name == "phant":
+        # Room kept free for a part, which shows unless it says otherwise.
+        show = child(child(element, "phantPr"), "show")
+        return part("e") if show is None or _on(show) else ""
+    if name == "AlternateContent":
+        choice = child(element, "Choice")
+        return _omml(choice, depth + 1) if choice is not None else ""
+    return _joined(_omml(item, depth + 1) for item in element)
+
+
+def _math_run(run: Element) -> str:
+    """A run of an equation's text as TeX: letters, digits and symbols as they
+    are — `α`, `≤`, `±` — and what TeX reads as markup escaped, as in MathML.
+    Ordinary text in an equation is `\\text{…}`. A run that is a function's
+    name is TeX's own, `\\sin`, whether it is set upright, as Word sets it, or
+    not, as LibreOffice writes it."""
+    pieces: list[str] = []
+    for item in run:
+        kind = local(item.tag)
+        if kind == "t":
+            pieces.append(item.text or "")
+        elif kind == "sym":
+            pieces.append(_symbol(item))
+        elif kind in ("tab", "br", "cr"):
+            pieces.append(" ")
+    text = _MATH_ITALIC.sub(lambda m: unicodedata.normalize("NFKC", m.group()), "".join(pieces))
+    if not text.strip():
+        return " " if text else ""
+    # Its settings, `m:rPr`, stand beside Word's formatting, `w:rPr`.
+    settings = {
+        local(item.tag): item for props in run if local(props.tag) == "rPr" for item in props
+    }
+    if _on(settings.get("nor")):
+        return f"\\text{{{text.translate(_TEX_TEXT)}}}"
+    if text.strip() in _FUNCTIONS:
+        return f"\\{text.strip()}"
+    style = attr(settings["sty"], "val") if "sty" in settings else None
+    font = attr(settings["scr"], "val") if "scr" in settings else None
+    tex = re.sub(r"\s+", " ", text).translate(_TEX_TEXT)
+    styled = _LETTER_STYLES.get(font or "") or _LETTER_STYLES.get(style or "")
+    if styled and re.search(r"[^\W\d_]", text):
+        return f"{styled}{{{tex.strip()}}}"
+    return tex
+
+
+def _delimited(element: Element, depth: int) -> str:
+    """Parts in brackets, `m:d`: round ones where it does not say, the parts
+    parted by `|`. The brackets grow with what is tall inside them — a
+    fraction, a sum, a matrix — as Word draws them."""
+    opening, separator, closing = (_setting(element, key) for key in ("begChr", "sepChr", "endChr"))
+    opening = "(" if opening is None else opening
+    closing = ")" if closing is None else closing
+    separator = _fence("|" if separator is None else separator)
+    inner: list[str] = []
+    for item in children(element, "e"):
+        if inner:
+            inner.append(separator)
+        inner.append(_omml(item, depth + 1))
+    content = _joined(inner)
+    grow = child(child(element, "dPr"), "grow")
+    if grow is None or _on(grow):
+        return _fenced(opening, content, closing)
+    return _joined([_fence(opening), content, _fence(closing)])
+
+
+def _function_name(name: str) -> str:
+    """A function's name as TeX: `\\sin`, `\\log`, and one TeX has no command
+    for upright as `\\operatorname{…}`."""
+    if re.fullmatch(r"[A-Za-z]+", name):
+        return f"\\{name}" if name in _FUNCTIONS else f"\\operatorname{{{name}}}"
+    return name
+
+
+def _setting(element: Element, key: str) -> str | None:
+    """One setting of a piece of an equation — the `m:chr` of an `m:nary`,
+    kept in its `m:naryPr` — or None where it has none."""
+    found = child(child(element, f"{local(element.tag)}Pr"), key)
+    return attr(found, "val") if found is not None else None
+
+
+# --------------------------------------------------------------------------
 # PowerPoint
 
 _SKIPPED_PLACEHOLDERS = {"dt", "ftr", "sldNum", "hdr"}
@@ -1345,7 +1588,7 @@ def _drawing_text(
             kind = "bullet"
         else:
             kind = "inherited" if bulleted else "none"
-        content = _drawing_runs(p, rels)
+        content = _set_apart(_drawing_runs(p, rels))
         if not is_empty(content):
             paragraphs.append((level, kind, content, start))
     if len(paragraphs) == 1 and paragraphs[0][1] == "inherited" and paragraphs[0][0] == 0:
@@ -1402,6 +1645,11 @@ def _drawing_runs(p: Element, rels: dict[str, tuple[str, str, bool]]) -> list[In
             runs.append((text, frozenset(fmt), link))
         elif name == "br":
             runs.append((Break(), frozenset(), ""))
+        elif name == "m":
+            # An equation, in Word's markup inside PowerPoint's (`a14:m`).
+            for equation in node:
+                if local(equation.tag) in ("oMath", "oMathPara"):
+                    _formula(runs, equation, "")
     return assemble(runs)
 
 

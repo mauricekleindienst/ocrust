@@ -372,20 +372,23 @@ def _line_start(text: str) -> str:
     return text
 
 
-def _paragraph(content: list[Inline]) -> str:
+def _paragraph(content: list[Inline], listed: bool = False) -> str:
     content = strip(content)
     if len(content) == 1 and isinstance(content[0], Span) and content[0].kind == "displaymath":
         # A formula set apart is a block of its own, its dollar signs on
         # lines of their own: that is how every Markdown tool with math
-        # reads one.
+        # reads one. In a list item it stays on the item's line: `- $$…$$`.
         tex = _tex(plain(content[0].children))
-        return f"$$\n{tex}\n$$" if tex else ""
+        if not tex:
+            return ""
+        return f"$${tex}$$" if listed else f"$$\n{tex}\n$$"
     text = inline(content)
     return "\n".join(_line_start(line) for line in text.split("\n"))
 
 
-def blocks(items: Iterable[Block]) -> str:
-    """Blocks as Markdown, a blank line between each two.
+def blocks(items: Iterable[Block], listed: bool = False) -> str:
+    """Blocks as Markdown, a blank line between each two; `listed` says they
+    are a list item's.
 
     Two lists in a row are written with different markers — `-` and `*`,
     `1.` and `1)` — or Markdown would read them as one.
@@ -399,16 +402,16 @@ def blocks(items: Iterable[Block]) -> str:
             alternate = not alternate if follows else False
             text = _list(item, alternate)
         else:
-            text = _block(item)
+            text = _block(item, listed)
         if text.strip():
             parts.append(text)
             previous = item
     return "\n\n".join(parts)
 
 
-def _block(item: Block) -> str:
+def _block(item: Block, listed: bool = False) -> str:
     if isinstance(item, Paragraph):
-        return _paragraph(item.content)
+        return _paragraph(item.content, listed)
     if isinstance(item, Heading):
         text = inline(strip(item.content), breaks=" ").replace("\n", " ").strip()
         if not text:
@@ -423,7 +426,7 @@ def _block(item: Block) -> str:
     if isinstance(item, Code):
         return _fenced(item.text, item.language)
     if isinstance(item, Quote):
-        inner = blocks(item.blocks)
+        inner = blocks(item.blocks, listed)
         return (
             "\n".join(f"> {line}" if line else ">" for line in inner.split("\n")) if inner else ""
         )
@@ -464,10 +467,10 @@ def _list(item: ListBlock, alternate: bool = False) -> str:
         number += 1
         indent = " " * (len(marker) + 1)
         if tight:
-            parts = [_block(part) for part in entry]
+            parts = [_block(part, listed=True) for part in entry]
             body = "\n".join(part for part in parts if part.strip())
         else:
-            body = blocks(entry)
+            body = blocks(entry, listed=True)
         if not body.strip():
             body = ""
         lines = body.split("\n")
@@ -478,8 +481,19 @@ def _list(item: ListBlock, alternate: bool = False) -> str:
 
 
 def _cell(content: list[Inline]) -> str:
-    text = inline(strip(content), breaks="<br>").replace("\n", " ")
+    text = inline(_in_line(strip(content)), breaks="<br>").replace("\n", " ")
     return text.replace("|", "\\|")
+
+
+def _in_line(content: list[Inline]) -> list[Inline]:
+    """A table cell's content with a formula set apart written in its line,
+    `$…$`: a cell is one line of text, and nothing in it stands apart."""
+    return [
+        Span("math" if item.kind == "displaymath" else item.kind, _in_line(item.children), item.url)
+        if isinstance(item, Span)
+        else item
+        for item in content
+    ]
 
 
 def _table(item: Table) -> str:

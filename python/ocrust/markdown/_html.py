@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
@@ -753,7 +753,131 @@ _FORMULA_KINDS = ("math", "displaymath")
 #: The encoding of an annotation that holds the TeX a formula was written in.
 _TEX_ENCODING = re.compile(r"(?<![a-z])(?:la)?tex(?![a-z])", re.I)
 _TEX_STYLE = re.compile(r"\{\\(?:display|text)style(?![A-Za-z])\s*(.*)\}", re.S)
+#: What only TeX writes: a command, a script, a group in braces.
+_TEX_MARKUP = re.compile(r"\\[A-Za-z]+|[\^_{}]")
+#: Words a formula sets as text, `\text{for all}`: TeX may hold those too.
+_TEX_WORDS = re.compile(r"\\(?:text[a-z]*|mathrm|operatorname|mbox)\s*\{[^{}]*\}")
+#: Three words in a row, none of them a command: said, not written.
+_SPOKEN = re.compile(r"(?<![\\\w])[^\W\d_]{2,}(?:\s+[^\W\d_]{2,}){2}(?!\w)")
 _TOKENS = {"mi", "mn", "mo", "ms", "mtext"}
+#: The functions TeX sets upright under a name of its own: `\sin x`, `\lim`.
+_FUNCTIONS = frozenset(
+    {
+        "arccos",
+        "arcsin",
+        "arctan",
+        "arg",
+        "cos",
+        "cosh",
+        "cot",
+        "coth",
+        "csc",
+        "deg",
+        "det",
+        "dim",
+        "exp",
+        "gcd",
+        "hom",
+        "inf",
+        "ker",
+        "lg",
+        "lim",
+        "liminf",
+        "limsup",
+        "ln",
+        "log",
+        "max",
+        "min",
+        "Pr",
+        "sec",
+        "sin",
+        "sinh",
+        "sup",
+        "tan",
+        "tanh",
+    }
+)
+#: The large operators a formula sets its limits on, as TeX.
+_LARGE_OPERATORS = {
+    "∑": "\\sum",
+    "∏": "\\prod",
+    "∐": "\\coprod",
+    "∫": "\\int",
+    "∬": "\\iint",
+    "∭": "\\iiint",
+    "∮": "\\oint",
+    "⋃": "\\bigcup",
+    "⋂": "\\bigcap",
+    "⋁": "\\bigvee",
+    "⋀": "\\bigwedge",
+    "⨁": "\\bigoplus",
+    "⨂": "\\bigotimes",
+    "⨀": "\\bigodot",
+}
+#: Marks set over a letter, by the character a document keeps for them —
+#: combining or spacing — as TeX's accents: `\hat{x}`, `\vec{v}`.
+_ACCENTS = {
+    "\u0300": "\\grave",
+    "`": "\\grave",
+    "\u0301": "\\acute",
+    "´": "\\acute",
+    "\u0302": "\\hat",
+    "^": "\\hat",
+    "ˆ": "\\hat",
+    "\u0303": "\\tilde",
+    "~": "\\tilde",
+    "˜": "\\tilde",
+    "\u0304": "\\bar",
+    "\u0305": "\\overline",
+    "¯": "\\overline",
+    "‾": "\\overline",
+    "\u0306": "\\breve",
+    "˘": "\\breve",
+    "\u0307": "\\dot",
+    "˙": "\\dot",
+    "\u0308": "\\ddot",
+    "¨": "\\ddot",
+    "\u030c": "\\check",
+    "ˇ": "\\check",
+    "\u20d6": "\\overleftarrow",
+    "←": "\\overleftarrow",
+    "\u20d7": "\\vec",
+    "→": "\\vec",
+    "\u20db": "\\dddot",
+    "\u20e1": "\\overleftrightarrow",
+    "↔": "\\overleftrightarrow",
+    "⏞": "\\overbrace",
+}
+#: Marks set under a part: a line, a brace.
+_UNDER_ACCENTS = {
+    "\u0332": "\\underline",
+    "_": "\\underline",
+    "‾": "\\underline",
+    "¯": "\\underline",
+    "⏟": "\\underbrace",
+}
+#: Brackets TeX writes as a command, not as the character.
+_FENCES = {
+    "{": "\\{",
+    "}": "\\}",
+    "⟨": "\\langle",
+    "⟩": "\\rangle",
+    "〈": "\\langle",
+    "〉": "\\rangle",
+    "⌊": "\\lfloor",
+    "⌋": "\\rfloor",
+    "⌈": "\\lceil",
+    "⌉": "\\rceil",
+    "‖": "\\|",
+    "\\": "\\backslash",
+}
+#: The brackets that open and close a part in MathML's own markup.
+_OPENING = set("([{|‖⟨〈⌊⌈")
+_CLOSING = set(")]}|‖⟩〉⌋⌉")
+#: What stands taller than a line: brackets around it grow with it.
+_TALL = re.compile(r"\\(?:frac|atop|begin|sum|prod|coprod|i+nt|oint|big)")
+#: A command's name at the end of TeX: a letter right after it would lengthen it.
+_COMMAND_END = re.compile(r"\\[A-Za-z]+$")
 #: The scripts of each kind, in the order MathML gives them: `x_{i}^{2}`.
 _SCRIPTS = {
     "msub": "_",
@@ -797,8 +921,14 @@ def _display(math: Element) -> bool:
 
 def _tex(math: Element) -> str:
     """A formula as TeX. Wikipedia, KaTeX, MathJax and Pandoc keep the TeX it
-    was written in as an annotation, some pages in `alttext`; only where
-    neither says is it read from the MathML's elements."""
+    was written in as an annotation, and that is read first; otherwise the
+    formula is read from the MathML's elements.
+
+    `alttext` is what a screen reader says in the formula's place. An
+    accessible e-book puts words there — "a squared plus b squared" — which
+    are no formula, while Wikipedia and LaTeXML put the TeX. It is read only
+    where the elements give nothing, and only when it is written in TeX.
+    """
     parts = [child for child in math.children if isinstance(child, Element)]
     if len(parts) == 1 and parts[0].tag == "semantics":
         for note in parts[0].children:
@@ -810,8 +940,25 @@ def _tex(math: Element) -> str:
                 tex = _unwrapped(note.text())
                 if tex:
                     return tex
-    alttext = _unwrapped(math.attrs.get("alttext", ""))
-    return alttext or _WHITESPACE.sub(" ", _linear(math)).strip()
+    tex = _WHITESPACE.sub(" ", _linear(math)).strip()
+    if tex:
+        return tex
+    alttext = math.attrs.get("alttext", "")
+    return _unwrapped(alttext) if _written_in_tex(alttext) else ""
+
+
+def _written_in_tex(text: str) -> bool:
+    """Whether a formula's `alttext` is TeX — `{\\displaystyle E=mc^{2}}` —
+    and not the words a screen reader says for it."""
+    return bool(_TEX_MARKUP.search(text)) and not _SPOKEN.search(_TEX_WORDS.sub(" ", text))
+
+
+def mathml_tex(data: bytes) -> str:
+    """The TeX of a formula kept as a MathML file of its own: LibreOffice
+    stores each formula of a document that way, beside its text. The file is
+    read as the MathML of a web page is, with the same limits."""
+    maths = parse(decode_html(data)).find_all("math")
+    return _tex(maths[0]) if maths else ""
 
 
 def _unwrapped(tex: str) -> str:
@@ -846,8 +993,14 @@ def _linear(node: Element) -> str:
     tag = node.tag
     if tag in _TOKENS:
         text = _WHITESPACE.sub(" ", node.text())
+        word = text.strip()
+        if tag in ("mi", "mo") and word in _FUNCTIONS:
+            # `sin` as TeX sets it: upright, and apart from what follows.
+            return f"\\{word} "
+        if tag == "mo" and word in _LARGE_OPERATORS:
+            return f"{_LARGE_OPERATORS[word]} "
         if tag != "mtext":
-            return text.strip().translate(_TEX_TEXT)
+            return word.translate(_TEX_TEXT)
         # Words in a formula, `if` and `for all`, keep the spaces around them.
         return f"\\text{{{text.translate(_TEX_TEXT)}}}" if text.strip() else ""
     if tag in _SKIP or tag in ("annotation", "annotation-xml", "mphantom", "mprescripts", "none"):
@@ -875,9 +1028,16 @@ def _linear(node: Element) -> str:
         for child in node.children
         if isinstance(child, Element) or child.strip()
     ]
+    parts = [child for child in node.children if isinstance(child, Element)]
+    if tag in ("mover", "munder") and len(args) == len(parts) == 2:
+        # A mark over or under a part is an accent: `\hat{x}`, not `x^{\hat{}}`.
+        marks = _ACCENTS if tag == "mover" else _UNDER_ACCENTS
+        accent = marks.get(parts[1].text().strip())
+        if accent:
+            return f"{accent}{{{args[0]}}}"
     if tag in _SCRIPTS and len(args) > 1:
         scripts = zip(_SCRIPTS[tag], args[1:])
-        return _group(args[0]) + "".join(f"{mark}{{{script}}}" for mark, script in scripts)
+        return _group(args[0].rstrip()) + "".join(f"{mark}{{{script}}}" for mark, script in scripts)
     if tag == "mfrac" and len(args) > 1:
         return f"\\frac{{{args[0]}}}{{{args[1]}}}"
     if tag == "msqrt":
@@ -894,14 +1054,52 @@ def _linear(node: Element) -> str:
             if separators:
                 inner.append(separators[min(index, len(separators) - 1)].translate(_TEX_TEXT))
             inner.append(arg)
-        opening = node.attrs.get("open", "(").translate(_TEX_TEXT)
-        return opening + "".join(inner) + node.attrs.get("close", ")").translate(_TEX_TEXT)
+        return _fenced(node.attrs.get("open", "("), "".join(inner), node.attrs.get("close", ")"))
+    if (
+        tag == "mrow"
+        and len(args) == len(parts) > 2
+        and parts[0].tag == parts[-1].tag == "mo"
+        and parts[0].attrs.get("stretchy") != "false"
+    ):
+        # Brackets around a part, which grow with it where it is tall.
+        opening, closing = parts[0].text().strip(), parts[-1].text().strip()
+        inner = "".join(args[1:-1])
+        if opening in _OPENING and closing in _CLOSING and _TALL.search(inner):
+            return _fenced(opening, inner, closing)
     return "".join(args)
 
 
 def _group(tex: str) -> str:
     """`tex` as one piece for a script to stand on: `c^{2}`, but `{ab}^{2}`."""
     return tex if len(tex) <= 1 or re.fullmatch(r"\\(?:[A-Za-z]+ ?|.)", tex) else f"{{{tex}}}"
+
+
+def _fenced(opening: str, inner: str, closing: str) -> str:
+    """`inner` in brackets, which grow with it where it is tall — a fraction,
+    a sum, a matrix — as a formula editor draws them: `\\left(…\\right)`."""
+    if _TALL.search(inner):
+        return _joined(
+            [f"\\left{_fence(opening) or '.'}", inner, f"\\right{_fence(closing) or '.'}"]
+        )
+    return _joined([_fence(opening), inner, _fence(closing)])
+
+
+def _fence(char: str) -> str:
+    """A bracket as TeX; none, where a side has none, is nothing."""
+    return _FENCES.get(char, char.translate(_TEX_TEXT))
+
+
+def _joined(pieces: Iterable[str]) -> str:
+    """Pieces of TeX one after the other, a space between a command and a
+    letter after it: `\\sin x`, not `\\sinx`."""
+    out: list[str] = []
+    for piece in pieces:
+        if not piece:
+            continue
+        if out and piece[0].isalpha() and _COMMAND_END.search(out[-1][-32:]):
+            out.append(" ")
+        out.append(piece)
+    return "".join(out)
 
 
 @dataclass
