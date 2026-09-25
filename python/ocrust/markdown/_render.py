@@ -413,7 +413,8 @@ def _block(item: Block, listed: bool = False) -> str:
     if isinstance(item, Paragraph):
         return _paragraph(item.content, listed)
     if isinstance(item, Heading):
-        text = inline(strip(item.content), breaks=" ").replace("\n", " ").strip()
+        # A heading is one line: a formula set apart is written in it.
+        text = inline(_in_line(strip(item.content)), breaks=" ").replace("\n", " ").strip()
         if not text:
             return ""
         # A trailing run of `#` would be read as the closing sequence.

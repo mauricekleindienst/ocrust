@@ -49,9 +49,9 @@ from ._ir import (
     assemble,
     body_of,
     flatten,
+    inline_of,
     is_empty,
     nest,
-    plain,
     relabel,
     strip,
     subscript,
@@ -1425,17 +1425,17 @@ class _Slides:
         layout_positions = self._layout_positions(rels)
         tree = next(descendants(root, "spTree"), None)
         shapes = self._shapes(tree, layout_positions) if tree is not None else []
-        title = ""
+        title: list[Inline] = []
         body: list[Block] = []
         for shape in shapes:
             if shape.placeholder in _TITLE_PLACEHOLDERS and not title:
-                title = " ".join(
-                    plain(p) for p in self._text_blocks(shape.element, rels, False)
-                ).strip()
-                if title:
+                # The title's inline content, formulas and all.
+                title = inline_of(self._text_blocks(shape.element, rels, False))
+                if not is_empty(title):
                     continue
+                title = []
             body.extend(self._shape_blocks(shape, rels))
-        out: list[Block] = [Marker(f"slide {number}"), Heading(2, [title or f"Slide {number}"])]
+        out: list[Block] = [Marker(f"slide {number}"), Heading(2, title or [f"Slide {number}"])]
         out.extend(body)
         notes = self._notes(rels)
         if notes:

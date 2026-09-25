@@ -339,6 +339,19 @@ def test_a_powerpoint_equation_is_read_like_words():
     ]
 
 
+def test_a_formula_in_a_slide_title_is_math_in_its_heading():
+    title = (
+        f'<mc:AlternateContent {MC}><mc:Choice {A14} Requires="a14"><p:sp><p:nvSpPr>'
+        '<p:cNvPr id="2" name="Titel"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr>'
+        "</p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Die Formel </a:t></a:r>"
+        f"<a14:m>{equation(r('E=m') + sup('c', '2'))}</a14:m>"
+        "<a:r><a:t> kostet 5 $</a:t></a:r></a:p></p:txBody></p:sp></mc:Choice>"
+        "<mc:Fallback/></mc:AlternateContent>"
+    )
+    md = body(convert(pptx([title]), "folie.pptx").markdown)
+    assert "## Die Formel $E=mc^{2}$ kostet 5 \\$" in md, md
+
+
 # --------------------------------------------------------------------------
 # LibreOffice
 

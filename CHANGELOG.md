@@ -159,6 +159,15 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   many lines they take; a sidebar far narrower than the text beside it is read
   after the text instead of merged into its lines; and a Hebrew or Arabic
   table under an English header reads the way its page does.
+- **Text stays text, code stays code**: a letter or a screenplay typed in
+  Courier and a template's `[Your Name]` placeholders are no code blocks,
+  while commands of any tool, program logs and SQL are, a line each; a
+  column goes on in the next only in its own language, whichever that is, and
+  a short balanced column goes on where its sentence plainly does; a one-line
+  paragraph over an indented one stays its own; text beside a picture, a
+  column of figures or long compounds beside a box, and Chinese beside a box
+  wrap without hard breaks; and a formula in a slide's title is math in its
+  heading.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and

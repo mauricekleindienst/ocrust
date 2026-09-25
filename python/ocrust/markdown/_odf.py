@@ -28,6 +28,7 @@ from ._ir import (
     Table,
     assemble,
     flatten,
+    inline_of,
     is_empty,
     plain,
     verbatim,
@@ -273,11 +274,12 @@ class _Reader:
             if node.tail:
                 runs.append((node.tail, fmt, link))
 
-    def shapes(self, container: Element) -> tuple[str, list[Block]]:
+    def shapes(self, container: Element) -> tuple[list[Inline], list[Block]]:
         """The text of a slide's shapes, in the order they are drawn, and the
-        title among them: frames, text boxes, tables, pictures, drawn shapes
-        with text in them, and groups of any of these."""
-        title = ""
+        title among them — its inline content, formulas and all: frames,
+        text boxes, tables, pictures, drawn shapes with text in them, and
+        groups of any of these."""
+        title: list[Inline] = []
         out: list[Block] = []
         for node in container:
             name = local(node.tag)
@@ -296,9 +298,10 @@ class _Reader:
             else:
                 continue
             if attr(node, "class") == "title" and not title:
-                title = " ".join(plain(b) for b in found).strip()
-                if title:
+                title = inline_of(found)
+                if not is_empty(title):
                     continue
+                title = []
             out.extend(found)
         return title, out
 
@@ -549,7 +552,7 @@ def odp(data: bytes, ctx: Context) -> Note:
                 notes.extend(reader.blocks(inner))
         title, body = reader.shapes(page)
         blocks.append(Marker(f"slide {number}"))
-        blocks.append(Heading(2, [title or attr(page, "name") or f"Slide {number}"]))
+        blocks.append(Heading(2, title or [attr(page, "name") or f"Slide {number}"]))
         blocks.extend(body)
         if notes:
             blocks.append(Quote([Paragraph([Span("strong", ["Notes:"])]), *notes]))

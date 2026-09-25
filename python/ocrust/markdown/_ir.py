@@ -199,6 +199,22 @@ def plain(content: list[Inline] | Block | list[Block]) -> str:
     return clean("".join(parts)).strip()
 
 
+def inline_of(blocks: list[Block]) -> list[Inline]:
+    """Blocks' text as one run of inline content, a space between blocks:
+    a title set in a shape of several paragraphs, its formulas and
+    emphasis kept."""
+    out: list[Inline] = []
+    for block in blocks:
+        content = list(block.content) if isinstance(block, (Paragraph, Heading)) else [plain(block)]
+        content = strip(content)
+        if not content:
+            continue
+        if out:
+            out.append(" ")
+        out.extend(content)
+    return out
+
+
 def verbatim(content: list[Inline]) -> str:
     """The text of inline content with its white space as it is — the
     indentation of a line of code — and a line break as one."""

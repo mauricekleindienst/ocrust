@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import re
 import statistics
+import unicodedata
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -315,9 +316,12 @@ def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
         return [lines]
     # The lines beside a drop cap or a small picture set at the start of a
     # paragraph start past it, and no paragraph starts there: after a flush
-    # first line, the next few lines as long as they are indented.
+    # first line that is full — the paragraph goes on — the next few lines
+    # as long as they are indented. A flush line that ends short is a
+    # paragraph of one line.
     beside_cap = 1
-    if flush[0]:
+    full = right - lines[0].box.x1 <= _first_word_width(lines[1]) + 0.35 * height
+    if flush[0] and full:
         while beside_cap < min(len(lines), _BESIDE_CAP + 1) and not flush[beside_cap]:
             beside_cap += 1
     parts: list[list[Line]] = [[lines[0]]]
@@ -431,7 +435,8 @@ def _carried_on(
         at -= 1
         if at < 0 or len(out) - at > _BOXES_BESIDE:
             return False
-    if way == "column" and not _one_flow(head, head_spot, tail, spot, page):
+    flow = _one_flow(head, head_spot, tail, spot, page) if way == "column" else "long"
+    if flow is None:
         return False
     # A paragraph of several lines run on without a break, down to a full
     # last line, goes on whatever the next word begins with; so does one
@@ -440,7 +445,13 @@ def _carried_on(
     # whatever it ends with, as they would be with no box beside them.
     unbroken = not any(isinstance(part, Break) for part in head.content)
     under = way == "under"
-    running = unbroken and (head_spot.first is not head_spot.last or under)
+    # And a text never ends on a little word — `die`, `the`, `beim`: what
+    # follows goes on from it, in a short column too.
+    last_word = re.findall(r"[^\W\d_]+", plain(head.content).lower())[-1:]
+    hangs = bool(last_word) and any(last_word[0] in stop for stop in _STOPWORDS.values())
+    running = (
+        unbroken and (flow == "long" or hangs) and (head_spot.first is not head_spot.last or under)
+    )
     flush = abs(spot.extent[0] - head_spot.extent[0]) < _FLUSH * head_spot.last.box.height
     joined = _join(head, tail, capital=running, anyway=unbroken and under and flush)
     if joined is None:
@@ -457,20 +468,26 @@ def _carried_on(
 
 def _one_flow(
     head: Paragraph, head_spot: _Spot, tail: Paragraph, tail_spot: _Spot, page: list[_Spot]
-) -> bool:
+) -> str | None:
     """Whether the column `tail` heads is the one `head` ends going on: no
-    caption at either end, columns as wide and set as large, the same
-    language, and a column of running text long enough to be one."""
+    caption at either end, columns as wide and set as large, and the same
+    language. `"long"` when `head`'s column is long enough to be one of
+    running text — a short one, a balanced section's or a slide's box, goes
+    on only in a word that plainly carries on (`"short"`) — and None when
+    it does not go on there."""
     assert head_spot.last is not None and tail_spot.first is not None
-    if _CAPTION.match(plain(head.content)) or _CAPTION.match(plain(tail.content)):
-        return False
+    head_text, tail_text = plain(head.content), plain(tail.content)
+    if _CAPTION.match(head_text) or _CAPTION.match(tail_text):
+        return None
     height = head_spot.last.box.height
     if abs(tail_spot.first.box.height - height) > _SAME_SIZE * height:
-        return False
+        return None
     hx0, tx0 = head_spot.extent[0], tail_spot.extent[0]
     head_width, tail_width = head_spot.right - hx0, tail_spot.right - tx0
     if abs(head_width - tail_width) > _SAME_WIDTH * max(head_width, tail_width):
-        return False
+        return None
+    if not _same_language(head_text, tail_text):
+        return None
     column = sum(
         other.count
         for other in page
@@ -478,10 +495,46 @@ def _one_flow(
         and abs(other.extent[0] - hx0) < height
         and other.extent[2] <= head_spot.right + height
     )
-    if column < _COLUMN_LINES:
+    return "long" if column >= _COLUMN_LINES else "short"
+
+
+def _same_language(first: str, second: str) -> bool:
+    """Whether two texts may be in one language: written in one script,
+    and — where one's language is known — the other, long enough to tell,
+    sets that language's little words among its own."""
+    if _script(first) != _script(second):
         return False
-    languages = _language(plain(head.content)), _language(plain(tail.content))
+    for known, other in ((first, second), (second, first)):
+        language = _language(known)
+        if language is None:
+            continue
+        words = re.findall(r"[^\W\d_]+", other.lower())
+        if len(words) >= _LANGUAGE_WORDS:
+            little = sum(word in _STOPWORDS[language] for word in words)
+            if little < _LANGUAGE_SHARE * len(words):
+                return False
+    languages = _language(first), _language(second)
     return None in languages or languages[0] == languages[1]
+
+
+def _script(text: str) -> str | None:
+    """The script most of a text's letters are written in: `LATIN`,
+    `CYRILLIC`, `GREEK`, `ARABIC`, `HEBREW`, `CJK` …, or None for none."""
+    counts: Counter[str] = Counter()
+    for char in text:
+        if char.isalpha():
+            name = unicodedata.name(char, "")
+            counts[name.split(" ", 1)[0] if name else ""] += 1
+    return counts.most_common(1)[0][0] if counts else None
+
+
+#: How many of a text's words its language's little words are, at least,
+#: for the text to be known to be in it.
+_LANGUAGE_KNOWN = 0.08
+#: How many words a text needs, at least, to tell it is not in a language,
+#: and how many of them that language's little words are in it, at least.
+_LANGUAGE_WORDS = 12
+_LANGUAGE_SHARE = 0.05
 
 
 #: A figure's or a table's caption: `Figure 3:`, `Abb. 2`, `TABLE I.`.
@@ -502,12 +555,14 @@ _STOPWORDS = {
     language: frozenset(words.split())
     for language, words in {
         "de": "der die das und ist nicht mit von zu den im für auf dem des sich ein eine "
-        "auch als werden wird sind wurde bei nach oder über aus um",
+        "auch als werden wird sind wurde bei nach oder über aus um ich du er wir ihr "
+        "aber wenn dass noch doch beim zum zur vom am ins",
         "en": "the and of to is are was for on with that this by from be as at it which "
-        "have has not were been their or",
+        "have has not were been their or you he she we they my your his her our but "
+        "what why will would there these",
         "fr": "le la les et des du un une est dans pour que qui sur au aux par pas ce il "
         "elle sont avec",
-        "es": "el la los las y del que en un una es por con para se su al lo como más",
+        "es": "el la los las y del que en un una es por con para su al lo como más",
         "it": "il lo la gli le e di che del della un una è per con non sono nel alla",
         "nl": "het een en van is dat op te voor met zijn niet aan er ook als bij",
     }.items()
@@ -516,14 +571,17 @@ _STOPWORDS = {
 
 def _language(text: str) -> str | None:
     """The language a text is in, by its commonest short words, when they
-    say so clearly: three at least, half again as many as any other's."""
+    say so clearly: three at least, half again as many as any other's, and
+    a good share of its words — a few shared ones (`se`, `a`) say nothing
+    of a language not listed."""
     words = re.findall(r"[^\W\d_]+", text.lower())
     counts = sorted(
         ((sum(word in stop for word in words), name) for name, stop in _STOPWORDS.items()),
         reverse=True,
     )
     (best, name), (second, _) = counts[0], counts[1]
-    return name if best >= 3 and best >= 1.5 * second else None
+    clear = best >= 3 and best >= 1.5 * second and best >= _LANGUAGE_KNOWN * len(words)
+    return name if clear else None
 
 
 #: How many blocks — a box's caption, its table, a note under it — may stand
@@ -607,23 +665,62 @@ def _carries_on(head: _Spot, tail: _Spot, boxes: list[_Spot], page: list[_Spot])
 
 def _column_edges(blocks: list[tuple[ScanBlock, list[Line]]]) -> list[tuple[float, float, bool]]:
     """The horizontal extent of each paragraph on the page, and whether its
-    lines wrap: running text, two lines at least, all but the last reaching
-    near its end — not an address's few words a line."""
-    edges = []
-    for _, lines in blocks:
-        x0 = min(line.box.x0 for line in lines)
-        x1 = max(line.box.x1 for line in lines)
-        reach = x1 - _WRAPPED_SLACK * (x1 - x0)
-        wrapped = (
-            len(lines) >= 2 and all(line.box.x1 >= reach for line in lines[:-1]) and _prose(lines)
-        )
-        edges.append((x0, x1, wrapped))
-    return edges
+    lines wrap: running text, two lines at least, nearly all but the last
+    reaching near its end — not an address's few words a line."""
+    return [
+        (min(line.box.x0 for line in lines), max(line.box.x1 for line in lines), _wraps(lines))
+        for _, lines in blocks
+    ]
+
+
+def _wraps(lines: Sequence[Line]) -> bool:
+    """Whether a paragraph's lines wrap at its own right edge: running text,
+    two lines at least, nearly all but the last reaching near its end — a
+    long word may wrap a line early."""
+    x0 = min(line.box.x0 for line in lines)
+    x1 = max(line.box.x1 for line in lines)
+    reach = x1 - _WRAPPED_SLACK * (x1 - x0)
+    reaching = sum(line.box.x1 >= reach for line in lines[:-1])
+    return len(lines) >= 2 and reaching >= _WRAPPED_SHARE * (len(lines) - 1) and _running(lines)
 
 
 #: How far short of a paragraph's end, as a share of its width, a line may
-#: end and still have wrapped there.
-_WRAPPED_SLACK = 0.15
+#: end and still have wrapped there: a narrow column set ragged wraps a
+#: long word early.
+_WRAPPED_SLACK = 0.3
+#: How many of a wrapped paragraph's lines but its last reach there, at least.
+_WRAPPED_SHARE = 0.8
+
+
+def _running(lines: Sequence[Line]) -> bool:
+    """Whether lines are running text that wraps, rather than an address or
+    a list of names: Chinese or Japanese, which wraps anywhere; or lines of
+    three words and more — or of long words — most of them words, among
+    them a language's little words, figures or not."""
+    letters = [c for line in lines for c in line.text if not c.isspace()]
+    if sum(bool(_UNSPACED.match(c)) for c in letters) * 2 >= max(len(letters), 1):
+        return True
+    tokens = [line.text.split() for line in lines]
+    counts = sorted(len(t) for t in tokens)
+    lengths = sorted(len(line.text.strip()) for line in lines)
+    words = [token for line in tokens for token in line]
+    middle = len(lines) // 2
+    if not words or (counts[middle] < _RUNNING_WORDS and lengths[middle] < _RUNNING_CHARS):
+        return False
+    plain = sum(bool(_WORD.fullmatch(token)) for token in words)
+    little = sum(
+        any(token.lower().strip(".,;:!?\"'()") in stop for stop in _STOPWORDS.values())
+        for token in words
+    )
+    return plain >= _RUNNING_SHARE * len(words) and little >= _PROSE_LITTLE * len(words)
+
+
+#: Words a line of running text carries at least — or characters, in a
+#: narrow column of long compounds — and how many of its tokens are words,
+#: however many figures stand among them.
+_RUNNING_WORDS = 3
+_RUNNING_CHARS = 20
+_RUNNING_SHARE = 0.6
 
 
 @dataclass
@@ -655,7 +752,9 @@ def _right_edge(lines: list[Line], columns: _Columns) -> float:
     beside it: a paragraph beside a fact box ends a margin short of the box,
     where the paragraphs whose lines wrap beside the box end — or, with none
     to tell, where the box begins: a letter's address beside its reference
-    block is no fuller for a salutation that ends short of the block.
+    block is no fuller for a salutation that ends short of the block. Beside
+    a picture, which leaves no block, running text wraps where its own lines
+    end.
     """
     x0, y0, x1, y1 = _extent(lines)
     beside = [
@@ -676,7 +775,20 @@ def _right_edge(lines: list[Line], columns: _Columns) -> float:
         if wrapped_beside:
             return max(x1, wrapped_beside)
         return max(x1, min(right, min(beside)))
+    # Running text that wraps well short of its column wraps where something
+    # stands beside it that left no text — a picture: there its column ends.
+    if (
+        len(lines) >= _BESIDE_PICTURE_LINES
+        and x1 < right - _WRAPPED_SLACK * (right - x0)
+        and _wraps(lines)
+    ):
+        return x1
     return right
+
+
+#: How many lines of running text, at least, tell by themselves where their
+#: column ends.
+_BESIDE_PICTURE_LINES = 3
 
 
 #: A word of running text: letters, hyphenated or not, with the punctuation
@@ -769,7 +881,7 @@ def _listing(parts: list[list[Line]]) -> str | None:
     advance = _monospaced(lines)
     if advance is None:
         return _structured(lines) if len(parts) == 1 else None
-    if _prose(lines):
+    if _prose(lines) or _wordy(lines):
         return None
     left = min(_start(line) for line in lines)
     indents = [max(round((_start(line) - left) / advance), 0) for line in lines]
@@ -787,15 +899,26 @@ def _listing(parts: list[list[Line]]) -> str | None:
 def _code_like(lines: Sequence[Line], indents: Sequence[int]) -> bool:
     """Whether monospaced lines read as code rather than a typed letter's
     address, date or subject: set with the symbols code is written in,
-    indented line by line, commands a line, or a configuration's keys."""
+    indented a level or a few line by line (a letter's date and closing
+    stand far to the right), or half of them commands, a configuration's
+    keys, lines starting with a lower-case name, with flags or paths, or a
+    program's records — a time, a commit, a file's permissions."""
     chars = [c for line in lines for c in line.text if not c.isspace()]
     texts = [line.text.strip() for line in lines]
     symbols = sum(c in _CODE_SYMBOLS for c in chars)
+
+    def half(pattern: re.Pattern[str]) -> bool:
+        return sum(bool(pattern.search(text)) for text in texts) * 2 >= len(texts)
+
     return (
         symbols >= _CODE_SYMBOL_SHARE * len(chars)
-        or sum(indent >= 2 for indent in indents) >= 2
-        or sum(bool(_COMMAND.match(text)) for text in texts) * 2 >= len(texts)
-        or sum(bool(_CONFIG_KEY.match(text)) for text in texts) * 2 >= len(texts)
+        or sum(2 <= indent <= _CODE_INDENT for indent in indents) >= 2
+        or half(_COMMAND)
+        or half(_CONFIG_KEY)
+        or half(_LOWER_NAME)
+        or half(_FLAG_OR_PATH)
+        or half(_RECORD)
+        or half(_STATEMENT)
     )
 
 
@@ -803,20 +926,37 @@ _CODE_SYMBOLS = frozenset("(){}[]=;<>_\\|#$@*&%+`~^")
 #: How many of a block's characters have to be such symbols, at least.
 _CODE_SYMBOL_SHARE = 0.04
 #: A configuration's key, as YAML and the like write it: `image: node:20`.
-_CONFIG_KEY = re.compile(r"(?:- )?[a-z_][\w.-]*:(?:\s|$)")
+_CONFIG_KEY = re.compile(r"^(?:- )?[a-z_][\w.-]*:(?:\s|$)")
+#: How far, in characters, code indents a line at most: a few levels.
+_CODE_INDENT = 16
+#: A line opening with a lower-case name, as a command's does: `aws s3 ls`.
+_LOWER_NAME = re.compile(r"^[a-z][\w.+-]*(?:\s|$)")
+#: A flag (`-Name`, `--force`) or a path (`s3://bucket/key`, `C:\\Temp`).
+_FLAG_OR_PATH = re.compile(r"(?:^|\s)--?[A-Za-z][\w-]*|\S/\S|\S\\\S")
+#: A database's statement: `CREATE DATABASE shop`, `SELECT * FROM kunden`.
+_STATEMENT = re.compile(
+    r"^(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|GRANT|REVOKE|USE|SHOW|WITH)\s"
+)
+#: A program's record: a time stamp, a commit, a file's permissions.
+_RECORD = re.compile(
+    r"^(?:\d{4}-\d\d-\d\d[ T]\d\d:\d\d|\d\d:\d\d:\d\d|[0-9a-f]{7,40}\s|[dl-][rwx-]{9}\s"
+    r"|[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d)"
+)
 
 
 def _structured(lines: Sequence[Line]) -> str | None:
     """A block's lines as code when they are written as code is, whatever
     font they are set in: JSON — braces or brackets around it, a key and its
     value a line — indented by how deep each line stands; an INI file's
-    sections and settings; or shell commands, a command a line."""
+    sections with their settings; or shell commands, a command a line."""
     texts = [line.text.strip() for line in lines]
     if len(texts) >= 2 and all(_COMMAND.match(text) for text in texts):
         return "\n".join(texts)
-    if any(_INI_SECTION.fullmatch(text) for text in texts) and all(
-        _INI_SECTION.fullmatch(text) or _INI_SETTING.fullmatch(text) for text in texts
-    ):
+    sections = sum(bool(_INI_SECTION.fullmatch(text)) for text in texts)
+    settings = sum(bool(_INI_SETTING.fullmatch(text)) for text in texts)
+    # A section with its settings: bracketed lines alone — `[Your Name]`,
+    # `[Anlage 1]`, `[Pause]` — are a template's or a transcript's.
+    if sections and settings and sections + settings == len(texts):
         return "\n".join(texts)
     if len(texts) < 3 or not texts[0].endswith(("{", "[")) or texts[-1].rstrip(",") not in "}]":
         return None
@@ -859,14 +999,15 @@ def _with_listings(
     """The page's blocks, the parts of a code listing that its blank lines
     cut into blocks of their own taken together as one listing: paragraphs
     one under the other, a blank line or two apart, set as tall, none
-    starting left of the first, and all in one monospaced font. Alone, a
-    part of a few short lines may say too little of its font."""
+    starting left of the first, each looking like code, and all in one
+    monospaced font. Alone, a part of a few short lines may say too little
+    of its font."""
     out: list[tuple[ScanBlock, list[Line], str | None]] = []
     index = 0
     while index < len(blocks):
         block, lines = blocks[index]
         run = [lines]
-        if block.kind == "paragraph":
+        if block.kind == "paragraph" and _listing_part(lines):
             height = statistics.median(line.box.height for line in lines)
             left = min(_start(line) for line in lines)
             after = index + 1
@@ -878,6 +1019,7 @@ def _with_listings(
                     or abs(statistics.median(line.box.height for line in more) - height)
                     > 0.05 * height
                     or min(_start(line) for line in more) < left - 0.5 * height
+                    or not _listing_part(more)
                     or not _agree(_told([line for part in [*run, more] for line in part]))
                 ):
                     break
@@ -896,6 +1038,36 @@ def _with_listings(
 
 #: How far under a listing's part, in line heights, its next part may go on.
 _LISTING_GAP = 2.5
+
+
+def _listing_part(lines: Sequence[Line]) -> bool:
+    """Whether a block may be a part of a listing: no running text, and code
+    by its look alone — a typed letter's address or a screenplay's scene
+    is none, however monospaced."""
+    return not _prose(lines) and not _wordy(lines) and _code_like(lines, [0] * len(lines))
+
+
+def _wordy(lines: Sequence[Line]) -> bool:
+    """Whether short lines still read as sentences — a screenplay's
+    dialogue, a poem, a typed note: nearly all their tokens are words, a
+    tenth of them a language's little words, and one ends a clause. Code
+    and commands are written in names, figures and symbols."""
+    words = [token for line in lines for token in line.text.split()]
+    if len(words) < _WORDY_TOKENS:
+        return False
+    plain = sum(bool(_WORD.fullmatch(token)) for token in words)
+    little = sum(
+        any(token.lower().strip(".,;:!?\"'()") in stop for stop in _STOPWORDS.values())
+        for token in words
+    )
+    ends = any(token[-1] in ".,;!?" for token in words)
+    return plain >= _WORDY_SHARE * len(words) and little >= _PROSE_LITTLE * len(words) and ends
+
+
+#: How many tokens short lines need at least to tell they are sentences,
+#: and how many of them words.
+_WORDY_TOKENS = 8
+_WORDY_SHARE = 0.9
 
 
 def _prose(lines: Sequence[Line]) -> bool:
@@ -974,8 +1146,11 @@ def _joined(lines: Sequence[Line], right: float, rtl: bool = False) -> list[Inli
     Two lines that each carry their own label — `Kundennummer: K-4711` over
     `Datum: 12.09.2026` — are two fields, however full the first one is.
     Lines written right to left (`rtl`) end at their left, and `right` is
-    then the column's left edge.
+    then the column's left edge. In running text, a line that leaves its
+    sentence open goes on in the next one that starts in lower case, however
+    much room a long word seemed to leave.
     """
+    flowing = _running(lines)
     content: list[Inline] = []
     for index, line in enumerate(lines):
         text = line.text.strip()
@@ -991,7 +1166,10 @@ def _joined(lines: Sequence[Line], right: float, rtl: bool = False) -> list[Inli
                 first = _first_word_width(line)
             needed = first + 0.35 * previous.box.height
             fields = _LABELLED.match(previous.text.strip()) and _LABELLED.match(text)
-            if room > needed or fields:
+            goes_on = (
+                flowing and text[:1].islower() and not _ENDS_SENTENCE.search(previous.text.strip())
+            )
+            if (room > needed and not goes_on) or fields:
                 content.append(Break())
             elif _glue(previous.text.strip(), text):
                 content.append(" ")
