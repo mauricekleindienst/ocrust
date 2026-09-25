@@ -92,6 +92,22 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   so a title over a table, a page full of footnotes and chapters numbered like
   the page stay what they are; a running head that repeats the title leaves
   the title on page 1.
+- **A table drawn with its borders is read by them**: a rule across ends a
+  row, a line with none above it carries the row on, and the rules down give
+  the columns, so a row that leaves a cell empty stays a row. A header of two
+  rows titles each column with its group (`2024 Umsatz`), and a browser's date
+  and title over a table running on from the page before stay out of it.
+- **Letters, fact boxes, lists and code read as what they are**: a letter's
+  address and its reference block keep a line each, apart from the subject and
+  the items; a paragraph beside a fact box or a list is a paragraph; a code
+  listing is a code block, and the text around it no heading; a drop cap
+  starts its paragraph again.
+- **Joins respect the script and the column**: Chinese and Japanese lines run
+  on without a space, a hyphen after an abbreviation stays (`IT-basierte`),
+  and a column under an abstract or beside a box gets no hard breaks.
+- **Office documents**: Word's ruby keeps its text and reading, legacy form
+  fields show their state and choice, `altChunk` content is read in place, and
+  hidden rows and columns of spreadsheets are left out like hidden sheets.
 
 ## 0.2.7 — 2026-09-24
 
