@@ -109,6 +109,11 @@ const ROW_GAP_JUMP: f32 = 0.5;
 /// the text's line spacing, up to one and a half lines, with nothing between.
 /// Rows set further apart than that are rows, however their cells end.
 const CONTINUATION_GAP: f32 = 0.3;
+/// How much of the shorter one's height two lines overlap by, at least, when
+/// they are the lines of one row set between each other's.
+const INTERLEAVED: f32 = 0.35;
+/// The same, when the two lines have their cells in different columns.
+const INTERLEAVED_APART: f32 = 0.25;
 
 /// A run of lines that reads as a table.
 pub(crate) struct Found {
@@ -169,12 +174,7 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32, rules: &[Rect]
                 &ruled[at..end],
                 text_height,
             );
-            let own_rows: Vec<Vec<Candidate>> = rows[at..end]
-                .iter()
-                .zip(&continues)
-                .filter(|(_, continues)| !**continues)
-                .map(|(row, _)| row.clone())
-                .collect();
+            let own_rows = whole_rows(&rows[at..end], &continues);
             // A table drawn with its borders says where its columns are,
             // however close its cells sit.
             let ruled_columns = rules
@@ -695,6 +695,18 @@ fn carries_on(
     i: usize,
     text_height: f32,
 ) -> bool {
+    carries_on_row(rows, lines, ruled, i, text_height, true)
+}
+
+/// [`carries_on`], looking at rows set at their foot only when `bottom`.
+fn carries_on_row(
+    rows: &[Vec<Candidate>],
+    lines: &[Line],
+    ruled: &[bool],
+    i: usize,
+    text_height: f32,
+    bottom: bool,
+) -> bool {
     if i == 0 || ruled[i] {
         return false;
     }
@@ -702,13 +714,55 @@ fn carries_on(
     if gap(i) > text_height * CONTINUATION_GAP {
         return false;
     }
-    let Some(uppers) = under_one_each(&rows[i], &rows[i - 1]) else {
-        return false;
-    };
     let rules_off = ruled.iter().skip(1).filter(|&&r| r).count();
     if rules_off >= 2 && rules_off * 3 >= rows.len() - 1 {
         return true;
     }
+    // A row whose one-line cells are centred beside a cell that wraps comes
+    // as lines set between each other's: the one-line cells overlap the
+    // wrapped cell's lines by half a line, where two rows never overlap.
+    // Not the run's first line: a label centred beside a header of two rows
+    // is the header's, which is read above the run. Lines whose cells stand
+    // in other columns need less to tell: a raised superscript stretches a
+    // line's box a quarter of a line into the one above.
+    let (upper, lower) = (&lines[i - 1].bbox, &lines[i].bbox);
+    let overlap = upper.vertical_overlap(lower) / upper.height().min(lower.height()).max(1.0);
+    let apart = rows[i].iter().all(|c| {
+        rows[i - 1]
+            .iter()
+            .all(|u| u.cell.bbox.horizontal_overlap(&c.cell.bbox) <= 0.0)
+    });
+    let interleaved = i >= 2 && (overlap >= INTERLEAVED || (apart && overlap >= INTERLEAVED_APART));
+    if interleaved {
+        return true;
+    }
+    // A row set at its foot, as a spreadsheet sets it: the line above holds
+    // only the first lines of the few cells that wrap, each going on — in
+    // words, not figures, and in lower case or finishing a broken word — in
+    // a cell of this row's. Unless that line carries on the row above it:
+    // then it is the end of that row's cell, not the start of this one's.
+    let goes_on = |upper: &Candidate, lower: &Candidate| {
+        let text = lower.cell.text.trim_start();
+        !figure(text)
+            && (broken_word(&upper.cell.text, text)
+                || (text.chars().next().is_some_and(char::is_lowercase)
+                    && filled(upper, lower, rows, text_height)))
+    };
+    if bottom
+        && rows[i - 1].len() * 2 <= rows[i].len()
+        && !carries_on_row(rows, lines, ruled, i - 1, text_height, false)
+        && under_one_each(&rows[i - 1], &rows[i]).is_some_and(|lowers| {
+            rows[i - 1]
+                .iter()
+                .zip(&lowers)
+                .all(|(upper, lower)| goes_on(upper, lower))
+        })
+    {
+        return true;
+    }
+    let Some(uppers) = under_one_each(&rows[i], &rows[i - 1]) else {
+        return false;
+    };
     let left = rows
         .iter()
         .flatten()
@@ -993,6 +1047,34 @@ fn columns_of(rows: &[Vec<Candidate>], gutter: f32) -> Option<Vec<(f32, f32)>> {
     (MIN_COLUMNS..=MAX_COLUMNS)
         .contains(&columns.len())
         .then_some(columns)
+}
+
+/// A run's rows whole: each with the cells of the lines that carry it on,
+/// joined into the cell they go on or set beside the others. A row whose
+/// one-line cells stand between a wrapped cell's lines has all its cells.
+fn whole_rows(rows: &[Vec<Candidate>], continues: &[bool]) -> Vec<Vec<Candidate>> {
+    let mut out: Vec<Vec<Candidate>> = Vec::new();
+    for (row, &carries_on) in rows.iter().zip(continues) {
+        let Some(whole) = out.last_mut().filter(|_| carries_on) else {
+            out.push(row.clone());
+            continue;
+        };
+        for candidate in row {
+            let over = whole
+                .iter_mut()
+                .find(|c| c.cell.bbox.horizontal_overlap(&candidate.cell.bbox) > 0.0);
+            match over {
+                Some(cell) => {
+                    cell.cell.text = join_wrapped(&cell.cell.text, &candidate.cell.text);
+                    cell.cell.bbox = cell.cell.bbox.union(&candidate.cell.bbox);
+                    cell.words.extend(candidate.words.iter().cloned());
+                }
+                None => whole.push(candidate.clone()),
+            }
+        }
+        whole.sort_by(|a, b| a.cell.bbox.x0.total_cmp(&b.cell.bbox.x0));
+    }
+    out
 }
 
 /// Whether enough of a run's rows carry more than one cell to be a table's.
@@ -1342,7 +1424,11 @@ fn cells_of(line: &Line, gutter: f32) -> Vec<Candidate> {
         let mut words: Vec<&crate::doc::Word> = line
             .words
             .iter()
-            .filter(|w| w.bbox.x0 >= part.bbox.x0 - 1.0 && w.bbox.x1 <= part.bbox.x1 + 1.0)
+            .filter(|w| {
+                w.bbox.x0 >= part.bbox.x0 - 1.0
+                    && w.bbox.x1 <= part.bbox.x1 + 1.0
+                    && w.bbox.vertical_overlap(&part.bbox) > 0.0
+            })
             .collect();
         if words.is_empty() {
             out.push(Candidate {
@@ -1621,6 +1707,48 @@ mod tests {
             ["Maximilian Berger", "", "max@example.de"]
         );
         assert_eq!(table.row_text(3), ["Jan Ott", "030 9876", ""]);
+    }
+
+    #[test]
+    fn a_row_centred_beside_a_cell_that_wraps_is_one_row() {
+        // The description wraps onto two lines; the row's other cells stand
+        // centred between them, as a browser sets a table by default.
+        let lines = vec![
+            row(
+                0.0,
+                &[
+                    ("Pos.", 0.0, 30.0),
+                    ("Beschreibung", 60.0, 200.0),
+                    ("Betrag", 300.0, 350.0),
+                ],
+            ),
+            row(14.0, &[("Wartung der Heizungsanlage", 60.0, 250.0)]),
+            row(20.0, &[("1", 0.0, 10.0), ("340,00", 300.0, 350.0)]),
+            row(26.0, &[("im Erdgeschoss", 60.0, 160.0)]),
+            row(
+                40.0,
+                &[
+                    ("2", 0.0, 10.0),
+                    ("Anfahrt", 60.0, 120.0),
+                    ("45,00", 305.0, 350.0),
+                ],
+            ),
+            row(
+                54.0,
+                &[
+                    ("3", 0.0, 10.0),
+                    ("Material", 60.0, 130.0),
+                    ("12,50", 305.0, 350.0),
+                ],
+            ),
+        ];
+        let table = detect(&lines, TEXT_HEIGHT).expect("a table");
+        assert_eq!(table.rows, 4);
+        assert_eq!(
+            table.row_text(1),
+            ["1", "Wartung der Heizungsanlage im Erdgeschoss", "340,00"]
+        );
+        assert_eq!(table.row_text(2), ["2", "Anfahrt", "45,00"]);
     }
 
     #[test]
@@ -2061,7 +2189,7 @@ mod tests {
         // covers every gutter. Counted as evidence it would merge the three
         // columns into one.
         let mut lines = price_list();
-        lines.insert(1, row(15.0, &[("Zubehoer", 0.0, 460.0)]));
+        lines.insert(1, row(10.0, &[("Zubehoer", 0.0, 460.0)]));
         let table = detect(&lines, TEXT_HEIGHT).expect("a table");
         assert_eq!(table.columns, 3, "the title does not erase the gutters");
         assert_eq!(table.rows, 4);

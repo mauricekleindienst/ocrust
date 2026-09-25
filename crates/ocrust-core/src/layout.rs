@@ -664,6 +664,22 @@ fn xy_cut(
         return;
     }
 
+    // Text across the full width over two columns or under them — a paper's
+    // abstract, a newsletter's lead, a note across the page — set closer to
+    // them than a horizontal cut needs: where the lines past the first or
+    // last few leave a gutter those cross, the region is cut there.
+    if sheet.exact && cfg.detect_columns {
+        let content_width = horizontal_span(&lines);
+        let min_gap = (scale * EXACT_GUTTER_FACTOR).max(content_width * EXACT_GUTTER_FRACTION);
+        if let Some(split) = spanning_edge(&lines, scale, min_gap) {
+            let (top, bottom): (Vec<Line>, Vec<Line>) =
+                lines.into_iter().partition(|l| l.bbox.center_y() < split);
+            xy_cut(top, sheet, cfg, max_merge_gap, depth + 1, out);
+            xy_cut(bottom, sheet, cfg, max_merge_gap, depth + 1, out);
+            return;
+        }
+    }
+
     // Vertical gutter: a column break.
     if cfg.detect_columns {
         let content_width = lines.iter().map(|l| l.bbox.x1).fold(f32::MIN, f32::max)
@@ -746,6 +762,66 @@ fn xy_cut(
     }
 
     emit_leaf(lines, cfg, max_merge_gap, out);
+}
+
+/// Where to cut lines that run across the full width off the columns under
+/// or over them: the height between them, when the lines past the first (or
+/// before the last) few leave a gutter at least `min_gap` wide with two
+/// lines on either side, every one of those few lines crosses it, and they
+/// end above (begin below) the rest.
+fn spanning_edge(lines: &[Line], scale: f32, min_gap: f32) -> Option<f32> {
+    let mut sorted: Vec<&Line> = lines.iter().collect();
+    sorted.sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0));
+    let n = sorted.len();
+    let cut = |edge: &[&Line], rest: &[&Line], edge_is_top: bool| -> Option<f32> {
+        let (edge_side, rest_side) = if edge_is_top {
+            (
+                edge.iter().map(|l| l.bbox.y1).fold(f32::MIN, f32::max),
+                rest.iter().map(|l| l.bbox.y0).fold(f32::MAX, f32::min),
+            )
+        } else {
+            (
+                edge.iter().map(|l| l.bbox.y0).fold(f32::MAX, f32::min),
+                rest.iter().map(|l| l.bbox.y1).fold(f32::MIN, f32::max),
+            )
+        };
+        let clear = if edge_is_top {
+            edge_side <= rest_side + scale * 0.3
+        } else {
+            edge_side >= rest_side - scale * 0.3
+        };
+        if !clear {
+            return None;
+        }
+        let mut spans: Vec<(f32, f32)> = rest.iter().map(|l| (l.bbox.x0, l.bbox.x1)).collect();
+        spans.sort_by(|a, b| cmp_f32(a.0, b.0));
+        let mut reach = spans.first()?.1;
+        for &(start, end) in &spans[1..] {
+            let (from, to) = (reach, start);
+            reach = reach.max(end);
+            if to - from <= min_gap {
+                continue;
+            }
+            let split = (from + to) / 2.0;
+            let left = rest.iter().filter(|l| l.bbox.center_x() < split).count();
+            let crossed = edge.iter().all(|l| l.bbox.x0 < from && l.bbox.x1 > to);
+            if left >= 2 && rest.len() - left >= 2 && crossed {
+                return Some((edge_side + rest_side) / 2.0);
+            }
+        }
+        None
+    };
+    for k in 1..n.saturating_sub(3) {
+        if let Some(split) = cut(&sorted[..k], &sorted[k..], true) {
+            return Some(split);
+        }
+    }
+    for k in 1..n.saturating_sub(3) {
+        if let Some(split) = cut(&sorted[n - k..], &sorted[..n - k], false) {
+            return Some(split);
+        }
+    }
+    None
 }
 
 /// Emits one region of the page: boxes on a shared baseline become one line.
@@ -1056,15 +1132,26 @@ fn merge_baselines(lines: Vec<Line>, min_overlap: f32, max_gap: f32) -> Vec<Line
     let mut group: Vec<Line> = Vec::new();
 
     for line in lines {
-        let shares_baseline = group.iter().any(|existing| {
-            let overlap = existing.bbox.vertical_overlap(&line.bbox);
-            let shorter = existing.bbox.height().min(line.bbox.height()).max(1.0);
-            overlap / shorter >= min_overlap
-        }) && group
-            .iter()
-            .map(|existing| (line.bbox.x0 - existing.bbox.x1).max(existing.bbox.x0 - line.bbox.x1))
-            .fold(f32::MAX, f32::min)
-            <= max_gap;
+        // Two boxes one above the other are two lines, however tall a box
+        // beside them is: a big step number or initial shares a band with
+        // each of the lines set beside it, and must not make them one.
+        let stacked = group.iter().any(|existing| {
+            existing.bbox.horizontal_overlap(&line.bbox)
+                > STACKED_OVERLAP * existing.bbox.width().min(line.bbox.width())
+        });
+        let shares_baseline = !stacked
+            && group.iter().any(|existing| {
+                let overlap = existing.bbox.vertical_overlap(&line.bbox);
+                let shorter = existing.bbox.height().min(line.bbox.height()).max(1.0);
+                overlap / shorter >= min_overlap
+            })
+            && group
+                .iter()
+                .map(|existing| {
+                    (line.bbox.x0 - existing.bbox.x1).max(existing.bbox.x0 - line.bbox.x1)
+                })
+                .fold(f32::MAX, f32::min)
+                <= max_gap;
         if shares_baseline {
             group.push(line);
         } else {
@@ -1079,6 +1166,10 @@ fn merge_baselines(lines: Vec<Line>, min_overlap: f32, max_gap: f32) -> Vec<Line
     }
     out
 }
+
+/// How much of the narrower box two boxes overlap by across, at most, to
+/// sit side by side on one baseline rather than one above the other.
+const STACKED_OVERLAP: f32 = 0.25;
 
 /// Joins boxes of one baseline group into a single line, left to right.
 fn join_group(mut group: Vec<Line>) -> Option<Line> {
@@ -2601,6 +2692,59 @@ mod tests {
             ],
         );
         assert_eq!(monospace_verdict(&prose), Some(false));
+    }
+
+    #[test]
+    fn a_big_number_beside_two_lines_leaves_them_two_lines() {
+        let lines = vec![
+            line_at("1", 0.0, 0.0, 30.0, 40.0),
+            line_at("Registrieren Sie sich mit Ihrer", 40.0, 5.0, 300.0, 15.0),
+            line_at(
+                "E-Mail-Adresse und einem Passwort.",
+                40.0,
+                20.0,
+                300.0,
+                30.0,
+            ),
+        ];
+        let merged = merge_baselines(lines, 0.5, f32::MAX);
+        let texts: Vec<&str> = merged.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "1 Registrieren Sie sich mit Ihrer",
+                "E-Mail-Adresse und einem Passwort."
+            ]
+        );
+    }
+
+    #[test]
+    fn full_width_text_close_over_two_columns_is_cut_off_them() {
+        let mut lines = vec![
+            line_at(
+                "Der Vorspann laeuft ueber beide Spalten der Seite",
+                0.0,
+                0.0,
+                500.0,
+                10.0,
+            ),
+            line_at(
+                "und endet knapp ueber ihnen ohne Abstand.",
+                0.0,
+                12.0,
+                480.0,
+                22.0,
+            ),
+        ];
+        for i in 0..3 {
+            let y = 24.0 + 12.0 * i as f32;
+            lines.push(line_at("linke Spalte mit Text", 0.0, y, 230.0, y + 10.0));
+            lines.push(line_at("rechte Spalte mit Text", 270.0, y, 500.0, y + 10.0));
+        }
+        let split = spanning_edge(&lines, 10.0, 20.0).expect("a cut under the lead");
+        assert!(split > 22.0 && split < 24.0, "{split}");
+        // No text across the gutter, no cut: the columns are read as they are.
+        assert!(spanning_edge(&lines[2..], 10.0, 20.0).is_none());
     }
 
     #[test]
