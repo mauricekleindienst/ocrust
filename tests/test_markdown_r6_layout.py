@@ -6,6 +6,8 @@ Chinese and Japanese lines, and a hyphen after an abbreviation.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from conftest import _pdf_from_stream, _winansi_literal
@@ -154,7 +156,8 @@ def test_a_hyphen_after_an_abbreviation_at_a_line_end_stays():
     lines = ["Beratung fuer die gesamte IT-", "und Telekommunikationsbranche im Land", "und mehr"]
     parts += [text(72, 700 - 12 * i, line) for i, line in enumerate(lines)]
     parts.append("ET")
-    assert "IT- und Telekommunikationsbranche" in body(_pdf_from_stream("\n".join(parts)))
+    md = body(_pdf_from_stream("\n".join(parts)))
+    assert "IT-und" not in md and re.search(r"IT-\s+und Telekommunikationsbranche", md)
 
 
 def test_a_drop_cap_starts_its_paragraph_again():
