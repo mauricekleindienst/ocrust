@@ -758,7 +758,7 @@ def _write(target: Path, data: bytes | str, *, retries: int = 2, delay: float = 
         # and error are written through the streams this process already has
         # — reopening them would truncate a file the shell appends to, and
         # may not be allowed at all; anything else is opened to append.
-        stream = _STANDARD_STREAMS.get(str(target))
+        stream = _standard_stream(target)
         if stream is not None:
             handle = sys.stdout if stream == 1 else sys.stderr
             if isinstance(data, str):
@@ -1034,6 +1034,14 @@ _STANDARD_STREAMS = {
 }
 
 
+def _standard_stream(path: Path | str | None) -> int | None:
+    """Which standard stream `path` names, if any — spelled with forward
+    slashes on every system, so `-o /dev/stdout` means the same on Windows."""
+    if path is None:
+        return None
+    return _STANDARD_STREAMS.get(Path(path).as_posix())
+
+
 def _special_file(path: Path) -> bool:
     """Whether `path` is a stream rather than a file to replace: standard
     output or error by any of their names — `/dev/stdout` is a regular file
@@ -1041,7 +1049,7 @@ def _special_file(path: Path) -> bool:
     would lose what `>>` was appending to — or anything that exists and is
     neither a regular file nor a folder: a device, a named pipe. `/dev/shm`
     and the files in it are what they look like."""
-    if str(path) in _STANDARD_STREAMS:
+    if _standard_stream(path) is not None:
         return True
     try:
         return path.exists() and not path.is_file() and not path.is_dir()
@@ -2346,7 +2354,7 @@ def _cmd_findings(args: argparse.Namespace, marking: bool, command: str) -> int:
 
     buffer = io.StringIO()
     stream_file = None
-    standard = _STANDARD_STREAMS.get(str(args.output)) if streaming else None
+    standard = _standard_stream(args.output) if streaming else None
     if standard is not None:
         stream_file = None
         out: Any = sys.stdout if standard == 1 else sys.stderr
@@ -2602,7 +2610,7 @@ def _markdown_one(
     """One document, to stdout or to one file; no index, nothing kept in sync."""
     from . import markdown
 
-    if options.assets and (args.output is None or str(args.output) in _STANDARD_STREAMS):
+    if options.assets and (args.output is None or _standard_stream(args.output) is not None):
         _fail("--assets keeps the pictures beside the note: give it a file with -o note.md")
         return 2
     try:
