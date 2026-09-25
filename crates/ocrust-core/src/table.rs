@@ -1179,12 +1179,37 @@ fn grid(
             }
         }
     }
+    // A table written right to left starts at its right: its first column
+    // is the rightmost, as its source has it.
+    let written: Vec<&Cell> = cells
+        .iter()
+        .filter(|c| c.text.chars().any(char::is_alphabetic))
+        .collect();
+    if written.iter().filter(|c| right_to_left(&c.text)).count() * 2 > written.len() {
+        for cell in &mut cells {
+            cell.column = columns.len() - cell.column - cell.column_span;
+        }
+    }
     cells.sort_by_key(|c| (c.row, c.column));
     Table {
         rows: if rows.is_empty() { 0 } else { row + 1 },
         columns: columns.len(),
         cells,
     }
+}
+
+/// Whether `text` is written right to left: more of its letters are Hebrew
+/// or Arabic than not.
+fn right_to_left(text: &str) -> bool {
+    let rtl = |c: char| {
+        matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF) && c.is_alphabetic()
+    };
+    let rights = text.chars().filter(|&c| rtl(c)).count();
+    let lefts = text
+        .chars()
+        .filter(|&c| c.is_alphabetic() && !rtl(c))
+        .count();
+    rights > lefts
 }
 
 /// A cell's text and the next line of it: a word broken at the line end with a
@@ -1472,12 +1497,14 @@ fn join(run: &[&crate::doc::Word], fallback: Rect) -> Segment {
         .map(|w| w.bbox)
         .reduce(|a, b| a.union(&b))
         .unwrap_or(fallback);
+    let mut words: Vec<&str> = run.iter().map(|w| w.text.as_str()).collect();
+    // The words stand on the page left to right; a cell written right to
+    // left is read from its right.
+    if right_to_left(&words.join(" ")) {
+        words.reverse();
+    }
     Segment {
-        text: run
-            .iter()
-            .map(|w| w.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
+        text: words.join(" "),
         bbox,
         confidence: run.iter().map(|w| w.confidence).sum::<f32>() / run.len().max(1) as f32,
     }
@@ -1496,6 +1523,7 @@ mod tests {
         assert_eq!(join_wrapped("Vor-", "und Nachname"), "Vor- und Nachname");
         assert_eq!(join_wrapped("Schmidt,", "Weber"), "Schmidt, Weber");
         assert_eq!(join_wrapped("E-Mail-", "Adresse"), "E-Mail-Adresse");
+        assert!(right_to_left("דוד כהן") && !right_to_left("Office 365 כהן"));
         assert_eq!(
             join_wrapped("für IT-", "basierte Dienste"),
             "für IT-basierte Dienste"
@@ -1749,6 +1777,43 @@ mod tests {
             ["1", "Wartung der Heizungsanlage im Erdgeschoss", "340,00"]
         );
         assert_eq!(table.row_text(2), ["2", "Anfahrt", "45,00"]);
+    }
+
+    #[test]
+    fn a_table_written_right_to_left_reads_from_its_right() {
+        // As a page draws it: the name's two words left to right on the
+        // page, the phone number in the leftmost column.
+        let cells = |y: f32, phone: &str, last: &str, first: &str, role: &str| {
+            let mut line = row(
+                y,
+                &[
+                    (phone, 0.0, 80.0),
+                    (role, 150.0, 220.0),
+                    (&format!("{last} {first}"), 300.0, 380.0),
+                ],
+            );
+            line.words = [
+                (phone, 0.0, 80.0),
+                (role, 150.0, 220.0),
+                (last, 300.0, 335.0),
+                (first, 345.0, 380.0),
+            ]
+            .iter()
+            .map(|(t, x0, x1)| Word {
+                text: (*t).into(),
+                bbox: Rect::new(*x0, y, *x1, y + TEXT_HEIGHT),
+                confidence: 1.0,
+            })
+            .collect();
+            line
+        };
+        let lines = vec![
+            cells(0.0, "טלפון", "שם", "מלא", "תפקיד"),
+            cells(14.0, "03-1234567", "כהן", "דוד", "מנכ\"ל"),
+            cells(28.0, "03-7654321", "לוי", "שרה", "מנהלת"),
+        ];
+        let table = detect(&lines, TEXT_HEIGHT).expect("a table");
+        assert_eq!(table.row_text(1), ["דוד כהן", "מנכ\"ל", "03-1234567"]);
     }
 
     #[test]

@@ -472,28 +472,50 @@ impl TextLayer {
             }
             let height = line.bbox.height();
             let middle = line.bbox.y0 + 0.55 * height;
+            // A line read right to left has its bullet at its right.
+            let rtl = {
+                let rights = line.text.chars().filter(|&c| right_to_left(c)).count();
+                let lefts = line
+                    .text
+                    .chars()
+                    .filter(|&c| c.is_alphabetic() && !right_to_left(c))
+                    .count();
+                rights > lefts
+            };
             let found = self.marks.iter().enumerate().find(|(i, mark)| {
                 let size = mark.width().max(mark.height());
                 let centre = (mark.y0 + mark.y1) / 2.0;
+                let beside = if rtl {
+                    mark.x0 >= line.bbox.x1 - 1.0 && mark.x0 - line.bbox.x1 <= 2.5 * height
+                } else {
+                    mark.x1 <= line.bbox.x0 + 1.0 && line.bbox.x0 - mark.x1 <= 2.5 * height
+                };
                 !used[*i]
                     && size <= 0.6 * height
-                    && mark.x1 <= line.bbox.x0 + 1.0
-                    && line.bbox.x0 - mark.x1 <= 2.5 * height
+                    && beside
                     && (centre - middle).abs() <= 0.3 * height
             });
             if let Some((i, mark)) = found {
                 used[i] = true;
                 line.text = format!("• {}", line.text);
-                line.words.insert(
-                    0,
-                    Word {
-                        text: "•".to_string(),
-                        bbox: *mark,
-                        confidence: 1.0,
-                    },
-                );
+                let bullet = Word {
+                    text: "•".to_string(),
+                    bbox: *mark,
+                    confidence: 1.0,
+                };
+                // Words stay in page order, left to right.
+                if rtl {
+                    line.words.push(bullet);
+                } else {
+                    line.words.insert(0, bullet);
+                }
                 line.bbox = line.bbox.union(mark);
-                if let Some(first) = line.segments.first_mut() {
+                let opening = if rtl {
+                    line.segments.last_mut()
+                } else {
+                    line.segments.first_mut()
+                };
+                if let Some(first) = opening {
                     first.text = format!("• {}", first.text);
                     first.bbox = first.bbox.union(mark);
                 }
@@ -1466,12 +1488,34 @@ fn reading_order(pieces: &[Piece]) -> Option<Vec<(usize, bool)>> {
     // The line's direction: a paragraph starts with a letter of its own
     // direction, which stands at the right end of a line read right to left
     // and at the left end of one read left to right. Where the letters at
-    // both ends agree, so does the line; where not, most of its letters say.
+    // both ends agree, so does the line; where not, most of its words say —
+    // words, not letters: a web address at the end of a Hebrew sentence has
+    // more letters than the sentence's words.
     let mut strong = class.iter().filter(|&&c| matches!(c, Right | Left));
     let rtl = match (strong.next(), strong.next_back()) {
         (Some(Right), Some(Right)) => true,
         (Some(Left), Some(Left)) => false,
-        _ => rights >= class.iter().filter(|&&c| c == Left).count(),
+        _ => {
+            let (mut right_words, mut left_words) = (0usize, 0usize);
+            let mut word: Option<Direction> = None;
+            for (i, piece) in pieces.iter().enumerate() {
+                if !matches!(piece, Piece::Char(_)) {
+                    match word.take() {
+                        Some(Right) => right_words += 1,
+                        Some(Left) => left_words += 1,
+                        _ => {}
+                    }
+                } else if word.is_none() && matches!(class[i], Right | Left) {
+                    word = Some(class[i]);
+                }
+            }
+            match word {
+                Some(Right) => right_words += 1,
+                Some(Left) => left_words += 1,
+                _ => {}
+            }
+            right_words >= left_words
+        }
     };
     // The nearest letter from `i` towards `step`, if any.
     let letter = |class: &[Direction], i: usize, step: isize| {
@@ -3126,6 +3170,11 @@ mod tests {
         // A Hebrew name in German text.
         let lines = layer(spaced("Kontakt: ןהכ דוד (Leitung)", 100.0, 200.0, 20.0)).lines(false);
         assert_eq!(lines[0].text, "Kontakt: דוד כהן (Leitung)");
+        // A Hebrew sentence ending in a web address: its words, not the
+        // address's many letters, say which way it reads.
+        let visual = "www.example.co.il/reports רתאב ןימז חודה";
+        let lines = layer(spaced(visual, 100.0, 200.0, 20.0)).lines(false);
+        assert_eq!(lines[0].text, "הדוח זמין באתר www.example.co.il/reports");
         // Arabic shapes are the letters they shape.
         assert_eq!(arabic_letters("ﺗﻘﺮﻳﺮ ﻻ ﷲ".to_string()), "تقرير لا الله");
         assert_eq!(arabic_letters("Bericht".to_string()), "Bericht");

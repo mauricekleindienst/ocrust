@@ -111,6 +111,12 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   superscripts (`mc²`), hollow bullets open list items, ZapfDingbats marks
   and form check boxes read ✔ ✘ ☒ ☐, Hebrew and Arabic come out in reading
   order, and vertical Japanese is read column by column.
+- **Tables whose cells are centred or set at their foot keep their rows**:
+  a wrapped cell's lines and the row's one-line cells between them are one
+  row, in HTML's default centring as in a spreadsheet's; numbered steps, KPI
+  boxes and an FAQ's big Q and A beside their text no longer join its lines;
+  text across the page close over two columns is cut off them; and a table
+  written right to left starts at its right, its cells in reading order.
 - **Office documents**: Word's ruby keeps its text and reading, legacy form
   fields show their state and choice, `altChunk` content is read in place, and
   hidden rows and columns of spreadsheets are left out like hidden sheets.

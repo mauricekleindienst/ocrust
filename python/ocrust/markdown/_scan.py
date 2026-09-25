@@ -282,7 +282,10 @@ def _page(
         if listing is not None:
             out.append(Code(listing))
             continue
-        out.append(Paragraph(_joined(lines, _right_edge(lines, columns))))
+        if _right_to_left(lines):
+            out.append(Paragraph(_joined(lines, _left_edge(lines, columns), rtl=True)))
+        else:
+            out.append(Paragraph(_joined(lines, _right_edge(lines, columns))))
     flush_list()
     return out
 
@@ -395,6 +398,38 @@ def _listing(lines: Sequence[Line]) -> str | None:
     return "\n".join(" " * i + line.text.strip() for i, line in zip(indents, lines, strict=True))
 
 
+#: Letters of the scripts written right to left: Hebrew and Arabic.
+_RIGHT_TO_LEFT = re.compile("[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufeff]")
+
+
+def _right_to_left(lines: Sequence[Line]) -> bool:
+    """Whether a block is written right to left: more of its letters are
+    Hebrew or Arabic than not."""
+    text = "".join(line.text for line in lines)
+    rights = sum(1 for c in text if c.isalpha() and _RIGHT_TO_LEFT.match(c))
+    return rights * 2 > sum(1 for c in text if c.isalpha())
+
+
+def _left_edge(lines: list[Line], columns: _Columns) -> float:
+    """Where the column a block written right to left sits in begins: as
+    `_right_edge`, from the other side — its lines end at their left."""
+    x0, y0, x1, y1 = _extent(lines)
+    left = x0
+    same_end = 2 * max(line.box.height for line in lines)
+    for start, end in columns.paragraphs:
+        overlap = min(x1, end) - max(x0, start)
+        if overlap > 0.5 * min(x1 - x0, end - start) and abs(end - x1) <= same_end:
+            left = min(left, start)
+    beside = [
+        bx1
+        for _, by0, bx1, by1 in columns.blocks
+        if bx1 <= x0 + 1 and min(y1, by1) - max(y0, by0) > 0
+    ]
+    if beside:
+        left = min(x0, max(left, max(beside)))
+    return left
+
+
 def _first_word_width(line: Line) -> float:
     if line.words:
         return line.words[0].box.width
@@ -403,7 +438,7 @@ def _first_word_width(line: Line) -> float:
     return line.box.width * len(word) / max(len(text), 1)
 
 
-def _joined(lines: Sequence[Line], right: float) -> list[Inline]:
+def _joined(lines: Sequence[Line], right: float, rtl: bool = False) -> list[Inline]:
     """A paragraph's lines as one run of text, with a line break kept only
     where the line ended although the next line's first word would have fit.
 
@@ -411,6 +446,8 @@ def _joined(lines: Sequence[Line], right: float) -> list[Inline]:
     signature — tells itself apart from one the column was simply full at.
     Two lines that each carry their own label — `Kundennummer: K-4711` over
     `Datum: 12.09.2026` — are two fields, however full the first one is.
+    Lines written right to left (`rtl`) end at their left, and `right` is
+    then the column's left edge.
     """
     content: list[Inline] = []
     for index, line in enumerate(lines):
@@ -419,8 +456,13 @@ def _joined(lines: Sequence[Line], right: float) -> list[Inline]:
             continue
         if content:
             previous = lines[index - 1]
-            room = right - previous.box.x1
-            needed = _first_word_width(line) + 0.35 * previous.box.height
+            if rtl:
+                room = previous.box.x0 - right
+                first = line.words[-1].box.width if line.words else _first_word_width(line)
+            else:
+                room = right - previous.box.x1
+                first = _first_word_width(line)
+            needed = first + 0.35 * previous.box.height
             fields = _LABELLED.match(previous.text.strip()) and _LABELLED.match(text)
             if room > needed or fields:
                 content.append(Break())
@@ -448,17 +490,20 @@ def _items(lines: list[Line], columns: _Columns) -> list[_Item]:
             groups.append([line])
         else:
             groups[-1].append(line)
-    right = _right_edge(lines, columns)
+    rtl = _right_to_left(lines)
+    edge = _left_edge(lines, columns) if rtl else _right_edge(lines, columns)
     for group in groups:
         first = group[0].text
         numbered = _ENUMERATOR.match(first)
         bullet = None if numbered else _BULLET.match(first)
         marker = numbered or bullet
         head = first[marker.end() :] if marker else first
-        content = _joined([_with_text(group[0], head), *group[1:]], right)
+        content = _joined([_with_text(group[0], head), *group[1:]], edge, rtl=rtl)
         items.append(
             _Item(
-                x=group[0].box.x0,
+                # Indented from the side a line starts at: the right, for
+                # one written right to left.
+                x=-group[0].box.x1 if rtl else group[0].box.x0,
                 ordered=numbered is not None,
                 number=int(numbered.group(1)) if numbered else 1,
                 content=content,
