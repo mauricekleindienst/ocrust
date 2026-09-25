@@ -136,6 +136,58 @@ pub struct TextLayer {
 }
 
 impl TextLayer {
+    /// Turns the layer so that the text most of the page is set in reads left
+    /// to right: a table set sideways, a landscape page in a portrait
+    /// document, a page rotated over upright content. The page is read as it
+    /// is meant to be read; lines set otherwise stay at their angle.
+    fn turn_upright(&mut self) {
+        let mut quarters = [0usize; 4];
+        for glyph in self.glyphs.iter().filter(|g| !g.text.trim().is_empty()) {
+            let quarter = ((glyph.angle() / 90.0).round() as i64).rem_euclid(4) as usize;
+            quarters[quarter] += 1;
+        }
+        let total: usize = quarters.iter().sum();
+        let (quarter, count) = quarters
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by_key(|&(_, n)| n)
+            .unwrap_or((0, 0));
+        if quarter == 0 || total == 0 || count * 10 < total * 6 {
+            return;
+        }
+        let (w, h) = (self.width, self.height);
+        // Each point turned back by the text's angle, into the turned page.
+        let point = |p: KPoint| match quarter {
+            1 => KPoint::new(p.y, w - p.x),
+            2 => KPoint::new(w - p.x, h - p.y),
+            _ => KPoint::new(h - p.y, p.x),
+        };
+        let vector = |v: Vec2| match quarter {
+            1 => Vec2::new(v.y, -v.x),
+            2 => Vec2::new(-v.x, -v.y),
+            _ => Vec2::new(-v.y, v.x),
+        };
+        for glyph in &mut self.glyphs {
+            glyph.origin = point(glyph.origin);
+            glyph.end = point(glyph.end);
+            glyph.up = vector(glyph.up);
+        }
+        for mark in &mut self.marks {
+            let a = point(KPoint::new(f64::from(mark.x0), f64::from(mark.y0)));
+            let b = point(KPoint::new(f64::from(mark.x1), f64::from(mark.y1)));
+            *mark = Rect::new(
+                a.x.min(b.x) as f32,
+                a.y.min(b.y) as f32,
+                a.x.max(b.x) as f32,
+                a.y.max(b.y) as f32,
+            );
+        }
+        if quarter != 2 {
+            std::mem::swap(&mut self.width, &mut self.height);
+        }
+    }
+
     /// The page's size in pixels, as the renderer would make it.
     pub fn size(&self) -> (u32, u32) {
         (self.width.max(1.0) as u32, self.height.max(1.0) as u32)
@@ -233,6 +285,7 @@ impl TextLayer {
             }));
         }
         self.restore_bullets(&mut lines);
+        attach_glyph_bullets(&mut lines);
         lines
     }
 
@@ -318,6 +371,70 @@ impl TextLayer {
                 }
             }
         }
+    }
+}
+
+/// Characters a list item is drawn with as a glyph of their own.
+const GLYPH_BULLETS: &[&str] = &["•", "▪", "●", "■", "◦", "‣", "➢", "∙"];
+
+/// Puts a bullet drawn as a glyph of its own, an em or two left of its item —
+/// a symbol font's bullet, set at a tab stop — back in front of the item: a
+/// list, not a table of bullets and items.
+fn attach_glyph_bullets(lines: &mut Vec<Line>) {
+    let is_bullet = |text: &str| GLYPH_BULLETS.contains(&text.trim());
+    // The bullet a cell of its own within the item's line.
+    for line in lines.iter_mut() {
+        let height = line.bbox.height();
+        if line.segments.len() >= 2
+            && is_bullet(&line.segments[0].text)
+            && line.segments[1].bbox.x0 - line.segments[0].bbox.x1 <= 2.5 * height
+        {
+            let bullet = line.segments.remove(0);
+            let first = &mut line.segments[0];
+            first.text = format!("{} {}", bullet.text.trim(), first.text);
+            first.bbox = first.bbox.union(&bullet.bbox);
+        }
+    }
+    // The bullet a line of its own beside the item's.
+    let mut index = 0;
+    while index < lines.len() {
+        let bullet = &lines[index];
+        let height = bullet.bbox.height();
+        if !is_bullet(&bullet.text) || bullet.angle.abs() > 3.0 {
+            index += 1;
+            continue;
+        }
+        let item = (0..lines.len())
+            .filter(|&other| other != index)
+            .filter(|&other| {
+                let line = &lines[other];
+                let overlap = line.bbox.vertical_overlap(&bullet.bbox);
+                overlap >= 0.5 * height.min(line.bbox.height())
+                    && line.bbox.x0 >= bullet.bbox.x1 - 1.0
+                    && line.bbox.x0 - bullet.bbox.x1 <= 2.5 * height.max(line.bbox.height())
+            })
+            .min_by(|&a, &b| lines[a].bbox.x0.total_cmp(&lines[b].bbox.x0));
+        let Some(item) = item else {
+            index += 1;
+            continue;
+        };
+        let bullet = lines.remove(index);
+        let item = &mut lines[if item > index { item - 1 } else { item }];
+        let mark = bullet.text.trim().to_string();
+        item.text = format!("{mark} {}", item.text);
+        item.words.insert(
+            0,
+            Word {
+                text: mark.clone(),
+                bbox: bullet.bbox,
+                confidence: 1.0,
+            },
+        );
+        if let Some(first) = item.segments.first_mut() {
+            first.text = format!("{mark} {}", first.text);
+            first.bbox = first.bbox.union(&bullet.bbox);
+        }
+        item.bbox = item.bbox.union(&bullet.bbox);
     }
 }
 
@@ -684,18 +801,18 @@ fn join_word_gaps(runs: Vec<Run>, spaces_set: bool) -> Vec<Run> {
         // The nearest baseline above and below, a line's distance away, of
         // the lines that reach into the gap at all: a line of the next column
         // over is no neighbour of this one.
-        let neighbour = |above: bool| {
+        let neighbour = |from: f64, above: bool| {
             let mut best: Option<f64> = None;
             for (c, &(cy, cx0, cx1)) in spans.iter().enumerate() {
                 if !upright[c] || c == a || c == b || cx1 < gap_left || cx0 > gap_right {
                     continue;
                 }
-                let d = if above { y - cy } else { cy - y };
+                let d = if above { from - cy } else { cy - from };
                 if d > 0.6 * size && d < 2.5 * size && best.is_none_or(|bd| d < bd) {
                     best = Some(d);
                 }
             }
-            best.map(|d| if above { y - d } else { y + d })
+            best.map(|d| if above { from - d } else { from + d })
         };
         let covered = |line_y: f64| {
             spans.iter().enumerate().any(|(c, &(cy, x0, x1))| {
@@ -704,12 +821,20 @@ fn join_word_gaps(runs: Vec<Run>, spaces_set: bool) -> Vec<Run> {
         };
         // A corridor is white above and below; a word gap has letters on at
         // least one side (both, as often as not — but the neighbouring line
-        // may have a word gap of its own just there). A line on its own keeps
-        // the split its gap earned.
-        let word_gap = [neighbour(true), neighbour(false)]
+        // may have a word gap of its own just there). White two lines deep on
+        // one side is a corridor after all: the gutter of a table under its
+        // lead-in line, not a word gap the next line happens to share. A line
+        // on its own keeps the split its gap earned.
+        let sides: Vec<(bool, bool)> = [true, false]
             .into_iter()
-            .flatten()
-            .any(covered);
+            .filter_map(|above| {
+                let near = neighbour(y, above)?;
+                let far = neighbour(near, above).is_some_and(|far| !covered(far));
+                Some((covered(near), far))
+            })
+            .collect();
+        let word_gap = sides.iter().any(|(near, _)| *near)
+            && !sides.iter().any(|(near, far_white)| !near && *far_white);
         if word_gap {
             join.push((a, b));
         }
@@ -781,6 +906,49 @@ fn follows(run: &Run, next: &Run) -> bool {
 /// The device that draws nothing and writes down every glyph.
 struct Collector {
     layer: TextLayer,
+    /// What each font's private-use characters stand for, by font.
+    fonts: std::collections::HashMap<u128, SymbolFont>,
+    /// Of fonts whose name is not known: how many glyphs each drew, and which
+    /// of them were private-use characters left as they are.
+    unnamed: std::collections::HashMap<u128, (usize, Vec<(usize, char)>)>,
+}
+
+impl Collector {
+    /// A font whose name is not known and that drew nothing but private-use
+    /// characters from Wingdings' bullets, each at the start of its line — a
+    /// bullet font, set a glyph at a time before each item: those glyphs are
+    /// bullets. Symbol's θ in a sentence has text before it.
+    fn settle_unnamed_fonts(&mut self) {
+        let glyphs = &self.layer.glyphs;
+        let opens_a_line = |index: usize| {
+            let glyph = &glyphs[index];
+            let size = glyph.size().max(1.0);
+            let b = glyph.baseline();
+            let n = Vec2::new(-b.y, b.x);
+            !glyphs.iter().enumerate().any(|(other, g)| {
+                let rel = g.end - glyph.origin;
+                other != index
+                    && !g.text.trim().is_empty()
+                    && rel.dot(n).abs() < 0.3 * size
+                    && (-0.6 * size..=0.1 * size).contains(&rel.dot(b))
+            })
+        };
+        let mut bullets_at: Vec<usize> = Vec::new();
+        for (total, private) in self.unnamed.values() {
+            let bullets = private.iter().all(|&(index, c)| {
+                private_use(c, SymbolFont::Dingbats) == Some('•') && opens_a_line(index)
+            });
+            if *total == 0 || private.len() != *total || !bullets {
+                continue;
+            }
+            bullets_at.extend(private.iter().map(|&(index, _)| index));
+        }
+        for index in bullets_at {
+            let glyph = &mut self.layer.glyphs[index];
+            glyph.text = "•".into();
+            glyph.mapped = true;
+        }
+    }
 }
 
 impl<'a> Device<'a> for Collector {
@@ -829,18 +997,41 @@ impl<'a> Device<'a> for Collector {
         .filter(|w: &f64| w.is_finite() && *w > 0.0)
         .unwrap_or(0.5 * UNITS_PER_EM);
         let end = full * KPoint::new(advance, 0.0);
+        let (font, key) = match glyph {
+            Glyph::Outline(g) => {
+                let key = g.font_cache_key();
+                let font = *self.fonts.entry(key).or_insert_with(|| {
+                    symbol_font(g.font_data().and_then(|d| d.postscript_name).as_deref())
+                });
+                (font, Some(key))
+            }
+            Glyph::Type3(_) => (SymbolFont::Other, None),
+        };
         let (text, mapped) = match glyph.as_unicode() {
             Some(BfString::Char(c)) => {
-                let c = symbol_bullet(c).unwrap_or(c);
+                let c = private_use(c, font).unwrap_or(c);
                 (unligature(c.to_string()), readable(c))
             }
             Some(BfString::String(s)) => {
-                let s: String = s.chars().map(|c| symbol_bullet(c).unwrap_or(c)).collect();
+                let s: String = s
+                    .chars()
+                    .map(|c| private_use(c, font).unwrap_or(c))
+                    .collect();
                 let ok = !s.is_empty() && s.chars().all(readable);
                 (unligature(s), ok)
             }
             None => ("\u{FFFD}".to_string(), false),
         };
+        if let (SymbolFont::Other, Some(key)) = (font, key) {
+            let entry = self.unnamed.entry(key).or_default();
+            entry.0 += 1;
+            let mut chars = text.chars();
+            if let (Some(c), None) = (chars.next(), chars.next()) {
+                if (0xF020..=0xF0FF).contains(&(c as u32)) {
+                    entry.1.push((self.layer.glyphs.len(), c));
+                }
+            }
+        }
         self.layer.glyphs.push(TextGlyph {
             text,
             origin,
@@ -879,12 +1070,60 @@ fn unligature(text: String) -> String {
         .collect()
 }
 
-/// The bullets Word and PowerPoint draw from the Symbol and Wingdings fonts,
-/// which map them into the Private Use Area: a bullet is what they show.
-/// Only the ones no letter of those fonts shares: Symbol's θ and ν sit where
-/// Wingdings has its squares, and stay what they are.
-fn symbol_bullet(c: char) -> Option<char> {
-    matches!(c, '\u{F0B7}' | '\u{F0A7}' | '\u{F0D8}' | '\u{F0FC}').then_some('•')
+/// What a font's private-use characters stand for. Word and PowerPoint set
+/// Symbol's Greek letters and Wingdings' bullets at the code points of the
+/// Private Use Area, U+F020 to U+F0FF; which font drew one says which it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SymbolFont {
+    Symbol,
+    Dingbats,
+    Other,
+}
+
+fn symbol_font(name: Option<&str>) -> SymbolFont {
+    let name = name.unwrap_or("").to_ascii_lowercase();
+    if name.contains("wingdings") || name.contains("webdings") || name.contains("dingbat") {
+        SymbolFont::Dingbats
+    } else if name.contains("symbol") {
+        SymbolFont::Symbol
+    } else {
+        SymbolFont::Other
+    }
+}
+
+/// A private-use character as what it shows: Symbol's letters and signs,
+/// Wingdings' bullets and ticks. Where the font is not known, only the
+/// bullets no letter of either font shares.
+fn private_use(c: char, font: SymbolFont) -> Option<char> {
+    let code = c as u32;
+    if !(0xF020..=0xF0FF).contains(&code) {
+        return None;
+    }
+    let byte = (code - 0xF000) as u8;
+    match font {
+        SymbolFont::Symbol => symbol_char(byte),
+        SymbolFont::Dingbats => match byte {
+            0xFC => Some('✓'),
+            0xFB => Some('✗'),
+            0x6C | 0x6E | 0x6F | 0x71 | 0x75 | 0x76 | 0x77 | 0x9F | 0xA1 | 0xA2 | 0xA7 | 0xA8
+            | 0xD8 => Some('•'),
+            _ => None,
+        },
+        SymbolFont::Other => matches!(byte, 0xB7 | 0xA7 | 0xD8 | 0xFC).then_some('•'),
+    }
+}
+
+/// The Symbol font's encoding, from 0x20: Greek letters, operators, arrows.
+fn symbol_char(byte: u8) -> Option<char> {
+    const LOW: &str = " !∀#∃%&∋()∗+,−./0123456789:;<=>?≅ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟΠΘΡΣΤΥςΩΞΨΖ[∴]⊥_‾αβχδεφγηιϕκλμνοπθρστυϖωξψζ{|}∼";
+    const HIGH: &str = "€ϒ′≤⁄∞ƒ♣♦♥♠↔←↑→↓°±″≥×∝∂•÷≠≡≈…⏐⎯↵ℵℑℜ℘⊗⊕∅∩∪⊃⊇⊄⊂⊆∈∉∠∇®©™∏√⋅¬∧∨⇔⇐⇑⇒⇓◊〈®©™∑";
+    match byte {
+        0x20..=0x7E => LOW.chars().nth(usize::from(byte - 0x20)),
+        0xA0..=0xE5 => HIGH.chars().nth(usize::from(byte - 0xA0)),
+        0xF1 => Some('〉'),
+        0xF2 => Some('∫'),
+        _ => None,
+    }
 }
 
 /// A character a text layer should hold: not a replacement or private-use
@@ -920,8 +1159,12 @@ pub(crate) fn read<'a>(
             height,
             ..TextLayer::default()
         },
+        fonts: std::collections::HashMap::new(),
+        unnamed: std::collections::HashMap::new(),
     };
     hayro::hayro_interpret::interpret_page(page, &mut context, &mut device);
+    device.settle_unnamed_fonts();
+    device.layer.turn_upright();
     device.layer
 }
 
@@ -1319,9 +1562,20 @@ mod tests {
 
     #[test]
     fn symbol_font_bullets_are_bullets_and_a_stamp_leaves_the_page_readable() {
-        assert_eq!(symbol_bullet('\u{F0B7}'), Some('•'));
-        assert_eq!(symbol_bullet('a'), None);
-        assert_eq!(symbol_bullet('\u{F071}'), None);
+        assert_eq!(private_use('\u{F0B7}', SymbolFont::Other), Some('•'));
+        assert_eq!(private_use('a', SymbolFont::Other), None);
+        assert_eq!(private_use('\u{F071}', SymbolFont::Other), None);
+        // θ in Symbol, a square bullet in Wingdings.
+        assert_eq!(private_use('\u{F071}', SymbolFont::Symbol), Some('θ'));
+        assert_eq!(private_use('\u{F071}', SymbolFont::Dingbats), Some('•'));
+        assert_eq!(private_use('\u{F0B7}', SymbolFont::Symbol), Some('•'));
+        assert_eq!(private_use('\u{F0A3}', SymbolFont::Symbol), Some('≤'));
+        assert_eq!(private_use('\u{F0FC}', SymbolFont::Dingbats), Some('✓'));
+        assert_eq!(
+            symbol_font(Some("ABCDEF+Wingdings-Regular")),
+            SymbolFont::Dingbats
+        );
+        assert_eq!(symbol_font(Some("SymbolMT")), SymbolFont::Symbol);
         // A scan's hidden text, a page of it.
         let mut glyphs: Vec<TextGlyph> = (0..20)
             .flat_map(|row| word("Zeile des Vertrags", 100.0, 100.0 + 30.0 * row as f64, 20.0))

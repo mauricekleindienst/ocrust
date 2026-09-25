@@ -71,22 +71,30 @@ def _key(text: str) -> str:
     return re.sub(r"\d+", "#", " ".join(text.lower().split()))
 
 
+def _heading_key(text: str) -> str:
+    """A heading's identity: its words as they are, numbers included — the
+    chapters "Kapitel 1" and "Kapitel 2" are two headings."""
+    return " ".join(text.lower().split())
+
+
 def _repeated_headings(pages: Sequence[Page]) -> set[str]:
-    """Headings at a page's edge that come back on other pages: a letterhead
-    or a page number set large is a running head too. A title that says what
-    the running heads say, once, is not."""
+    """Headings at a page's edge that come back, word for word, on three
+    pages and half of them: a letterhead set large is a running head too. A
+    title that says what the running heads say, once, is not, and nor is a
+    slide title used twice in a deck."""
     counts: Counter[str] = Counter()
     top_share, bottom_share = _MARGIN_SHARE, 1 - _MARGIN_SHARE
     for page in pages:
         seen = {
-            _key(line.text)
+            _heading_key(line.text)
             for block in page.blocks
             if block.kind == "heading"
             for line in block.lines
             if line.box.y1 <= page.height * top_share or line.box.y0 >= page.height * bottom_share
         }
         counts.update(seen)
-    return {key for key, count in counts.items() if count >= 2}
+    needed = max(3, (len(pages) + 1) // 2)
+    return {key for key, count in counts.items() if count >= needed}
 
 
 def _margin_lines(page: Page) -> list[Line]:
@@ -183,9 +191,15 @@ def _page(
     top = page.height * _MARGIN_SHARE
     bottom = page.height * (1 - _MARGIN_SHARE)
 
-    def kept(line: Line, running: set[str]) -> bool:
+    def kept(line: Line) -> bool:
         at_edge = line.box.y1 <= top or line.box.y0 >= bottom
-        return not (at_edge and _key(line.text) in running)
+        return not (at_edge and _key(line.text) in boilerplate)
+
+    def kept_heading(line: Line) -> bool:
+        # A page number set large is dropped with the other page numbers.
+        at_edge = line.box.y1 <= top or line.box.y0 >= bottom
+        numbered = _PAGE_NUMBER.match(line.text.strip()) and _key(line.text) in boilerplate
+        return not (at_edge and (_heading_key(line.text) in repeated or numbered))
 
     blocks: list[tuple[ScanBlock, list[Line]]] = []
     for block in page.blocks:
@@ -194,9 +208,9 @@ def _page(
         if block.kind == "table":
             lines = list(block.lines)
         elif block.kind == "heading":
-            lines = [ln for ln in block.lines if kept(ln, repeated)]
+            lines = [ln for ln in block.lines if kept_heading(ln)]
         else:
-            lines = [ln for ln in block.lines if kept(ln, boilerplate)]
+            lines = [ln for ln in block.lines if kept(ln)]
         if lines and any(line.text.strip() for line in lines):
             blocks.append((block, lines))
 

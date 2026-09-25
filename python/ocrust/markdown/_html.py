@@ -238,6 +238,9 @@ class _Builder(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.root = Element("#root")
         self.stack: list[Element] = [self.root]
+        #: Elements let go past the depth cap, by tag: their end tags close
+        #: nothing, rather than an element opened before them.
+        self.let_go: dict[str, int] = {}
 
     def _close(self, tags: set[str], boundary: set[str]) -> None:
         for index in range(len(self.stack) - 1, 0, -1):
@@ -259,10 +262,12 @@ class _Builder(HTMLParser):
             self._close(closes, boundary)
         node = Element(tag, {k.lower(): v or "" for k, v in attrs})
         self.stack[-1].children.append(node)
-        if tag not in _VOID and (
-            len(self.stack) < _MAX_DEPTH or tag not in _LET_GO or _invisible(node)
-        ):
+        if tag in _VOID:
+            return
+        if len(self.stack) < _MAX_DEPTH or tag not in _LET_GO or _invisible(node):
             self.stack.append(node)
+        else:
+            self.let_go[tag] = self.let_go.get(tag, 0) + 1
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
@@ -271,6 +276,9 @@ class _Builder(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if self.let_go.get(tag):
+            self.let_go[tag] -= 1
+            return
         for index in range(len(self.stack) - 1, 0, -1):
             if self.stack[index].tag == tag:
                 del self.stack[index:]

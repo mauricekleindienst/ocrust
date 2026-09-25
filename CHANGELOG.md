@@ -80,6 +80,18 @@ PDF is now read from its own text: exact, and in milliseconds a page.
 - **A large line starting with a number is a numbered heading**, not a list
   item, in every output format; **a line starting with a bullet opens a list
   item** even right under the line that leads into the list.
+- **Tables on a page read from its own text keep their rows whole**: a cell
+  that wraps, a word broken at its hyphen, an empty first cell, a category line
+  over the rows and a padded table's wide gaps all stay in the table, and a
+  compound broken at its own hyphen (`Nord-` / `Süd-Achse`) keeps it.
+- **Pages printed sideways are turned upright** before they are read; a
+  watermark or stamp across the page no longer hides the text beneath, and
+  Symbol and Wingdings glyphs are the Greek letters, bullets and ticks they
+  show.
+- **The body size is the text's, not a price list's or the small print's**,
+  so a title over a table, a page full of footnotes and chapters numbered like
+  the page stay what they are; a running head that repeats the title leaves
+  the title on page 1.
 
 ## 0.2.7 — 2026-09-24
 

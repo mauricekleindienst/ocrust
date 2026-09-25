@@ -146,44 +146,89 @@ const SMALL_PRINT_POINTS: f32 = 8.0;
 /// size: the ascent and the descent together.
 const LINE_OVER_SIZE: f32 = 1.2;
 
-/// The size of the body text, outside `tables`, on a page whose sizes are
-/// exact: the lower median line's.
+/// Share of the characters, over at least this many lines, that makes a size
+/// the body's whatever else the page holds: more lines than a heading has.
+const BODY_SHARE: f32 = 0.3;
+const BODY_LINES: usize = EXACT_HEADING_LINES + 1;
+/// Characters, at most, of the one line outside a page's tables for it to be
+/// a title over the tables rather than text of their own.
+const TITLE_CHARS: usize = 80;
+
+/// The size of the body text on a page whose sizes are exact.
 ///
-/// The lower one, so that a slide's title over one line of text, or a heading
-/// over a table and a note, is not taken for the body. Small print is left
-/// out when the rest is more than a few headings — a quarter of the lines or
-/// a tenth of the characters: a short letter over the terms of business in
-/// six points is still a letter, while terms of business set in seven points
-/// with nine-point headings are body text with headings.
+/// The lower median line's, outside the tables, so that a slide's title over
+/// one line of text, or a heading over a table and a note, is not taken for
+/// the body — or any larger size that sets paragraphs and a large share of
+/// the characters: a page crowded with footnotes is still its text's. When
+/// no more than a title stands outside the tables, their text counts too: a
+/// title over a table stands out from the table.
+///
+/// Small print is left out when the rest is more than a few headings — a
+/// quarter of the lines or a tenth of the characters: a short letter over the
+/// terms of business in six points is still a letter, while terms of business
+/// set in seven points with nine-point headings are body text with headings.
 fn body_text_height(
     lines: &[Line],
     tables: &[crate::table::Found],
     pixels_per_point: f32,
 ) -> Option<f32> {
-    let mut sized: Vec<(f32, usize)> = lines
+    let outside: Vec<&Line> = lines
         .iter()
         .enumerate()
         .filter(|(index, _)| !tables.iter().any(|t| (t.start..t.end).contains(index)))
-        .map(|(_, line)| (line.quad.edge_height().max(1.0), line.text.chars().count()))
-        .filter(|(_, chars)| *chars > 0)
+        .map(|(_, line)| line)
+        .filter(|line| !line.text.trim().is_empty())
         .collect();
+    let outside_chars: usize = outside.iter().map(|l| l.text.chars().count()).sum();
+    let mut chosen: Vec<&Line> = if outside.len() <= 1 && outside_chars <= TITLE_CHARS {
+        lines.iter().filter(|l| !l.text.trim().is_empty()).collect()
+    } else {
+        outside
+    };
+    let size = |line: &Line| line.quad.edge_height().max(1.0);
+    let chars = |line: &Line| line.text.chars().count();
     if pixels_per_point > 0.0 {
         let smallest = SMALL_PRINT_POINTS * LINE_OVER_SIZE * pixels_per_point;
-        let (larger_lines, larger_chars) = sized
-            .iter()
-            .filter(|(height, _)| *height >= smallest)
-            .fold((0usize, 0usize), |(n, c), (_, chars)| (n + 1, c + chars));
-        let total_chars: usize = sized.iter().map(|(_, chars)| chars).sum();
-        if larger_lines > 0 && (larger_lines * 4 >= sized.len() || larger_chars * 10 >= total_chars)
+        let larger: Vec<&&Line> = chosen.iter().filter(|l| size(l) >= smallest).collect();
+        let larger_chars: usize = larger.iter().map(|l| chars(l)).sum();
+        let total_chars: usize = chosen.iter().map(|l| chars(l)).sum();
+        if !larger.is_empty()
+            && (larger.len() * 4 >= chosen.len() || larger_chars * 10 >= total_chars)
         {
-            sized.retain(|(height, _)| *height >= smallest);
+            chosen.retain(|l| size(l) >= smallest);
         }
     }
-    if sized.is_empty() {
+    if chosen.is_empty() {
         return None;
     }
-    sized.sort_by(|a, b| cmp_f32(a.0, b.0));
-    Some(sized[(sized.len() - 1) / 2].0)
+    let mut sizes: Vec<f32> = chosen.iter().map(|l| size(l)).collect();
+    sizes.sort_by(|a, b| cmp_f32(*a, *b));
+    let median = sizes[(sizes.len() - 1) / 2];
+    // Sizes a twentieth apart are one size.
+    let same = |a: f32, b: f32| a.max(b) <= a.min(b) * 1.05;
+    let total: usize = chosen.iter().map(|l| chars(l)).sum();
+    let paragraph = |height: f32| {
+        chosen.windows(2).any(|pair| {
+            let (a, b) = (pair[0], pair[1]);
+            same(size(a), height)
+                && same(size(b), height)
+                && b.bbox.y0 - a.bbox.y1 < a.bbox.height()
+                && b.bbox.horizontal_overlap(&a.bbox) > 0.0
+        })
+    };
+    let body = sizes
+        .iter()
+        .copied()
+        .filter(|&height| height > median)
+        .filter(|&height| {
+            let set: Vec<&&Line> = chosen.iter().filter(|l| same(size(l), height)).collect();
+            let share: usize = set.iter().map(|l| chars(l)).sum();
+            set.len() >= BODY_LINES
+                && share as f32 >= BODY_SHARE * total as f32
+                && paragraph(height)
+        })
+        .fold(median, f32::max);
+    Some(body)
 }
 
 fn median_height(lines: &[Line]) -> f32 {
@@ -228,6 +273,18 @@ fn order(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Line> {
     if lines.len() < 2 {
         return lines;
     }
+    // Lines set at another angle than the page's — a stamp up the margin, a
+    // watermark across it — come last. Their boxes span every line they
+    // cross, and would join them all into one.
+    let mut angles: Vec<f32> = lines.iter().map(|l| l.angle).collect();
+    angles.sort_by(|a, b| cmp_f32(*a, *b));
+    let page_angle = angles[angles.len() / 2];
+    let (lines, turned): (Vec<Line>, Vec<Line>) = lines
+        .into_iter()
+        .partition(|l| (l.angle - page_angle).abs() <= TURNED_DEGREES);
+    if lines.is_empty() {
+        return turned;
+    }
     let scale = median_height(&lines);
     // Whether the page has a repeating column structure is a property of the
     // whole page, so it is decided here: after the first horizontal cut a single
@@ -238,25 +295,143 @@ fn order(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Line> {
         } else {
             scale * cfg.max_merge_gap_factor
         };
-    let mut out = Vec::with_capacity(lines.len());
+    let mut out = Vec::with_capacity(lines.len() + turned.len());
+    let columns = PageColumns::of(&lines, scale, cfg.baseline_overlap);
     let sheet = Sheet {
         scale,
         width: horizontal_span(&lines),
         exact,
+        columns: &columns,
     };
     xy_cut(lines, sheet, cfg, max_merge_gap, 0, &mut out);
+    out.extend(turned);
     out
+}
+
+/// How far from the page's own angle, in degrees, a line is set at another.
+const TURNED_DEGREES: f32 = 5.0;
+
+/// Where a page's table columns begin and end: left edges, right edges and
+/// middles that three rows share.
+#[derive(Default)]
+struct PageColumns {
+    left: Vec<f32>,
+    right: Vec<f32>,
+    middle: Vec<f32>,
+    tolerance: f32,
+}
+
+impl PageColumns {
+    fn of(lines: &[Line], scale: f32, min_overlap: f32) -> Self {
+        let bands = baseline_bands(lines, min_overlap);
+        let tolerance = scale.max(1.0);
+        let shared = |edge: fn(&Line) -> f32| -> Vec<f32> {
+            let mut clusters: Vec<(f32, Vec<usize>)> = Vec::new();
+            for (index, band) in bands.iter().enumerate() {
+                if band.len() < 2 {
+                    continue;
+                }
+                for line in band {
+                    let x = edge(line);
+                    match clusters
+                        .iter_mut()
+                        .find(|(c, _)| (*c - x).abs() <= tolerance)
+                    {
+                        Some((_, members)) if !members.contains(&index) => members.push(index),
+                        Some(_) => {}
+                        None => clusters.push((x, vec![index])),
+                    }
+                }
+            }
+            clusters
+                .into_iter()
+                .filter(|(_, members)| members.len() >= 3)
+                .map(|(x, _)| x)
+                .collect()
+        };
+        PageColumns {
+            left: shared(|l| l.bbox.x0),
+            right: shared(|l| l.bbox.x1),
+            middle: shared(|l| l.bbox.center_x()),
+            tolerance,
+        }
+    }
+
+    /// Whether a box starts, ends or is centred where a column of the page's
+    /// tables does.
+    fn holds(&self, bbox: &Rect) -> bool {
+        let near = |edges: &[f32], x: f32| edges.iter().any(|e| (e - x).abs() <= self.tolerance);
+        near(&self.left, bbox.x0)
+            || near(&self.right, bbox.x1)
+            || near(&self.middle, bbox.center_x())
+    }
+
+    /// Whether every row of cells among `bands` sets its cells in the page's
+    /// table columns — a row of that table, not an address with a date
+    /// beside it or a browser's header.
+    fn rows_of(&self, bands: &[Vec<&Line>]) -> bool {
+        bands
+            .iter()
+            .filter(|band| band.len() >= 2)
+            .all(|band| band.iter().all(|line| self.holds(&line.bbox)))
+    }
+}
+
+/// Whether each line alone on its baseline belongs to the table: it starts
+/// where one of the page's table columns does and heads a row of cells that
+/// starts there too — a category over the rows, of which there are more than
+/// one: a single row under a line is as likely an address with a date beside
+/// it — or it stays within the column of a cell in a row of cells above it, the
+/// next line of a cell that wraps or was broken by hand. A line reaching
+/// across into the next column is the text under a table, not part of it.
+fn wrapped_cells(bands: &[Vec<&Line>], columns: &PageColumns, scale: f32) -> bool {
+    let rows: Vec<&Vec<&Line>> = bands.iter().filter(|band| band.len() >= 2).collect();
+    !rows.is_empty()
+        && bands.iter().filter(|band| band.len() == 1).all(|band| {
+            let line = band[0];
+            let top = |band: &Vec<&Line>| band.iter().map(|l| l.bbox.y0).fold(f32::MAX, f32::min);
+            let under = bands
+                .iter()
+                .filter(|band| top(band) > line.bbox.center_y())
+                .min_by(|a, b| top(a).total_cmp(&top(b)));
+            let at_its_edge = |x: f32| (x - line.bbox.x0).abs() <= columns.tolerance;
+            let starts_a_column = rows.len() >= 2
+                && columns.left.iter().any(|&x| at_its_edge(x))
+                && under.is_some_and(|row| {
+                    row.len() >= 2 && row.iter().any(|cell| at_its_edge(cell.bbox.x0))
+                })
+                && rows.iter().all(|row| {
+                    row.iter()
+                        .all(|cell| line.bbox.x1 <= cell.bbox.x1 || cell.bbox.x0 <= line.bbox.x0)
+                });
+            starts_a_column
+                || rows.iter().any(|row| {
+                    row.iter().any(|cell| {
+                        let next = row
+                            .iter()
+                            .map(|other| other.bbox.x0)
+                            .filter(|&x0| x0 > cell.bbox.x1)
+                            .reduce(f32::min);
+                        cell.bbox.y1 <= line.bbox.y0 + scale
+                            && line.bbox.x0 >= cell.bbox.x0 - scale
+                            && line.bbox.x0 < cell.bbox.x1
+                            && next.is_none_or(|next| line.bbox.x1 <= next)
+                    })
+                })
+        })
 }
 
 /// What a region keeps of the page it was cut out of.
 #[derive(Clone, Copy)]
-struct Sheet {
+struct Sheet<'a> {
     /// Median line height, the scale everything else is measured in.
     scale: f32,
     /// Width of the page's content, which is what a column corridor divides.
     width: f32,
     /// Whether the lines are a PDF's own text, in the order it drew them.
     exact: bool,
+    /// Where the page's table columns are.
+    columns: &'a PageColumns,
 }
 
 /// Whether reading `lines` in the order they came crosses the `splits` no
@@ -273,7 +448,7 @@ fn read_in_turn(lines: &[Line], splits: &[f32]) -> bool {
 
 fn xy_cut(
     lines: Vec<Line>,
-    sheet: Sheet,
+    sheet: Sheet<'_>,
     cfg: &LayoutConfig,
     inherited_merge_gap: f32,
     depth: usize,
@@ -284,16 +459,30 @@ fn xy_cut(
     // has enough baselines to tell: a drawing's title block is a table even
     // though the sheet around it is not, and the dimension labels outside it must
     // not be merged just because the block below them repeats.
-    let max_merge_gap =
-        if cfg.merge_baselines && baseline_bands(&lines, cfg.baseline_overlap).len() >= 3 {
-            if has_repeating_columns(&lines, scale, cfg.baseline_overlap) {
-                f32::MAX
-            } else {
-                scale * cfg.max_merge_gap_factor
-            }
+    //
+    // A region too small to judge, or one that repeats no columns of its own,
+    // still merges across its gutters on a page with tables — when its rows of
+    // cells stand in the page's table columns: a row of that table, with a
+    // cell that wraps onto lines of its own. Anything else keeps its boxes
+    // apart: an address with the date beside it, a browser's page header.
+    let limited = scale * cfg.max_merge_gap_factor;
+    let bands = baseline_bands(&lines, cfg.baseline_overlap);
+    let in_the_table = inherited_merge_gap == f32::MAX && sheet.columns.rows_of(&bands);
+    let max_merge_gap = if !cfg.merge_baselines {
+        inherited_merge_gap
+    } else if bands.len() >= 3 {
+        if has_repeating_columns(&lines, scale, cfg.baseline_overlap)
+            || (in_the_table && wrapped_cells(&bands, sheet.columns, scale))
+        {
+            f32::MAX
         } else {
-            inherited_merge_gap
-        };
+            limited
+        }
+    } else if inherited_merge_gap == f32::MAX && !in_the_table {
+        limited
+    } else {
+        inherited_merge_gap
+    };
 
     if lines.len() <= 1 || depth > 12 {
         emit_leaf(lines, cfg, max_merge_gap, out);
@@ -418,15 +607,7 @@ fn has_repeating_columns(lines: &[Line], scale: f32, min_overlap: f32) -> bool {
     if bands.len() < 3 {
         return false;
     }
-    // A column is a cluster of left edges fed by three bands — or, in a region
-    // with only two rows of cells, by both: two rows of a table whose cells
-    // wrap onto lines of their own.
-    let rows_of_cells = bands.iter().filter(|band| band.len() >= 2).count();
-    let needed = if rows_of_cells >= 2 {
-        rows_of_cells.min(3)
-    } else {
-        3
-    };
+    // Cluster the left edges; a column is a cluster fed by at least three bands.
     let tolerance = scale.max(1.0);
     let mut columns: Vec<(f32, Vec<usize>)> = Vec::new();
     for (band_index, band) in bands.iter().enumerate() {
@@ -445,11 +626,7 @@ fn has_repeating_columns(lines: &[Line], scale: f32, min_overlap: f32) -> bool {
             }
         }
     }
-    columns
-        .iter()
-        .filter(|(_, bands)| bands.len() >= needed)
-        .count()
-        >= 2
+    columns.iter().filter(|(_, bands)| bands.len() >= 3).count() >= 2
 }
 
 /// Splits lines into groups that share a baseline, whatever order they come
@@ -498,7 +675,7 @@ fn boxes_per_band<'a>(lines: impl IntoIterator<Item = &'a Line>, min_overlap: f3
 /// has a column of text on either side. That last part is what a table does not
 /// have: a table's rows put several boxes on a baseline, and its name column and
 /// its figures are nothing like the same width.
-fn column_corridors(lines: &[Line], sheet: Sheet, cfg: &LayoutConfig) -> Vec<f32> {
+fn column_corridors(lines: &[Line], sheet: Sheet<'_>, cfg: &LayoutConfig) -> Vec<f32> {
     if lines.len() < cfg.column_min_bands * 2 {
         return Vec::new();
     }
@@ -935,8 +1112,10 @@ fn paragraphs(
                 // Where sizes are exact, a change of size is a new block however
                 // few lines the page has: a heading set right above its text.
                 let resized = exact && {
+                    let apart = |a: f32, b: f32| a.max(b) >= EXACT_SIZE_CHANGE * a.min(b).max(1.0);
                     let (s0, s1) = (text_size(prev), text_size(&line));
-                    s0.max(s1) >= EXACT_SIZE_CHANGE * s0.min(s1).max(1.0)
+                    let (l0, l1) = (largest_size(prev), largest_size(&line));
+                    apart(s0, s1) && apart(l0, l1)
                 };
                 // A bullet opens an item, however close it follows: a list set
                 // right under its lead-in is still a list.
@@ -970,6 +1149,16 @@ fn paragraphs(
 /// one's to be set apart from it where sizes are exact: less than a heading
 /// has to stand out ([`EXACT_HEADING_FACTOR`]), so every heading is a block.
 const EXACT_SIZE_CHANGE: f32 = 1.15;
+
+/// The size of a line's largest words: a line set mostly in code, in a
+/// smaller font, still has its words of text beside it.
+fn largest_size(line: &Line) -> f32 {
+    line.words
+        .iter()
+        .map(|w| w.bbox.height())
+        .reduce(f32::max)
+        .unwrap_or_else(|| line.bbox.height())
+}
 
 /// The size a line's text is set in: its middle word's height, which a
 /// superscript on one word does not change.
@@ -1126,6 +1315,20 @@ fn dehyphenate(lines: &mut Vec<Line>) {
             && !head.chars().rev().nth(1).is_some_and(char::is_numeric);
         let next = lines[i + 1].text.trim_start();
         let next_starts_lower = next.chars().next().is_some_and(|c| c.is_lowercase());
+        // "E-Mail-" over "Adresse": the hyphen is the compound's own, and the
+        // word goes on without a space.
+        let compound = head.ends_with('-')
+            && head.chars().rev().nth(1).is_some_and(char::is_alphabetic)
+            && next.chars().next().is_some_and(char::is_uppercase);
+        if compound {
+            let tail = lines.remove(i + 1);
+            let head = &mut lines[i];
+            head.text = format!("{}{}", head.text.trim_end(), tail.text.trim_start());
+            head.bbox = head.bbox.union(&tail.bbox);
+            head.confidence = (head.confidence + tail.confidence) * 0.5;
+            head.words.extend(tail.words);
+            continue;
+        }
         if ends_hyphen && next_starts_lower && !continues_a_suspended_hyphen(next) {
             let tail = lines.remove(i + 1);
             let head = &mut lines[i];
@@ -1799,10 +2002,12 @@ mod tests {
             lines.push(line_at(&format!("Wert{row}"), 2650.0, y, 2950.0, y + 24.0));
         }
         let cfg = LayoutConfig::default();
+        let columns = PageColumns::default();
         let sheet = Sheet {
             scale: 24.0,
             width: 3000.0,
             exact: false,
+            columns: &columns,
         };
         assert!(column_corridors(&lines, sheet, &cfg).is_empty());
         // On a page that holds nothing else, the same block is all there is to go
@@ -2064,13 +2269,13 @@ mod tests {
     }
 
     #[test]
-    fn hyphen_kept_before_capitalized_word() {
+    fn a_compound_broken_at_its_own_hyphen_is_one_word_again() {
         let lines = vec![
             line_at("Nord-", 0.0, 0.0, 100.0, 10.0),
             line_at("Süd-Achse", 0.0, 12.0, 100.0, 22.0),
         ];
         let blocks = group_blocks(lines, &LayoutConfig::default());
-        assert_eq!(blocks[0].text(), "Nord-\nSüd-Achse");
+        assert_eq!(blocks[0].text(), "Nord-Süd-Achse");
     }
 
     #[test]

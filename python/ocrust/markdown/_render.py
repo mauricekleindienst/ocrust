@@ -274,10 +274,21 @@ def _punctuation(char: str) -> bool:
     return unicodedata.category(char)[0] in "PS"
 
 
+_CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
+
+
 def _brackets(text: str) -> str:
     """Link text or alt text with every bracket escaped: one left unescaped
-    would end the link early."""
-    return re.sub(r"(?<!\\)([\[\]])", r"\\\1", text)
+    would end the link early. Inside a code span a backslash is text, and a
+    bracket there cannot end the link: those are left as they are."""
+    out: list[str] = []
+    at = 0
+    for span in _CODE_SPAN.finditer(text):
+        out.append(re.sub(r"(?<!\\)([\[\]])", r"\\\1", text[at : span.start()]))
+        out.append(span.group())
+        at = span.end()
+    out.append(re.sub(r"(?<!\\)([\[\]])", r"\\\1", text[at:]))
+    return "".join(out)
 
 
 def _code_span(text: str) -> str:

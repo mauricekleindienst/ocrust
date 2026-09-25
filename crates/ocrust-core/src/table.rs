@@ -98,10 +98,10 @@ const MIN_COLUMN_ROWS: usize = 2;
 /// How far apart two rows may sit, in text heights, and still be one table.
 const MAX_ROW_GAP: f32 = 2.0;
 
-/// How close under a row, in text heights, the next line of a cell that wraps
-/// sits: at the line spacing, with nothing between. Rows are set further
-/// apart than that, or a wrapped cell could not be told from a row.
-const CONTINUATION_GAP: f32 = 0.35;
+/// How close under a row, in text heights, the next line of a cell sits: at
+/// the text's line spacing, up to one and a half lines, with nothing between.
+/// Rows set further apart than that are rows, however their cells end.
+const CONTINUATION_GAP: f32 = 0.3;
 
 /// A run of lines that reads as a table.
 pub(crate) struct Found {
@@ -285,10 +285,6 @@ fn grow(rows: &[Vec<Candidate>], lines: &[Line], start: usize, text_height: f32)
             previous = theirs;
             candidates += 1;
             last = offset;
-        } else if spans_the_row(row, &rows[start..=last]) {
-            // A line across the whole width — a title, a total — sits inside the
-            // table without saying anything about its columns.
-            continue;
         } else if offset == last + 1
             && carries_on(
                 &rows[start..=offset],
@@ -299,6 +295,11 @@ fn grow(rows: &[Vec<Candidate>], lines: &[Line], start: usize, text_height: f32)
         {
             // The next line of a cell that wraps: part of the row above.
             last = offset;
+        } else if spans_the_row(row, &rows[start..=last]) || opens_alone(row, &rows[start..=last]) {
+            // A line across the whole width — a title, a total — or a category
+            // alone in the first column sits inside the table without saying
+            // anything about its columns.
+            continue;
         } else {
             break;
         }
@@ -306,66 +307,20 @@ fn grow(rows: &[Vec<Candidate>], lines: &[Line], start: usize, text_height: f32)
     (last + 1, candidates)
 }
 
-/// Whether `row` is the next line of cells in `above` that wrap: each of its
-/// cells starts under one of those, and that one's text reached so far across
-/// its column that the next word could not have followed it on its line.
-/// Figures never wrap: a line holding one under a figure is a row of its own,
-/// with an empty cell, not the rest of the row above.
-fn wraps_into(
-    row: &[Candidate],
-    above: &[Candidate],
-    table: &[Vec<Candidate>],
-    text_height: f32,
-) -> bool {
-    !row.is_empty()
-        && row.iter().all(|candidate| {
-            let cell = &candidate.cell;
-            let mut over = above
-                .iter()
-                .filter(|a| a.cell.bbox.horizontal_overlap(&cell.bbox) > 0.0);
-            let (Some(first), None) = (over.next(), over.next()) else {
-                return false;
-            };
-            let upper = &first.cell;
-            if figure(&cell.text) || figure(&upper.text) {
-                return false;
-            }
-            if (cell.bbox.x0 - upper.bbox.x0).abs() > text_height * 0.5 {
-                return false;
-            }
-            // A word broken with a hyphen at the cell's edge wrapped, whatever
-            // the column's width.
-            if broken_word(&upper.text, &cell.text) {
-                return true;
-            }
-            // The column is as wide as its widest cell, at least.
-            let column = table
-                .iter()
-                .flatten()
-                .filter(|c| c.cell.bbox.horizontal_overlap(&upper.bbox) > 0.0)
-                .map(|c| c.cell.bbox.width())
-                .fold(upper.bbox.width(), f32::max);
-            let chars = cell.text.chars().count().max(1) as f32;
-            let first_word = cell.text.split_whitespace().next().unwrap_or("");
-            let word = cell.bbox.width() * first_word.chars().count() as f32 / chars;
-            let space = text_height * 0.25;
-            upper.bbox.width() + space + word > column * 0.98
-        })
-}
-
-/// Whether every cell of `row` starts under one cell of `above`, and neither
-/// is a figure.
-fn under_cells(row: &[Candidate], above: &[Candidate]) -> bool {
-    !row.is_empty()
-        && row.iter().all(|candidate| {
-            let mut over = above
-                .iter()
-                .filter(|a| a.cell.bbox.horizontal_overlap(&candidate.cell.bbox) > 0.0);
-            match (over.next(), over.next()) {
-                (Some(upper), None) => !figure(&candidate.cell.text) && !figure(&upper.cell.text),
-                _ => false,
-            }
-        })
+/// Whether a line of one cell starts in the table's first column: a category
+/// over the rows that follow, or the first cell of a row whose others are
+/// empty.
+fn opens_alone(row: &[Candidate], table: &[Vec<Candidate>]) -> bool {
+    let Some(left) = table
+        .iter()
+        .flatten()
+        .map(|c| c.cell.bbox.x0)
+        .reduce(f32::min)
+    else {
+        return false;
+    };
+    let height = row.first().map_or(0.0, |c| c.cell.bbox.height());
+    row.len() == 1 && (row[0].cell.bbox.x0 - left).abs() <= height
 }
 
 /// Whether a cell holds a figure — an amount, a date, a phone number — rather
@@ -378,6 +333,73 @@ fn figure(text: &str) -> bool {
             .all(|c| c.is_ascii_digit() || c.is_whitespace() || ".,:;-–/+%€$£()'".contains(c))
 }
 
+/// The cell of `above` each cell of `row` lies under, when there is exactly
+/// one for every cell, a different one for each, and no figure lies under a
+/// figure: figures do not wrap, so a second one under the first is a new
+/// row's.
+fn under_one_each<'a>(row: &[Candidate], above: &'a [Candidate]) -> Option<Vec<&'a Candidate>> {
+    if row.is_empty() {
+        return None;
+    }
+    row.iter()
+        .map(|candidate| {
+            let mut over = above
+                .iter()
+                .filter(|a| a.cell.bbox.horizontal_overlap(&candidate.cell.bbox) > 0.0);
+            match (over.next(), over.next()) {
+                (Some(upper), None)
+                    if !(figure(&upper.cell.text) && figure(&candidate.cell.text)) =>
+                {
+                    Some(upper)
+                }
+                _ => None,
+            }
+        })
+        .collect::<Option<Vec<_>>>()
+        // Each cell carries on a cell of its own: cells under one wide cell
+        // are a row under a title.
+        .filter(|uppers| {
+            uppers
+                .iter()
+                .enumerate()
+                .all(|(k, a)| uppers[..k].iter().all(|b| !std::ptr::eq(*a, *b)))
+        })
+}
+
+/// Whether `upper` had filled its column when the line broke: the first word
+/// of `next` would not have fit between its end and where the next column
+/// starts. The last column ends where its widest cell does.
+fn filled(upper: &Candidate, next: &Candidate, table: &[Vec<Candidate>], text_height: f32) -> bool {
+    let cell = &upper.cell;
+    // The column's text reaches as far as its widest line, and no further
+    // than a line short of where the next column starts.
+    let widest = table
+        .iter()
+        .flatten()
+        .filter(|c| c.cell.bbox.horizontal_overlap(&cell.bbox) > 0.0)
+        .map(|c| c.cell.bbox.x1)
+        .fold(cell.bbox.x1, f32::max);
+    let right = table
+        .iter()
+        .flatten()
+        .map(|c| c.cell.bbox.x0)
+        .filter(|&x0| x0 > widest)
+        .reduce(f32::min)
+        .map_or(widest, |x0| {
+            (x0 - text_height).min(widest + text_height * 0.5)
+        });
+    let word = next.words.first().map_or_else(
+        || {
+            let text = &next.cell.text;
+            let chars = text.chars().count().max(1) as f32;
+            let first_word = text.split_whitespace().next().unwrap_or("");
+            next.cell.bbox.width() * first_word.chars().count() as f32 / chars
+        },
+        |word| word.bbox.width(),
+    );
+    cell.bbox.x1 + text_height * 0.25 + word > right
+}
+
 /// Which rows of a run carry on the row above (see [`carries_on`]).
 fn continuations(rows: &[Vec<Candidate>], lines: &[Line], text_height: f32) -> Vec<bool> {
     (0..rows.len())
@@ -386,40 +408,55 @@ fn continuations(rows: &[Vec<Candidate>], lines: &[Line], text_height: f32) -> V
 }
 
 /// Whether row `i` of a run is the next line of the row above rather than a
-/// row of its own: fewer cells than the fullest rows, set right under the line
-/// above, every cell under one cell of it and none of them a figure — and
-/// either the cells above had filled their columns ([`wraps_into`]), or the
-/// line leaves the first column empty while the table's rows stand clearly
-/// further apart than it does from the row above (a line break inside a cell).
+/// row of its own. It is set right under the line above, and each of its cells
+/// lies under one cell of it. A row starts in the first column: a line that
+/// leaves it empty carries on the row above. A line that fills it is a row of
+/// its own — unless, leaving some column empty, it finishes a first cell that
+/// had filled its column or ends in a word broken with a hyphen; or the
+/// table's rows stand clearly further apart than this line does from the one
+/// above (a line break inside a cell).
 fn carries_on(rows: &[Vec<Candidate>], lines: &[Line], i: usize, text_height: f32) -> bool {
     if i == 0 {
         return false;
     }
-    let fullest = rows.iter().map(Vec::len).max().unwrap_or(0);
     let gap = |j: usize| lines[j].bbox.y0 - lines[j - 1].bbox.y1;
-    if rows[i].len() >= fullest || gap(i) > text_height * CONTINUATION_GAP {
+    if gap(i) > text_height * CONTINUATION_GAP || under_one_each(&rows[i], &rows[i - 1]).is_none() {
         return false;
-    }
-    if wraps_into(&rows[i], &rows[i - 1], rows, text_height) {
-        return true;
     }
     let left = rows
         .iter()
         .flatten()
         .map(|c| c.cell.bbox.x0)
         .fold(f32::INFINITY, f32::min);
-    let opens = |row: &[Candidate]| row.iter().any(|c| c.cell.bbox.x0 <= left + text_height);
-    if opens(&rows[i]) || !under_cells(&rows[i], &rows[i - 1]) {
+    let first = |row: &[Candidate]| -> Option<usize> {
+        row.iter()
+            .position(|c| c.cell.bbox.x0 <= left + text_height)
+    };
+    let Some(opening) = first(&rows[i]) else {
+        return true;
+    };
+    let Some(upper) = first(&rows[i - 1]) else {
         return false;
+    };
+    let (upper, opening) = (&rows[i - 1][upper], &rows[i][opening]);
+    // A line with a cell in every column is a row, however full the cell
+    // above it looks: in a table set tight, the columns crowd each other.
+    let fullest = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if rows[i].len() < fullest
+        && (broken_word(&upper.cell.text, &opening.cell.text)
+            || filled(upper, opening, rows, text_height))
+    {
+        return true;
     }
-    // How far apart the rows that open in the first column stand.
+    // How far apart the rows stand: the upper quarter of the gaps above lines
+    // that start in the first column, which are rows more often than not.
     let mut row_gaps: Vec<f32> = (1..rows.len())
-        .filter(|&j| j != i && rows[j].len() >= 2 && opens(&rows[j]))
+        .filter(|&j| j != i && first(&rows[j]).is_some())
         .map(gap)
         .collect();
     row_gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let usual = row_gaps.get(row_gaps.len() / 2).copied().unwrap_or(0.0);
-    usual > 0.0 && gap(i) < usual * 0.5
+    let usual = row_gaps.get(row_gaps.len() * 3 / 4).copied().unwrap_or(0.0);
+    usual > text_height * CONTINUATION_GAP && gap(i) < usual * 0.5
 }
 
 /// The gaps between one row's cells.
@@ -599,8 +636,14 @@ fn grid(
 /// A cell's text and the next line of it: a word broken at the line end with a
 /// hyphen (`Instandhal-` / `tung`) is one word again.
 fn join_wrapped(first: &str, next: &str) -> String {
+    let compound = first.ends_with('-')
+        && first.chars().rev().nth(1).is_some_and(char::is_alphabetic)
+        && next.chars().next().is_some_and(char::is_uppercase);
     if broken_word(first, next) {
         format!("{}{}", &first[..first.len() - 1], next)
+    } else if compound {
+        // "E-Mail-" over "Adresse": the compound's own hyphen stays.
+        format!("{first}{next}")
     } else {
         format!("{first} {next}")
     }
@@ -888,6 +931,7 @@ mod tests {
         );
         assert_eq!(join_wrapped("Vor-", "und Nachname"), "Vor- und Nachname");
         assert_eq!(join_wrapped("Schmidt,", "Weber"), "Schmidt, Weber");
+        assert_eq!(join_wrapped("E-Mail-", "Adresse"), "E-Mail-Adresse");
         assert!(figure("4,90") && figure("030 1234") && figure("12.03.2026"));
         assert!(!figure("Muttern M4") && !figure("12.06. Hinweis:"));
     }
