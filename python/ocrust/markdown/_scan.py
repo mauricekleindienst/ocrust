@@ -340,12 +340,24 @@ def _right_edge(lines: list[Line], columns: _Columns) -> float:
     return right
 
 
+#: What code is written with and prose hardly ever: brackets, operators, and
+#: the marks of identifiers and comments.
+_CODE_SYMBOLS = frozenset("(){}[]=;<>_\\|#$@*&%+`~^")
+#: How many of a block's characters have to be such symbols for it to read as
+#: code rather than text typed in a monospaced font.
+_CODE_SYMBOL_SHARE = 0.04
+
+
 def _advance(line: Line) -> float | None:
     """A monospaced line's advance per character, or None when it is not
     monospaced or has too few words to tell: from its second word on, its
     words advance by the same width for each character of text between them.
     (The first word's box starts where its text does, the others' halfway
-    across the space before them.)"""
+    across the space before them.) A line mostly in Chinese or Japanese is
+    not told: its characters are all one width whatever the font."""
+    letters = [c for c in line.text if not c.isspace()]
+    if sum(bool(_UNSPACED.match(c)) for c in letters) * 2 >= len(letters):
+        return None
     offsets: list[tuple[int, float]] = []
     start = 0
     for word in line.words:
@@ -361,9 +373,10 @@ def _advance(line: Line) -> float | None:
 
 
 def _listing(lines: Sequence[Line]) -> str | None:
-    """A block's lines as code, when they are set in a monospaced font: most
-    of the lines that can be told are, two at least, and none is running
-    text. Each line keeps its indent, counted in characters."""
+    """A block's lines as code, when they are set in a monospaced font — most
+    of the lines that can be told are, two at least — and read as code: set
+    with the symbols code is written in, or indented line by line. A letter
+    typed in Courier is text. Each line keeps its indent, in characters."""
     told = [_advance(line) for line in lines if len(line.words) >= 4]
     mono = sorted(advance for advance in told if advance is not None)
     if len(mono) < 2 or len(mono) * 4 < len(told) * 3:
@@ -374,9 +387,12 @@ def _listing(lines: Sequence[Line]) -> str | None:
         return line.words[0].box.x0 if line.words else line.box.x0
 
     left = min(start(line) for line in lines)
-    return "\n".join(
-        " " * max(round((start(line) - left) / advance), 0) + line.text.strip() for line in lines
-    )
+    indents = [max(round((start(line) - left) / advance), 0) for line in lines]
+    chars = "".join(line.text for line in lines).replace(" ", "")
+    symbols = sum(c in _CODE_SYMBOLS for c in chars)
+    if symbols < _CODE_SYMBOL_SHARE * len(chars) and sum(i >= 2 for i in indents) < 2:
+        return None
+    return "\n".join(" " * i + line.text.strip() for i, line in zip(indents, lines, strict=True))
 
 
 def _first_word_width(line: Line) -> float:
@@ -497,6 +513,13 @@ def _nest(items: list[_Item]) -> list[Block]:
     return nest(entries)
 
 
+#: A word after which a hyphen at a line end was left hanging on purpose:
+#: `IT-` / `und TK-Anlagen` (as the layout's `AFTER_SUSPENDED_HYPHEN`).
+_SUSPENDED = re.compile(
+    r"(?:und|oder|sowie|bis|noch|wie|respektive|and|bzw\.|resp\.|u\.|o\.)(?:\s|$)"
+)
+
+
 def _abbreviation_hyphen(text: str) -> bool:
     """Whether a line ends in an abbreviation in capitals and a hyphen —
     `IT-`, `PDF-`: hyphenation never breaks a word right after a run of
@@ -533,7 +556,7 @@ def _join_across_pages(blocks: list[Block]) -> list[Block]:
                 and (tail[0].islower() or unspaced)
             ):
                 content = list(block.content)
-                if unspaced or _abbreviation_hyphen(head):
+                if unspaced or (_abbreviation_hyphen(head) and not _SUSPENDED.match(tail)):
                     # Chinese or Japanese runs on without a space; `IT-` over
                     # `basierten` keeps the compound's own hyphen.
                     content.extend(blocks[index + 2].content)

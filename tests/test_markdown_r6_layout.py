@@ -150,6 +150,11 @@ def test_a_hyphen_after_an_abbreviation_at_a_line_end_stays():
     parts.append("ET")
     md = body(_pdf_from_stream("\n".join(parts)))
     assert "IT-basierte" in md and "ITbasierte" not in md
+    parts = ["BT /F1 10 Tf"]
+    lines = ["Beratung fuer die gesamte IT-", "und Telekommunikationsbranche im Land", "und mehr"]
+    parts += [text(72, 700 - 12 * i, line) for i, line in enumerate(lines)]
+    parts.append("ET")
+    assert "IT- und Telekommunikationsbranche" in body(_pdf_from_stream("\n".join(parts)))
 
 
 def test_a_drop_cap_starts_its_paragraph_again():

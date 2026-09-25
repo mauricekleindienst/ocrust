@@ -340,8 +340,13 @@ fn order(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Line> {
 /// the next, its words advance by the same width for each character of the
 /// text between them. The first word is left out: the others' boxes begin
 /// halfway across the space before them, its box where its text does.
-/// `None` for a line of too few words to tell.
+/// `None` for a line of too few words to tell, or one mostly in Chinese or
+/// Japanese, whose characters are all one width whatever the font.
 fn monospace_verdict(line: &Line) -> Option<bool> {
+    let letters = line.text.chars().filter(|c| !c.is_whitespace()).count();
+    if line.text.chars().filter(|&c| unspaced(c)).count() * 2 >= letters {
+        return None;
+    }
     let mut offsets = Vec::with_capacity(line.words.len());
     let mut from = 0usize;
     for word in &line.words {
@@ -376,8 +381,23 @@ const DROP_CAP_LINES: f32 = 2.0;
 /// chapter's, Word's Drop Cap) shares a baseline with every line beside it,
 /// and read as a line of its own it joins whichever of them sits lowest. It
 /// is a single letter, clearly taller than the text, and a line starts just
-/// to its right, level with its top: the letter is that line's first.
+/// to its right, level with its top, with the rest of the letter's word —
+/// in lower case, or in small capitals: the letter is that line's first. A
+/// glossary's section letter beside its first entry (`A` / `Abschreibung`)
+/// is a heading of its own.
 fn attach_drop_caps(mut lines: Vec<Line>) -> Vec<Line> {
+    /// Whether `text` starts with the rest of a word: in lower case, or a
+    /// word set wholly in capitals.
+    fn goes_on_a_word(text: &str) -> bool {
+        let word: String = text
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphabetic())
+            .collect();
+        word.chars().next().is_some_and(char::is_lowercase)
+            || (word.chars().count() >= 2 && word.chars().all(char::is_uppercase))
+    }
+
     let scale = median_height(&lines);
     let mut i = 0;
     while i < lines.len() {
@@ -403,7 +423,8 @@ fn attach_drop_caps(mut lines: Vec<Line>) -> Vec<Line> {
                     .map(|(j, _)| j)
             })
             .flatten()
-            .filter(|&j| lines[j].bbox.y0 - cap.bbox.y0 <= scale);
+            .filter(|&j| lines[j].bbox.y0 - cap.bbox.y0 <= scale)
+            .filter(|&j| goes_on_a_word(&lines[j].text));
         let Some(j) = first else {
             i += 1;
             continue;
@@ -659,9 +680,12 @@ fn xy_cut(
                 lines.into_iter().partition(|l| l.bbox.center_x() < split);
             // A letter's reference block, each line with its own label, is
             // no column of values whose labels stand beside it; nor is a
-            // list beside a paragraph a column of a table.
-            let self_labelled = sheet.exact
-                && (labelled(&left) != labelled(&right) || listed(&left) != listed(&right));
+            // list beside a paragraph a column of a table — a paragraph, its
+            // lines filled; numbered steps beside what each means are rows.
+            let list_beside_paragraph =
+                (listed(&left) && filled(&right)) || (listed(&right) && filled(&left));
+            let self_labelled =
+                sheet.exact && (labelled(&left) != labelled(&right) || list_beside_paragraph);
             let in_turn = in_turn
                 && !(sheet.exact
                     && !self_labelled
@@ -959,6 +983,21 @@ fn listed(lines: &[Line]) -> bool {
     };
     let count = lines.iter().filter(|l| opens_item(&l.text)).count();
     lines.len() >= 2 && count * 4 >= lines.len() * 3
+}
+
+/// Whether `lines` fill their width as a paragraph's do: each but the last
+/// ends within a sixth of the widest's end. Items and values of their own
+/// end where they end.
+fn filled(lines: &[Line]) -> bool {
+    let mut sorted: Vec<&Line> = lines.iter().collect();
+    sorted.sort_by(|a, b| a.bbox.y0.total_cmp(&b.bbox.y0));
+    let left = sorted.iter().map(|l| l.bbox.x0).fold(f32::MAX, f32::min);
+    let right = sorted.iter().map(|l| l.bbox.x1).fold(f32::MIN, f32::max);
+    let reach = (right - left) / 6.0;
+    sorted.len() >= 2
+        && sorted[..sorted.len() - 1]
+            .iter()
+            .all(|l| l.bbox.x1 >= right - reach)
 }
 
 /// Whether most of `lines`, two at least, carry their own label:
@@ -1536,7 +1575,8 @@ fn dehyphenate(lines: &mut Vec<Line>) {
             && head.chars().rev().nth(1).is_some_and(char::is_alphabetic)
             && (next.chars().next().is_some_and(char::is_uppercase)
                 || (abbreviation_before_hyphen(head)
-                    && next.chars().next().is_some_and(char::is_alphabetic)));
+                    && next.chars().next().is_some_and(char::is_alphabetic)
+                    && !continues_a_suspended_hyphen(next)));
         if compound {
             let tail = lines.remove(i + 1);
             let head = &mut lines[i];
@@ -2585,6 +2625,13 @@ mod tests {
             line_at("more text", 0.0, 52.0, 300.0, 62.0),
         ];
         assert_eq!(attach_drop_caps(alone).len(), 3);
+        // A glossary's letter beside its first entry is a heading of its own.
+        let glossary = vec![
+            line_at("A", 0.0, 0.0, 30.0, 34.0),
+            line_at("Abschreibung – Wertminderung", 34.0, 0.0, 300.0, 10.0),
+            line_at("Aktiva – Vermögen", 34.0, 12.0, 300.0, 22.0),
+        ];
+        assert_eq!(attach_drop_caps(glossary).len(), 3);
     }
 
     #[test]

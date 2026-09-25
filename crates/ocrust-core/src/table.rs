@@ -195,7 +195,7 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32, rules: &[Rect]
                 // are. One row only: a table has one header, and everything
                 // above it is the page.
                 let adopted = at > taken
-                    && !smaller_print(&lines[at - 1], &lines[at])
+                    && !in_the_margin(&lines[at - 1], &lines[at], text_height)
                     && adopts(&rows[at - 1], &columns, gutter);
                 let start = if adopted { at - 1 } else { at };
                 let mut table = grid(
@@ -320,7 +320,7 @@ fn grow(
     // page's margin, not the table's first row.
     if lines
         .get(start + 1)
-        .is_some_and(|next| smaller_print(&lines[start], next))
+        .is_some_and(|next| in_the_margin(&lines[start], next, text_height))
     {
         return (start + 1, 1);
     }
@@ -331,13 +331,15 @@ fn grow(
     for (offset, row) in rows.iter().enumerate().skip(start + 1) {
         // Two tables of the same shape on one page are two tables. What separates
         // them is the white space, so a row far below the last one ends the run —
-        // and so does one set clearly further apart than the rows so far: the
-        // subject and salutation under a letter's address are paragraphs.
+        // and so does a line of one cell set clearly further apart than the rows
+        // so far: the subject and salutation under a letter's address are
+        // paragraphs. Totals set apart from the items are still the table's.
         let gap = lines[offset].bbox.y0 - lines[offset - 1].bbox.y1;
-        if gap > max_row_gap || widest.is_some_and(|w| gap > w + text_height * ROW_GAP_JUMP) {
+        let jump = widest.is_some_and(|w| gap > w + text_height * ROW_GAP_JUMP);
+        if gap > max_row_gap || (jump && row.len() < MIN_COLUMNS) {
             break;
         }
-        if smaller_print(&lines[offset], &lines[offset - 1]) {
+        if in_the_margin(&lines[offset], &lines[offset - 1], text_height) {
             // The page's footer under the table, or its footnotes.
             break;
         }
@@ -399,6 +401,15 @@ fn opens_alone(row: &[Candidate], table: &[Vec<Candidate>]) -> bool {
     };
     let height = row.first().map_or(0.0, |c| c.cell.bbox.height());
     row.len() == 1 && (row[0].cell.bbox.x0 - left).abs() <= height
+}
+
+/// Whether `line` is the page's margin beside the table line `other`: in
+/// clearly smaller print, and starting further left than the table does — a
+/// browser's date and title over it, the URL and page number under it, which
+/// stand at the paper's edge. A table's own header, in smaller print over its
+/// rows, starts where they do.
+fn in_the_margin(line: &Line, other: &Line, text_height: f32) -> bool {
+    smaller_print(line, other) && line.bbox.x0 < other.bbox.x0 - text_height * 0.5
 }
 
 /// Whether `line` is set in clearly smaller print than `other`: by the median
@@ -507,9 +518,9 @@ fn over_the_header(
 
 /// The columns each cell of a group row stands over: the narrowest run of
 /// them whose stretch covers it and is centred on it, one run after the
-/// other. `None` unless every cell finds its run, one of them spans two
-/// columns or more and none spans them all — else the line is not a row of
-/// groups.
+/// other. `None` unless there are two cells at least, every one finds its
+/// run, one of them spans two columns or more and none spans them all —
+/// else the line is not a row of groups but a caption.
 fn grouped(row: &[Candidate], columns: &[(f32, f32)]) -> Option<Vec<(usize, usize, String)>> {
     let n = columns.len();
     // Where each column's stretch begins and ends: halfway across the gaps.
@@ -548,9 +559,12 @@ fn grouped(row: &[Candidate], columns: &[(f32, f32)]) -> Option<Vec<(usize, usiz
         next = best.1 + 1;
         out.push((best.0, best.1, candidate.cell.text.clone()));
     }
-    // A line over every column is the table's caption, not a group of it.
-    (out.iter().any(|&(a, b, _)| b > a) && out.iter().all(|&(a, b, _)| b + 1 - a < n))
-        .then_some(out)
+    // A line over every column, or a single line over some, is the table's
+    // caption; groups come two at least.
+    (out.len() >= 2
+        && out.iter().any(|&(a, b, _)| b > a)
+        && out.iter().all(|&(a, b, _)| b + 1 - a < n))
+    .then_some(out)
 }
 
 /// Whether a line of one cell sits in one of the table's columns: a row
@@ -1097,7 +1111,8 @@ fn join_wrapped(first: &str, next: &str) -> String {
     let compound = first.ends_with('-')
         && first.chars().rev().nth(1).is_some_and(char::is_alphabetic)
         && (next.chars().next().is_some_and(char::is_uppercase)
-            || crate::layout::abbreviation_before_hyphen(first));
+            || (crate::layout::abbreviation_before_hyphen(first)
+                && !crate::layout::continues_a_suspended_hyphen(next)));
     let unspaced = first.chars().last().is_some_and(crate::layout::unspaced)
         && next.chars().next().is_some_and(crate::layout::unspaced);
     if broken_word(first, next) {
@@ -1399,6 +1414,7 @@ mod tests {
             join_wrapped("für IT-", "basierte Dienste"),
             "für IT-basierte Dienste"
         );
+        assert_eq!(join_wrapped("IT-", "und TK-Anlagen"), "IT- und TK-Anlagen");
         assert_eq!(
             join_wrapped("项目的下一阶段", "将于四月开始"),
             "项目的下一阶段将于四月开始"
@@ -1638,17 +1654,29 @@ mod tests {
     #[test]
     fn a_line_in_smaller_print_over_a_table_is_the_pages_margin() {
         // A browser's date and title over a table running on from the page
-        // before, set at eight points over ten.
+        // before, set at eight points over ten, at the paper's edge.
+        let small = |line: &mut Line| {
+            line.bbox.y1 = line.bbox.y0 + 8.0;
+            for segment in &mut line.segments {
+                segment.bbox.y1 = segment.bbox.y0 + 8.0;
+            }
+        };
         let mut header = row(
             -14.0,
-            &[("9/25/26, 1:07 AM", 0.0, 90.0), ("Inventar", 400.0, 450.0)],
+            &[
+                ("9/25/26, 1:07 AM", -40.0, 50.0),
+                ("Inventar", 400.0, 450.0),
+            ],
         );
-        header.bbox = Rect::new(0.0, -14.0, 450.0, -6.0);
-        for segment in &mut header.segments {
-            segment.bbox.y1 = -6.0;
-        }
+        small(&mut header);
         let mut lines = vec![header];
         lines.extend(price_list());
+        let table = detect(&lines, TEXT_HEIGHT).expect("a table");
+        assert_eq!(table.rows, 3);
+        assert_eq!(table.row_text(0), ["Artikel", "Menge", "Preis"]);
+        // A table's own header in smaller print starts where its rows do.
+        let mut lines = price_list();
+        small(&mut lines[0]);
         let table = detect(&lines, TEXT_HEIGHT).expect("a table");
         assert_eq!(table.rows, 3);
         assert_eq!(table.row_text(0), ["Artikel", "Menge", "Preis"]);
