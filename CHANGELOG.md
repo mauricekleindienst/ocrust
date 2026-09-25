@@ -154,6 +154,11 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   packages, and short listings — YAML, INI, a small function — are, with their
   indents and blank lines, and the text above them is no heading; JSON, INI
   files and shell commands are code in any font.
+- **Grids, sidebars and tables in two scripts**: a table drawn with all its
+  borders keeps a row whose cells wrap, centred or set at their foot, however
+  many lines they take; a sidebar far narrower than the text beside it is read
+  after the text instead of merged into its lines; and a Hebrew or Arabic
+  table under an English header reads the way its page does.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and

@@ -201,6 +201,7 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32, rules: &[Rect]
                     && !in_the_margin(&lines[at - 1], &lines[at], text_height)
                     && adopts(&rows[at - 1], &columns, gutter);
                 let start = if adopted { at - 1 } else { at };
+                let around = lines[..start].iter().chain(&lines[end..]);
                 let mut table = grid(
                     &rows[start..end],
                     &continuations(
@@ -212,6 +213,7 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32, rules: &[Rect]
                     &columns,
                     gutter,
                     adopted,
+                    page_reads(around),
                 );
                 let start = over_the_header(
                     &mut table,
@@ -741,11 +743,13 @@ fn carries_on_row(
     // line left empty. A table may rule only some rows (under its header,
     // over its totals): a line with a cell in every column under another is
     // a row of its own all the same, unless every cell goes on in words from
-    // the one above it. One that rules most of its gaps rules every row.
+    // the one above it. One that rules most of its gaps rules every row, and
+    // so does a grid whose rows are the lines of the cells that wrap in them.
     let rules_off = ruled.iter().skip(1).filter(|&&r| r).count();
-    if rules_off >= 2 && rules_off * 3 >= rows.len() - 1 {
+    let grid = rules_every_row(rows, ruled);
+    if grid || (rules_off >= 2 && rules_off * 3 >= rows.len() - 1) {
         let fullest = rows.iter().map(Vec::len).max().unwrap_or(0);
-        let every_row = rules_off * 2 >= rows.len() - 1;
+        let every_row = grid || rules_off * 2 >= rows.len() - 1;
         let words_go_on = || {
             under_one_each(&rows[i], &rows[i - 1]).is_some_and(|uppers| {
                 rows[i].iter().zip(&uppers).all(|(lower, upper)| {
@@ -856,6 +860,35 @@ fn carries_on_row(
         .find(|pair| pair[1] <= pair[0] * ROW_GAP_AGAIN + 1.0)
         .map_or(0.0, |pair| pair[0]);
     usual > 0.0 && gap(i) < usual * 0.5
+}
+
+/// Whether a run's rules stand between every two of its rows: a grid, with
+/// a rule across under each row. Two rules at least stand between its lines,
+/// and between one rule and the next no more than one line has as many cells
+/// as the fullest under the header. The other lines there are the lines of
+/// the cells that wrap, set over and under the row's one-line cells when the
+/// row is centred or set at its foot, however many there are. A table ruled
+/// only under its header and over its totals has all its items, each a line
+/// with every cell filled, between two rules.
+fn rules_every_row(rows: &[Vec<Candidate>], ruled: &[bool]) -> bool {
+    if ruled.iter().skip(1).filter(|&&r| r).count() < 2 {
+        return false;
+    }
+    // Not the header's: it may title a column its rows leave empty.
+    let fullest = rows.iter().skip(1).map(Vec::len).max().unwrap_or(0);
+    let mut full = 0usize;
+    for (k, row) in rows.iter().enumerate() {
+        if k > 0 && ruled[k] {
+            full = 0;
+        }
+        if row.len() >= fullest {
+            full += 1;
+            if full > 1 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// The straight lines a page draws, as they bear on its tables: those across
@@ -1205,12 +1238,16 @@ fn wide(bbox: &Rect, extent: Rect) -> bool {
 /// already cut it into titles and it must be cut even though it runs the width of
 /// the table. Any other row that wide, alone on its line, is a title or a note
 /// and stays whole.
+///
+/// `page` is the way the page's text around the table reads, where it clearly
+/// does: right to left where `true` (see [`page_reads`]).
 fn grid(
     rows: &[Vec<Candidate>],
     continues: &[bool],
     columns: &[(f32, f32)],
     gutter: f32,
     header: bool,
+    page: Option<bool>,
 ) -> Table {
     let extent = extent_of(rows).unwrap_or_default();
     let mut cells: Vec<Cell> = Vec::new();
@@ -1255,26 +1292,36 @@ fn grid(
         }
     }
     // A table written right to left starts at its right: its first column
-    // is the rightmost, as its source has it. Its header says which way it
-    // is written, in the document's own language — names in another script
-    // in its rows do not turn a table round; the whole table's letters say
-    // where there is no header to go by.
-    let header: String = cells
-        .iter()
-        .filter(|c| c.row == 0)
-        .map(|c| c.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let deciding = if header.chars().any(char::is_alphabetic) {
-        header
-    } else {
+    // is the rightmost, as its source has it. Where its header and its rows
+    // are written the same way, that is the way. Where not, either may be in
+    // another script than the document — Arabic names under a German header,
+    // English column titles over Hebrew rows — and the page's own text says
+    // which way the document runs. On a page with nothing else to go by, a
+    // header clearly in one script says it; one in both, the whole table.
+    let text_of = |header: bool| {
         cells
             .iter()
+            .filter(|c| (c.row == 0) == header)
             .map(|c| c.text.as_str())
             .collect::<Vec<_>>()
             .join(" ")
     };
-    if right_to_left(&deciding) {
+    let (head, body) = (text_of(true), text_of(false));
+    let way = |text: &str| {
+        let (rights, lefts) = letters(text);
+        (rights + lefts > 0).then_some(rights > lefts)
+    };
+    let written_right_to_left = match (way(&head), way(&body)) {
+        (Some(head_way), Some(body_way)) if head_way != body_way => {
+            page.or_else(|| clearly(&head)).unwrap_or_else(|| {
+                let (rights, lefts) = letters(&format!("{head} {body}"));
+                rights > lefts
+            })
+        }
+        (Some(head_way), _) => head_way,
+        (None, body_way) => body_way.unwrap_or(false),
+    };
+    if written_right_to_left {
         for cell in &mut cells {
             cell.column = columns.len() - cell.column - cell.column_span;
         }
@@ -1290,15 +1337,71 @@ fn grid(
 /// Whether `text` is written right to left: more of its letters are Hebrew
 /// or Arabic than not.
 fn right_to_left(text: &str) -> bool {
-    let rtl = |c: char| {
-        matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF) && c.is_alphabetic()
-    };
-    let rights = text.chars().filter(|&c| rtl(c)).count();
-    let lefts = text
-        .chars()
-        .filter(|&c| c.is_alphabetic() && !rtl(c))
-        .count();
+    let (rights, lefts) = letters(text);
     rights > lefts
+}
+
+/// Whether a letter is of a script written right to left: Hebrew, Arabic
+/// and their neighbours, and their presentation forms.
+fn right_to_left_letter(c: char) -> bool {
+    matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF) && c.is_alphabetic()
+}
+
+/// How many of `text`'s letters are of a script written right to left, and
+/// how many of one written left to right.
+fn letters(text: &str) -> (usize, usize) {
+    text.chars()
+        .filter(|c| c.is_alphabetic())
+        .fold((0, 0), |(rights, lefts), c| {
+            if right_to_left_letter(c) {
+                (rights + 1, lefts)
+            } else {
+                (rights, lefts + 1)
+            }
+        })
+}
+
+/// Which way `text` is written where one script has four in five of its
+/// letters: right to left where `true`. A header of English and Hebrew
+/// column titles does not say.
+fn clearly(text: &str) -> Option<bool> {
+    let (rights, lefts) = letters(text);
+    if rights > 0 && rights >= 4 * lefts {
+        Some(true)
+    } else if lefts > 0 && lefts >= 4 * rights {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Which way the page's text around a table reads, where it clearly does:
+/// right to left where `true`. A line reads the way the letters at both its
+/// ends do — a German sentence naming someone in Arabic reads left to right
+/// — and four lines in five have to read one way. A page with no other text,
+/// or a bilingual one, does not say.
+fn page_reads<'a>(lines: impl Iterator<Item = &'a Line>) -> Option<bool> {
+    let (mut rtl, mut ltr) = (0usize, 0usize);
+    for line in lines {
+        let mut ends = line.text.chars().filter(|c| c.is_alphabetic());
+        let first = ends.next();
+        let last = ends.next_back().or(first);
+        match (
+            first.map(right_to_left_letter),
+            last.map(right_to_left_letter),
+        ) {
+            (Some(true), Some(true)) => rtl += 1,
+            (Some(false), Some(false)) => ltr += 1,
+            _ => {}
+        }
+    }
+    if rtl > 0 && rtl >= 4 * ltr {
+        Some(true)
+    } else if ltr > 0 && ltr >= 4 * rtl {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// A cell's text and the next line of it: a word broken at the line end with a
@@ -2541,6 +2644,124 @@ mod tests {
                 "Wartung der Heizung",
                 "Filter und Dichtungen getauscht",
                 "189,00"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_header_in_another_script_than_its_rows_is_turned_the_pages_way() {
+        // A title over the table, then its header and rows as the page draws
+        // them, left to right: English column titles over Hebrew rows on a
+        // Hebrew page, and German ones over Arabic names on a German page.
+        let page = |title: &str, header: [&str; 3], cells: [[&str; 3]; 2]| {
+            let mut lines = vec![row(-40.0, &[(title, 0.0, 360.0)])];
+            for (k, texts) in [header].iter().chain(&cells).enumerate() {
+                let y = k as f32 * 14.0;
+                lines.push(row(
+                    y,
+                    &[
+                        (texts[0], 0.0, 90.0),
+                        (texts[1], 150.0, 240.0),
+                        (texts[2], 300.0, 360.0),
+                    ],
+                ));
+            }
+            detect(&lines, TEXT_HEIGHT).expect("a table")
+        };
+        let hebrew = page(
+            "רשימת העובדים בסניף",
+            ["City", "Position", "Name"],
+            [
+                ["תל אביב", "מנהל מכירות", "דוד כהן"],
+                ["חיפה", "מהנדסת תוכנה", "שרה לוי"],
+            ],
+        );
+        assert_eq!(hebrew.row_text(0), ["Name", "Position", "City"]);
+        assert_eq!(hebrew.row_text(1), ["דוד כהן", "מנהל מכירות", "תל אביב"]);
+        let german = page(
+            "Teilnehmerliste des Sprachkurses",
+            ["Nr.", "Name", "Herkunft"],
+            [["1", "محمد العلي", "دمشق"], ["2", "فاطمة حسن", "حلب"]],
+        );
+        assert_eq!(german.row_text(0), ["Nr.", "Name", "Herkunft"]);
+        assert_eq!(german.row_text(1), ["1", "محمد العلي", "دمشق"]);
+    }
+
+    #[test]
+    fn a_grid_row_centred_beside_a_cell_of_many_lines_is_one_row() {
+        // A table drawn with every border, its rows centred: the description
+        // wraps onto five lines, and the number and the amount stand beside
+        // the third. The rules say where each row starts and ends, however
+        // many more lines than rules there are.
+        let lines = vec![
+            row(
+                0.0,
+                &[
+                    ("Pos.", 0.0, 30.0),
+                    ("Beschreibung", 60.0, 200.0),
+                    ("Betrag", 300.0, 350.0),
+                ],
+            ),
+            row(16.0, &[("Ersatzteile Lizenz", 60.0, 180.0)]),
+            row(26.0, &[("Wartung für", 60.0, 140.0)]),
+            row(
+                36.0,
+                &[
+                    ("1", 0.0, 10.0),
+                    ("Dokumentation Beratung", 60.0, 200.0),
+                    ("744,14", 300.0, 350.0),
+                ],
+            ),
+            row(46.0, &[("zur Planung mit Kabel", 60.0, 200.0)]),
+            row(56.0, &[("Lizenz", 60.0, 110.0)]),
+            row(
+                72.0,
+                &[
+                    ("2", 0.0, 10.0),
+                    ("Anfahrt", 60.0, 120.0),
+                    ("45,00", 305.0, 350.0),
+                ],
+            ),
+            row(88.0, &[("Montage Prüfung", 60.0, 170.0)]),
+            row(98.0, &[("Schulung von", 60.0, 150.0)]),
+            row(
+                108.0,
+                &[
+                    ("3", 0.0, 10.0),
+                    ("Dokumentation", 60.0, 160.0),
+                    ("12,50", 305.0, 350.0),
+                ],
+            ),
+            row(118.0, &[("Server Kabel", 60.0, 150.0)]),
+            row(128.0, &[("Wartung", 60.0, 120.0)]),
+        ];
+        let rules: Vec<Rect> = [-16.0, 0.0, 56.0, 72.0, 128.0]
+            .iter()
+            .map(|&y| across(y, -5.0, 360.0))
+            .chain(
+                [-5.0, 50.0, 290.0, 360.0]
+                    .iter()
+                    .map(|&x| down(x, -5.0, 141.0)),
+            )
+            .collect();
+        let mut found = find(&lines, TEXT_HEIGHT, 20.0, &rules);
+        assert_eq!(found.len(), 1);
+        let table = found.remove(0).table;
+        assert_eq!(table.rows, 4);
+        assert_eq!(
+            table.row_text(1),
+            [
+                "1",
+                "Ersatzteile Lizenz Wartung für Dokumentation Beratung zur Planung mit Kabel Lizenz",
+                "744,14"
+            ]
+        );
+        assert_eq!(
+            table.row_text(3),
+            [
+                "3",
+                "Montage Prüfung Schulung von Dokumentation Server Kabel Wartung",
+                "12,50"
             ]
         );
     }

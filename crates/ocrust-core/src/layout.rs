@@ -503,6 +503,9 @@ const TWO_FLOWS_DRIFT: f32 = 0.2;
 const TWO_FLOWS_DRIFT_NARROWER: f32 = 0.1;
 /// How long a label before a colon may be: `Leistungszeitraum`, `Ihr Zeichen`.
 const LABEL_CHARS: usize = 32;
+/// How tall a white band across a region, in line heights, has to be for the
+/// region to be cut there: more than the space between a paragraph's lines.
+const PARAGRAPH_CUT: f32 = 0.6;
 
 /// Where a page's table columns begin and end: left edges, right edges and
 /// middles that three rows share.
@@ -639,6 +642,40 @@ fn read_in_turn(lines: &[Line], splits: &[f32]) -> bool {
     crossings <= splits.len() + 2 + lines.len() / 10
 }
 
+/// Whether the page drew `lines` one column after the other: each column's
+/// lines in one run, but for a line — a page number, a running head — set
+/// apart from its column's. A table drawn row by row crosses its gutter
+/// twice for every row after the first.
+fn drawn_in_turn(lines: &[Line], splits: &[f32]) -> bool {
+    let crossings = lines
+        .windows(2)
+        .filter(|pair| column_of(splits, &pair[0]) != column_of(splits, &pair[1]))
+        .count();
+    crossings <= splits.len() + 1
+}
+
+/// Whether one of `columns` breaks a paragraph where the one beside it has
+/// text: a white gap between two of its lines, as tall as one a region is
+/// cut across at, beside a line of the other. Two columns of running text
+/// each break where their own paragraphs end. The cells of a table's row
+/// wrap side by side from the row's top, and its rows break across all of
+/// them.
+fn breaks_of_its_own(columns: &[Vec<&Line>], scale: f32) -> bool {
+    columns.iter().enumerate().any(|(k, column)| {
+        let mut column = column.clone();
+        column.sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0));
+        column.windows(2).any(|pair| {
+            let (from, to) = (pair[0].bbox.y1, pair[1].bbox.y0);
+            to - from > scale * PARAGRAPH_CUT
+                && columns
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != k)
+                    .any(|(_, other)| other.iter().any(|l| l.bbox.y0 < to && l.bbox.y1 > from))
+        })
+    })
+}
+
 fn xy_cut(
     lines: Vec<Line>,
     sheet: Sheet<'_>,
@@ -700,7 +737,7 @@ fn xy_cut(
     }
 
     // Horizontal band: a y gap that no box spans.
-    if let Some((split, _)) = find_gap(&lines, scale * 0.6, |l| (l.bbox.y0, l.bbox.y1)) {
+    if let Some((split, _)) = find_gap(&lines, scale * PARAGRAPH_CUT, |l| (l.bbox.y0, l.bbox.y1)) {
         let (top, bottom): (Vec<Line>, Vec<Line>) =
             lines.into_iter().partition(|l| l.bbox.center_y() < split);
         if !top.is_empty() && !bottom.is_empty() {
@@ -1017,8 +1054,15 @@ fn column_corridors(lines: &[Line], sheet: Sheet<'_>, cfg: &LayoutConfig) -> Vec
         let mut splits: Vec<f32> = gaps[..count].iter().map(|(split, _)| *split).collect();
         splits.sort_by(|a, b| cmp_f32(*a, *b));
         let columns = slice_at(lines, &splits);
+        // A sidebar beside the text is far narrower than it, and sets its
+        // lines on the text's baselines where both use one size and leading.
+        // On a page read from its own text it is still told from a table:
+        // the page draws the one column and then the other, where a table
+        // draws its rows across its gutters; and each breaks its paragraphs
+        // where the other goes on, where a row's cells wrap side by side.
+        let sidebar = || drawn_in_turn(lines, &splits) && breaks_of_its_own(&columns, sheet.scale);
         let ok = columns.iter().all(|column| reads_as_column(column, cfg))
-            && evenly_wide(&columns, cfg)
+            && (evenly_wide(&columns, cfg) || (sheet.exact && sidebar()))
             && (!sheet.exact
                 || (read_in_turn(lines, &splits)
                     && !labels_and_values(&columns, sheet.scale, cfg)));
@@ -1993,6 +2037,33 @@ mod tests {
         for (label, value) in pairs {
             assert!(text.contains(&format!("{label} {value}")), "{text}");
         }
+    }
+
+    #[test]
+    fn a_sidebar_drawn_after_the_text_is_read_after_it() {
+        // Running text beside a sidebar a third as wide, both set in one
+        // size on one baseline grid, each breaking its paragraphs where the
+        // other goes on, so that no white band runs across both. The page
+        // draws the text and then the sidebar.
+        let text_rows = (0..17).filter(|row| ![5, 11].contains(row));
+        let side_rows = (0..17).filter(|row| ![3, 8, 14].contains(row));
+        let at = |row: i32| row as f32 * 14.0;
+        let text: Vec<Line> = text_rows
+            .map(|row| line_at(&format!("T{row}"), 0.0, at(row), 600.0, at(row) + 12.0))
+            .collect();
+        let side: Vec<Line> = side_rows
+            .map(|row| line_at(&format!("S{row}"), 640.0, at(row), 840.0, at(row) + 12.0))
+            .collect();
+        let cfg = LayoutConfig::default();
+        let in_turn: Vec<Line> = text.iter().chain(&side).cloned().collect();
+        let ordered = reading_order_exact(in_turn, &cfg);
+        let want: Vec<&str> = text.iter().chain(&side).map(|l| l.text.as_str()).collect();
+        assert_eq!(texts(&ordered), want);
+        // Drawn row by row across the gutter, the same lines are a table's.
+        let mut row_by_row: Vec<Line> = text.into_iter().chain(side).collect();
+        row_by_row.sort_by(|a, b| a.bbox.y0.total_cmp(&b.bbox.y0));
+        let ordered = reading_order_exact(row_by_row, &cfg);
+        assert_eq!(ordered.len(), 17, "rows merged across the gutter");
     }
 
     #[test]
