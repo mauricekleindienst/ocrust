@@ -312,6 +312,9 @@ def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
     height = statistics.median(line.box.height for line in lines)
     left = min(line.box.x0 for line in lines)
     flush = [abs(line.box.x0 - left) <= _FLUSH * height for line in lines]
+    hanging = _hanging_entries(lines, flush, left, height)
+    if hanging is not None:
+        return hanging
     if len(lines) < 3 or sum(flush) * 5 < len(lines) * 3:
         return [lines]
     # The lines beside a drop cap or a small picture set at the start of a
@@ -336,6 +339,34 @@ def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
             and flush[index + 1]
             and right - line.box.x1 <= _first_word_width(lines[index + 1]) + 0.35 * height
         ):
+            parts.append([])
+        parts[-1].append(line)
+    return parts
+
+
+def _hanging_entries(
+    lines: list[Line], flush: list[bool], left: float, height: float
+) -> list[list[Line]] | None:
+    """A block set with a hanging indent — a bibliography's or a glossary's
+    entries, each first line flush and the lines after it indented, no space
+    between entries — cut into its entries, or None when it is none: the
+    first line flush, two lines at least indented by one amount, and as many
+    of them, near enough, as entries open. Paragraphs indented on their
+    first line open far more flush lines than they indent."""
+    indents = [line.box.x0 - left for line, at_edge in zip(lines, flush) if not at_edge]
+    entries = sum(flush)
+    if (
+        not flush[0]
+        or len(indents) < 2
+        or entries < 2
+        or len(indents) * 2 < entries
+        or max(indents) - min(indents) > _FLUSH * height
+        or not _INDENT_MIN * height <= min(indents) <= _INDENT_MAX * height
+    ):
+        return None
+    parts: list[list[Line]] = []
+    for line, at_edge in zip(lines, flush):
+        if at_edge:
             parts.append([])
         parts[-1].append(line)
     return parts
@@ -499,17 +530,23 @@ def _one_flow(
 
 
 def _same_language(first: str, second: str) -> bool:
-    """Whether two texts may be in one language: written in one script,
-    and — where one's language is known — the other, long enough to tell,
-    sets that language's little words among its own."""
-    if _script(first) != _script(second):
+    """Whether two texts may be in one language: written in one script, if
+    both have letters, and — where one's language is known — the other, long
+    enough to tell and mostly words, sets that language's little words among
+    its own."""
+    scripts = _script(first), _script(second)
+    if None not in scripts and scripts[0] != scripts[1]:
         return False
     for known, other in ((first, second), (second, first)):
         language = _language(known)
         if language is None:
             continue
         words = re.findall(r"[^\W\d_]+", other.lower())
-        if len(words) >= _LANGUAGE_WORDS:
+        # Key figures say nothing of their language.
+        tokens = other.split()
+        worded = sum(bool(_WORD.fullmatch(token)) for token in tokens)
+        wordy = worded >= _RUNNING_SHARE * len(tokens)
+        if len(words) >= _LANGUAGE_WORDS and wordy:
             little = sum(word in _STOPWORDS[language] for word in words)
             if little < _LANGUAGE_SHARE * len(words):
                 return False
@@ -524,8 +561,14 @@ def _script(text: str) -> str | None:
     for char in text:
         if char.isalpha():
             name = unicodedata.name(char, "")
-            counts[name.split(" ", 1)[0] if name else ""] += 1
+            script = name.split(" ", 1)[0] if name else ""
+            # Japanese writes kanji, hiragana and katakana in one sentence.
+            counts["CJK" if script in _EAST_ASIAN else script] += 1
     return counts.most_common(1)[0][0] if counts else None
+
+
+#: The scripts Chinese, Japanese and Korean are written in, as one.
+_EAST_ASIAN = frozenset({"CJK", "HIRAGANA", "KATAKANA", "HANGUL", "BOPOMOFO", "HALFWIDTH"})
 
 
 #: How many of a text's words its language's little words are, at least,
@@ -659,7 +702,7 @@ def _carries_on(head: _Spot, tail: _Spot, boxes: list[_Spot], page: list[_Spot])
         # where its column ends.
         edge = hx1 if head.first is not head.last else head.right
         way = "column"
-    full = edge - last.x1 <= _first_word_width(tail.first) + 0.35 * height
+    full = edge - last.x1 <= _first_break_width(tail.first) + 0.35 * height
     return way if full else None
 
 
@@ -692,13 +735,18 @@ _WRAPPED_SLACK = 0.3
 _WRAPPED_SHARE = 0.8
 
 
+def _unspaced(lines: Sequence[Line]) -> bool:
+    """Whether lines are mostly Chinese or Japanese, written unspaced."""
+    letters = [c for line in lines for c in line.text if not c.isspace()]
+    return sum(bool(_UNSPACED.match(c)) for c in letters) * 2 >= max(len(letters), 1)
+
+
 def _running(lines: Sequence[Line]) -> bool:
     """Whether lines are running text that wraps, rather than an address or
     a list of names: Chinese or Japanese, which wraps anywhere; or lines of
     three words and more — or of long words — most of them words, among
     them a language's little words, figures or not."""
-    letters = [c for line in lines for c in line.text if not c.isspace()]
-    if sum(bool(_UNSPACED.match(c)) for c in letters) * 2 >= max(len(letters), 1):
+    if _unspaced(lines):
         return True
     tokens = [line.text.split() for line in lines]
     counts = sorted(len(t) for t in tokens)
@@ -777,13 +825,82 @@ def _right_edge(lines: list[Line], columns: _Columns) -> float:
         return max(x1, min(right, min(beside)))
     # Running text that wraps well short of its column wraps where something
     # stands beside it that left no text — a picture: there its column ends.
-    if (
-        len(lines) >= _BESIDE_PICTURE_LINES
-        and x1 < right - _WRAPPED_SLACK * (right - x0)
-        and _wraps(lines)
-    ):
-        return x1
-    return right
+    # The paragraph may run on under the picture, its lines there wider.
+    return _beside_picture(lines, x0, right) or right
+
+
+def _beside_picture(lines: Sequence[Line], x0: float, right: float) -> float | None:
+    """Where the lines a paragraph opens with beside a picture end, as they
+    wrap there: three at least, running text filling a width well short of
+    its column's, the lines after them, but the paragraph's last, wider."""
+    for count in range(len(lines), _BESIDE_PICTURE_LINES - 1, -1):
+        head = lines[:count]
+        end = max(line.box.x1 for line in head)
+        height = max(line.box.height for line in head)
+        if any(line.box.x1 <= end + height for line in lines[count:-1]):
+            continue
+        if end < right - _WRAPPED_SLACK * (right - x0) and _running(head) and _fills(head):
+            return end
+    return None
+
+
+def _fills(lines: Sequence[Line]) -> bool:
+    """Whether a paragraph's lines fill its own width as wrapped prose
+    does: nearly every line but the last ends where the next line's first
+    word would not have fitted, and they are no verse."""
+    x1 = max(line.box.x1 for line in lines)
+    pairs = list(zip(lines, lines[1:]))
+    full = sum(
+        x1 - line.box.x1 <= _first_word_width(after) + 0.5 * line.box.height
+        for line, after in pairs
+    )
+    return full >= _WRAPPED_SHARE * len(pairs) and not _verse(lines)
+
+
+def _verse(lines: Sequence[Line]) -> bool:
+    """Whether lines end where verses do, half of them at least: on a comma
+    or a semicolon, or before a capital that starts no sentence — a
+    sentence ending at a line's end says less, prose does that too — or
+    whether, like a song's, they have no stops at all. Chinese or Japanese
+    wraps anywhere, not as verse."""
+    if _unspaced(lines):
+        return False
+    if not any(mark in line.text for line in lines for mark in ",.;:!?"):
+        return True
+    # German capitalizes its nouns: there, and where the language is not
+    # known, only a little word's capital tells a verse.
+    nouns = _language(" ".join(line.text for line in lines)) in ("de", None)
+    pairs = list(zip(lines, lines[1:]))
+    verse = 0.0
+    for line, after in pairs:
+        end = line.text.rstrip()[-1:]
+        if end in ".!?":
+            verse += 0.5
+        elif end in ",;:" or _verse_capital(after.text, nouns):
+            verse += 1
+    return verse * 2 >= len(pairs)
+
+
+def _verse_capital(text: str, nouns: bool) -> bool:
+    words = text.split()
+    if not words or not words[0][:1].isupper():
+        return False
+    word = words[0].strip("\"'„“‚«»(").lower()
+    return not nouns or word in _VERSE_LITTLE
+
+
+#: Little words a verse may start with, in any of the languages told apart,
+#: and some more German ones.
+_VERSE_LITTLE = frozenset().union(
+    *_STOPWORDS.values(),
+    *(
+        words.split()
+        for words in [
+            "in an es so wie was wer wo da nur kaum sie mein dein sein kein ihm ihn uns "
+            "euch mir dir mich dich einen einem einer denn weil ob nun schon"
+        ]
+    ),
+)
 
 
 #: How many lines of running text, at least, tell by themselves where their
@@ -874,72 +991,124 @@ _MONO_AGREE = 0.9
 
 def _listing(parts: list[list[Line]]) -> str | None:
     """A block's lines — or the parts of one listing, a blank line between
-    them — as code, when they are set in a monospaced font and are not
+    them where they stand apart — as code, when they are set in a monospaced font and are not
     running text: a letter typed in Courier is text. Each line keeps its
     indent, in characters."""
     lines = [line for part in parts for line in part]
     advance = _monospaced(lines)
     if advance is None:
         return _structured(lines) if len(parts) == 1 else None
-    if _prose(lines) or _wordy(lines):
-        return None
     left = min(_start(line) for line in lines)
     indents = [max(round((_start(line) - left) / advance), 0) for line in lines]
     if not _code_like(lines, indents):
         return None
     lines_of = iter(zip(indents, lines, strict=True))
-    return "\n\n".join(
-        "\n".join(
+    height = statistics.median(line.box.height for line in lines)
+    out = ""
+    for at, part in enumerate(parts):
+        # Parts a line's spacing apart were cut at a change of indent, not
+        # at a blank line.
+        if at:
+            gap = _extent(part)[1] - _extent(parts[at - 1])[3]
+            out += "\n\n" if gap >= 0.5 * height else "\n"
+        out += "\n".join(
             " " * indent + line.text.strip() for indent, line in (next(lines_of) for _ in part)
         )
-        for part in parts
-    )
+    return out
 
 
 def _code_like(lines: Sequence[Line], indents: Sequence[int]) -> bool:
     """Whether monospaced lines read as code rather than a typed letter's
-    address, date or subject: set with the symbols code is written in,
-    indented a level or a few line by line (a letter's date and closing
-    stand far to the right), or half of them commands, a configuration's
-    keys, lines starting with a lower-case name, with flags or paths, or a
-    program's records — a time, a commit, a file's permissions."""
-    chars = [c for line in lines for c in line.text if not c.isspace()]
+    address, a note or a poem. Half of them commands, a configuration's
+    keys, a program's records or statements, a database's, comments, or lines
+    with flags or paths make them code whatever else they say. Code's
+    symbols, a few levels of indent (a letter's date and closing stand far
+    to the right), or commands named in lower case with their arguments do
+    only where the lines are no running text and no sentences."""
     texts = [line.text.strip() for line in lines]
-    symbols = sum(c in _CODE_SYMBOLS for c in chars)
 
     def half(pattern: re.Pattern[str]) -> bool:
         return sum(bool(pattern.search(text)) for text in texts) * 2 >= len(texts)
 
+    if any(
+        half(pattern)
+        for pattern in (
+            _COMMAND,
+            _CONFIG_KEY,
+            _RECORD,
+            _STATEMENT,
+            _SOURCE,
+            _COMMENT,
+            _FLAG_OR_PATH,
+        )
+    ):
+        return True
+    if _prose(lines) or _wordy(lines):
+        return False
+    chars = [c for text in texts for c in text if not c.isspace()]
+    symbols = sum(c in _CODE_SYMBOLS for c in chars)
+    words = [token for text in texts for token in text.split()]
+    little = sum(
+        any(token.lower().strip(".,;:!?\"'()") in stop for stop in _STOPWORDS.values())
+        for token in words
+    )
+    named = (
+        half(_LOWER_NAME)
+        and any(_ARGUMENT.search(text) for text in texts)
+        and little < _COMMAND_LITTLE * max(len(words), 1)
+    )
     return (
         symbols >= _CODE_SYMBOL_SHARE * len(chars)
         or sum(2 <= indent <= _CODE_INDENT for indent in indents) >= 2
-        or half(_COMMAND)
-        or half(_CONFIG_KEY)
-        or half(_LOWER_NAME)
-        or half(_FLAG_OR_PATH)
-        or half(_RECORD)
-        or half(_STATEMENT)
+        or named
     )
 
 
 _CODE_SYMBOLS = frozenset("(){}[]=;<>_\\|#$@*&%+`~^")
 #: How many of a block's characters have to be such symbols, at least.
 _CODE_SYMBOL_SHARE = 0.04
-#: A configuration's key, as YAML and the like write it: `image: node:20`.
-_CONFIG_KEY = re.compile(r"^(?:- )?[a-z_][\w.-]*:(?:\s|$)")
+#: A configuration's key, as YAML and the like write it: `image: node:20` —
+#: not a letter's `cc:` or `encl:`.
+_CONFIG_KEY = re.compile(
+    r"^(?:- )?(?!(?:b?cc|encl?|attn|ps|re|betr|anl(?:agen?)?)\.?:)[a-z_][\w.-]*:(?:\s|$)"
+)
 #: How far, in characters, code indents a line at most: a few levels.
 _CODE_INDENT = 16
+#: A comment in code, or a script's first line: `# …`, `// …`, `-- …`.
+_COMMENT = re.compile(r"^(?:#!|#\s|//|--\s|/\*|\*\s|;\s|%\s|REM\s|rem\s)")
+#: An argument a command is given: a flag, a path, a name with a dot or a
+#: figure in it, a setting.
+_ARGUMENT = re.compile(r"\s-{1,2}[A-Za-z]|/|\w\.\w|\w\d|\d\w|=")
+#: How many of a command listing's words are a language's little words, at
+#: most: a note or a poem in lower case is written in them.
+_COMMAND_LITTLE = 0.05
 #: A line opening with a lower-case name, as a command's does: `aws s3 ls`.
 _LOWER_NAME = re.compile(r"^[a-z][\w.+-]*(?:\s|$)")
-#: A flag (`-Name`, `--force`) or a path (`s3://bucket/key`, `C:\\Temp`).
-_FLAG_OR_PATH = re.compile(r"(?:^|\s)--?[A-Za-z][\w-]*|\S/\S|\S\\\S")
+#: A flag (`-Name`, `--force`) or a path: `/var/log`, `./run.sh`,
+#: `src/main.rs`, `s3://bucket/key`, `C:\\Temp` — not `and/or`, `Mü/ab` or a
+#: date's `12/03/2025`.
+_FLAG_OR_PATH = re.compile(
+    r"(?:^|\s)--?[A-Za-z][\w-]*"
+    r"|(?:^|\s)(?:~|\.{1,2})?/[\w.-]"
+    r"|\w://\S"
+    r"|[\w.-]+/[\w./-]*\.[A-Za-z]\w{0,4}\b"
+    r"|\b[A-Za-z]:\\"
+)
 #: A database's statement: `CREATE DATABASE shop`, `SELECT * FROM kunden`.
 _STATEMENT = re.compile(
     r"^(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|GRANT|REVOKE|USE|SHOW|WITH)\s"
 )
+#: A program's statement: `import os`, `from pathlib import Path`,
+#: `def main():`, `#include <stdio.h>`, `const app = express();`.
+_SOURCE = re.compile(
+    r"^(?:import [\w.]+(?:\s+as\s+\w+)?;?$|from [\w.]+ import \S|def \w+\s*\(|class \w+\s*[:({]"
+    r"|#include\s*[<\"]|#define\s+\w|(?:const|let|var)\s+\w+\s*=|function\s*\w*\s*\("
+    r"|fn \w+\s*[(<]|package [\w.]+;?$|use [\w:]+;$)"
+)
 #: A program's record: a time stamp, a commit, a file's permissions.
 _RECORD = re.compile(
-    r"^(?:\d{4}-\d\d-\d\d[ T]\d\d:\d\d|\d\d:\d\d:\d\d|[0-9a-f]{7,40}\s|[dl-][rwx-]{9}\s"
+    r"^(?:\d{4}-\d\d-\d\d[ T]\d\d:\d\d|\d\d:\d\d:\d\d|(?=[0-9]*[a-f])[0-9a-f]{7,40}\s"
+    r"|[dl-][rwx-]{9}\s"
     r"|[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d)"
 )
 
@@ -981,7 +1150,7 @@ _INI_SECTION = re.compile(r"\[[\w .:-]+\]")
 _INI_SETTING = re.compile(r"[\w.-]+\s*=\s*\S.*")
 #: A shell command: a prompt perhaps, then a command line tools are run by.
 _COMMAND = re.compile(
-    r"(?:[$#>]\s+)?(?:sudo\s+)?(?:apt(?:-get)?|dnf|yum|pacman|brew|pip3?|pipx|npm|npx|yarn|"
+    r"^(?:[$#>]\s+)?(?:sudo\s+)?(?:apt(?:-get)?|dnf|yum|pacman|brew|pip3?|pipx|npm|npx|yarn|"
     r"pnpm|cargo|go|git|docker|kubectl|systemctl|journalctl|service|curl|wget|ssh|scp|"
     r"rsync|chmod|chown|mkdir|export|make|cmake|python3?|node|conda|helm|terraform|cd|ls|"
     r"cp|mv|rm|cat|echo|tar|source|FROM|RUN|CMD|COPY|ADD|WORKDIR|ENV|EXPOSE|ENTRYPOINT|"
@@ -1015,11 +1184,13 @@ def _with_listings(
                 more = blocks[after][1]
                 gap = _extent(more)[1] - _extent(run[-1])[3]
                 if (
-                    not 0 <= gap <= _LISTING_GAP * height
+                    not -0.5 * height <= gap <= _LISTING_GAP * height
                     or abs(statistics.median(line.box.height for line in more) - height)
                     > 0.05 * height
                     or min(_start(line) for line in more) < left - 0.5 * height
-                    or not _listing_part(more)
+                    # Lines right under a part, cut from it at a change of indent,
+                    # go on in it whatever they say: `- Anna` in a YAML list.
+                    or not (_listing_part(more) or gap < 0.5 * height)
                     or not _agree(_told([line for part in [*run, more] for line in part]))
                 ):
                     break
@@ -1044,7 +1215,7 @@ def _listing_part(lines: Sequence[Line]) -> bool:
     """Whether a block may be a part of a listing: no running text, and code
     by its look alone — a typed letter's address or a screenplay's scene
     is none, however monospaced."""
-    return not _prose(lines) and not _wordy(lines) and _code_like(lines, [0] * len(lines))
+    return _code_like(lines, [0] * len(lines))
 
 
 def _wordy(lines: Sequence[Line]) -> bool:
@@ -1137,6 +1308,26 @@ def _first_word_width(line: Line) -> float:
     return line.box.width * len(word) / max(len(text), 1)
 
 
+def _first_break_width(line: Line) -> float:
+    """How wide the first thing is that a line could have been broken
+    before: its first word — or, in Chinese or Japanese, which break
+    anywhere, its first character, or two where the second may start no
+    line (`、`, `。`, `ッ`)."""
+    text = line.text.strip()
+    if not (text and _UNSPACED.match(text[0])):
+        return _first_word_width(line)
+    chars = 2 if text[1:2] in _NO_START else 1
+    if line.words:
+        word = line.words[0]
+        return word.box.width * chars / max(len(word.text.strip()), 1)
+    return line.box.width * chars / max(len(text), 1)
+
+
+#: The marks and small kana a Chinese or Japanese line may not start with:
+#: the character before them wraps with them.
+_NO_START = frozenset("、。，．,.：；？！）」』】〕〉》ー…ぁぃぅぇぉっゃゅょァィゥェォッャュョ")
+
+
 def _joined(lines: Sequence[Line], right: float, rtl: bool = False) -> list[Inline]:
     """A paragraph's lines as one run of text, with a line break kept only
     where the line ended although the next line's first word would have fit.
@@ -1147,8 +1338,9 @@ def _joined(lines: Sequence[Line], right: float, rtl: bool = False) -> list[Inli
     `Datum: 12.09.2026` — are two fields, however full the first one is.
     Lines written right to left (`rtl`) end at their left, and `right` is
     then the column's left edge. In running text, a line that leaves its
-    sentence open goes on in the next one that starts in lower case, however
-    much room a long word seemed to leave.
+    sentence open goes on in the next one that starts in lower case where
+    the next word only just seemed to fit: a long word's width is guessed.
+    A poem's or a list's lines leave far more room.
     """
     flowing = _running(lines)
     content: list[Inline] = []
@@ -1167,7 +1359,10 @@ def _joined(lines: Sequence[Line], right: float, rtl: bool = False) -> list[Inli
             needed = first + 0.35 * previous.box.height
             fields = _LABELLED.match(previous.text.strip()) and _LABELLED.match(text)
             goes_on = (
-                flowing and text[:1].islower() and not _ENDS_SENTENCE.search(previous.text.strip())
+                flowing
+                and text[:1].islower()
+                and not _ENDS_SENTENCE.search(previous.text.strip())
+                and room <= _NEAR_MISS * needed
             )
             if (room > needed and not goes_on) or fields:
                 content.append(Break())
@@ -1175,6 +1370,11 @@ def _joined(lines: Sequence[Line], right: float, rtl: bool = False) -> list[Inli
                 content.append(" ")
         content.append(text)
     return content
+
+
+#: How much more room than the next word needs, as a multiple, a line of
+#: running text may seem to leave and still have been full.
+_NEAR_MISS = 2.0
 
 
 @dataclass
@@ -1286,15 +1486,15 @@ def _join(
     """The two halves of a paragraph a break cut in two as one, or None when
     they are two: the first half ends without closing its sentence, and the
     second starts in lower case — or, when the page says so otherwise
-    (`capital`), with a capital: a noun, in German. When the page says they
-    are one `anyway`, they are."""
+    (`capital`), with a capital or a figure: a noun, in German, or an
+    amount. When the page says they are one `anyway`, they are."""
     head, tail = plain(first.content), plain(second.content)
     unspaced = _glue(head, tail) == ""
     if not (head and tail):
         return None
     if not anyway and _ENDS_SENTENCE.search(head):
         return None
-    if not (anyway or tail[0].islower() or unspaced or (capital and tail[0].isalpha())):
+    if not (anyway or tail[0].islower() or unspaced or (capital and tail[0].isalnum())):
         return None
     content = list(first.content)
     if unspaced or (_abbreviation_hyphen(head) and not _SUSPENDED.match(tail)):

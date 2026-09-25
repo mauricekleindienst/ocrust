@@ -201,17 +201,33 @@ def plain(content: list[Inline] | Block | list[Block]) -> str:
 
 def inline_of(blocks: list[Block]) -> list[Inline]:
     """Blocks' text as one run of inline content, a space between blocks:
-    a title set in a shape of several paragraphs, its formulas and
-    emphasis kept."""
+    a title set in a shape of several paragraphs, its formulas, code and
+    links kept, but not the bold or italic a title is set in anyway."""
     out: list[Inline] = []
     for block in blocks:
         content = list(block.content) if isinstance(block, (Paragraph, Heading)) else [plain(block)]
-        content = strip(content)
+        content = strip(_unemphasized(content))
         if not content:
             continue
         if out:
             out.append(" ")
         out.extend(content)
+    return out
+
+
+def _unemphasized(content: list[Inline]) -> list[Inline]:
+    """Content without its bold, italic or struck-through text set apart,
+    and a line break as a space: what a title keeps."""
+    out: list[Inline] = []
+    for item in content:
+        if isinstance(item, Span) and item.kind in _NESTING:
+            out.extend(_unemphasized(item.children))
+        elif isinstance(item, Span):
+            out.append(Span(item.kind, _unemphasized(item.children), item.url))
+        elif isinstance(item, Break):
+            out.append(" ")
+        else:
+            out.append(item)
     return out
 
 

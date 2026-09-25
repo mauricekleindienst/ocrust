@@ -171,6 +171,16 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   box out of its lines, a paragraph's last line under a picture floated left
   stays with it, and a list drawn column by column keeps each price beside
   its item.
+- **Verse, lists and listings keep their lines**: poems, song lyrics and
+  lists written without bullets keep a line each, in lower case or with a
+  capital at every verse, however narrow they are set; a reference list set
+  with a hanging indent keeps its entries apart. Typed notes, poems and a
+  letter's references or copy list are no code, while YAML with worded
+  values, a script opening with a comment and a listing its indents cut in
+  parts are one code block. A slide's title set in bold or italic is a plain
+  heading. A paragraph goes on in the next column into its key figures, a
+  Japanese one over the column break whatever script it starts in, and text
+  beside a picture runs on under it without hard breaks.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and
