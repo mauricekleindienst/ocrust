@@ -150,3 +150,31 @@ def test_a_hyphen_after_an_abbreviation_at_a_line_end_stays():
     parts.append("ET")
     md = body(_pdf_from_stream("\n".join(parts)))
     assert "IT-basierte" in md and "ITbasierte" not in md
+
+
+def test_a_drop_cap_starts_its_paragraph_again():
+    lines = [
+        "ie Stadt liegt am Ufer des Flusses und ist",
+        "seit dem Mittelalter ein wichtiger Ort fuer",
+        "den Handel mit Salz, Holz und Tuch gewesen.",
+    ]
+    parts = ["BT", "/F1 40 Tf", text(72, 672, "D"), "/F1 12 Tf"]
+    parts += [text(104, 700 - 14 * i, line) for i, line in enumerate(lines)]
+    parts += [text(72, 658, "Im neunzehnten Jahrhundert wuchs die Stadt stark an."), "ET"]
+    md = body(_pdf_from_stream("\n".join(parts)))
+    assert md.index("Die Stadt liegt am Ufer") < md.index("seit dem Mittelalter")
+    assert "DIm" not in md and "Dden" not in md
+
+
+def test_zapfdingbats_ticks_and_crosses_are_read_without_ocr():
+    dingbats = "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>"
+    parts = [
+        "BT",
+        "/F2 10 Tf",
+        text(72, 700, "4"),
+        "/F1 10 Tf",
+        text(90, 700, "Lieferung geprueft"),
+    ]
+    parts += ["/F2 10 Tf", text(72, 686, "8"), "/F1 10 Tf", text(90, 686, "Rechnung offen"), "ET"]
+    md = body(with_fonts("\n".join(parts), {"F1": HELVETICA, "F2": dingbats}))
+    assert "✔ Lieferung geprueft" in md and "✘ Rechnung offen" in md

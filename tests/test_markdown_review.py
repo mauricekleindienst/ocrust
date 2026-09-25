@@ -1019,7 +1019,8 @@ def test_superscripts_stay_with_their_word(no_models):
     raised = "/F1 7 Tf 4.12 Ts (2) Tj 0 Ts /F1 10 Tf"
     stream = f"BT /F1 10 Tf 1 0 0 1 72 700 Tm (The energy is E = mc) Tj {raised} ( for a body at rest.) Tj ET"
     text = markdown.convert(_pdf_from_stream(stream), name="p.pdf", ocr=False).body
-    assert "E = mc2 for a body at rest." in text
+    # Raised and smaller, the 2 is an exponent, as Word's and HTML's are.
+    assert "E = mc² for a body at rest." in text
 
 
 def test_two_footnote_references_side_by_side():

@@ -105,6 +105,12 @@ PDF is now read from its own text: exact, and in milliseconds a page.
 - **Joins respect the script and the column**: Chinese and Japanese lines run
   on without a space, a hyphen after an abbreviation stays (`IT-basierte`),
   and a column under an abstract or beside a box gets no hard breaks.
+- **More of what PDFs draw is read as written**: letter-spaced titles are
+  words, soft hyphens and text shadows no longer split or double them, Type3
+  fonts (matplotlib, old LaTeX) get their real widths, exponents are
+  superscripts (`mc²`), hollow bullets open list items, ZapfDingbats marks
+  and form check boxes read ✔ ✘ ☒ ☐, Hebrew and Arabic come out in reading
+  order, and vertical Japanese is read column by column.
 - **Office documents**: Word's ruby keeps its text and reading, legacy form
   fields show their state and choice, `altChunk` content is read in place, and
   hidden rows and columns of spreadsheets are left out like hidden sheets.
