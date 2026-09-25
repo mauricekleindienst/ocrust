@@ -654,6 +654,60 @@ fn drawn_in_turn(lines: &[Line], splits: &[f32]) -> bool {
     crossings <= splits.len() + 1
 }
 
+/// Whether the text runs on across `splits` from one line to the next: the
+/// page draws a line on one side and then, on the other, the line right
+/// under it — a paragraph beside a float going on under the float. Columns
+/// drawn one after the other cross from the foot of the one to the head of
+/// the next.
+fn runs_on_across(lines: &[Line], splits: &[f32], scale: f32) -> bool {
+    lines.windows(2).any(|pair| {
+        column_of(splits, &pair[0]) != column_of(splits, &pair[1])
+            && next_line_under(&pair[0], &pair[1], scale)
+    })
+}
+
+/// Whether `to` is set as the next line under `from`: below it, and no
+/// further than a paragraph's lines are apart.
+fn next_line_under(from: &Line, to: &Line, scale: f32) -> bool {
+    let gap = to.bbox.y0 - from.bbox.y1;
+    gap >= -scale * NEXT_LINE_OVERLAP && gap <= scale * PARAGRAPH_CUT
+}
+
+/// How far a paragraph's next line may reach up into the line before it, in
+/// line heights: set solid, the boxes of its lines overlap a little.
+const NEXT_LINE_OVERLAP: f32 = 0.25;
+
+/// Which of `lines`, in the order the page draws them, belong across the
+/// gutter at `split` from where they stand: a paragraph beside a box
+/// floated left goes on under the box, at the margin, and a short last line
+/// there stands left of the gutter. It is drawn right after the lowest line
+/// of the paragraph, and set right under it; so is each line after it that
+/// goes on the same way.
+fn carried_across(lines: &[Line], split: f32, scale: f32) -> Vec<bool> {
+    let left_of = |line: &Line| line.bbox.center_x() < split;
+    let lowest = |left: bool| {
+        lines
+            .iter()
+            .filter(|l| left_of(l) == left)
+            .map(|l| l.bbox.y1)
+            .fold(f32::MIN, f32::max)
+    };
+    let (lowest_left, lowest_right) = (lowest(true), lowest(false));
+    let mut carried = vec![false; lines.len()];
+    for i in 1..lines.len() {
+        let (from, to) = (&lines[i - 1], &lines[i]);
+        let side = left_of(from);
+        let lowest_of_its_side = from.bbox.y1 >= if side { lowest_left } else { lowest_right };
+        carried[i] = next_line_under(from, to, scale)
+            && if carried[i - 1] {
+                left_of(to) == side
+            } else {
+                left_of(to) != side && lowest_of_its_side
+            };
+    }
+    carried
+}
+
 /// Whether one of `columns` breaks a paragraph where the one beside it has
 /// text: a white gap between two of its lines, as tall as one a region is
 /// cut across at, beside a line of the other. Two columns of running text
@@ -785,10 +839,21 @@ fn xy_cut(
         }
         for (nth, &(split, gap)) in gaps.iter().enumerate() {
             let in_turn = !sheet.exact || read_in_turn(&lines, &[split]);
-            let (left, right): (Vec<Line>, Vec<Line>) = lines
-                .iter()
-                .cloned()
-                .partition(|l| l.bbox.center_x() < split);
+            // A paragraph beside a box floated left takes the short line it
+            // goes on with under the box, left of the gutter, along.
+            let carried = if sheet.exact {
+                carried_across(&lines, split, scale)
+            } else {
+                vec![false; lines.len()]
+            };
+            let (mut left, mut right): (Vec<Line>, Vec<Line>) = (Vec::new(), Vec::new());
+            for (line, &carried) in lines.iter().zip(&carried) {
+                if (line.bbox.center_x() < split) != carried {
+                    left.push(line.clone());
+                } else {
+                    right.push(line.clone());
+                }
+            }
             // A letter's reference block, each line with its own label, is
             // no column of values whose labels stand beside it; nor is a
             // list beside a paragraph a column of a table — a paragraph, its
@@ -797,19 +862,38 @@ fn xy_cut(
                 (listed(&left) && filled(&right)) || (listed(&right) && filled(&left));
             let self_labelled =
                 sheet.exact && (labelled(&left) != labelled(&right) || list_beside_paragraph);
-            let in_turn = in_turn
-                && !(sheet.exact
-                    && !self_labelled
-                    && labels_and_values(
-                        &[left.iter().collect(), right.iter().collect()],
-                        scale,
-                        cfg,
-                    ));
+            // A gutter past the widest cuts only where the two sides are set
+            // on their own; that is told there from lines a tenth of a line
+            // off each other's baselines already.
+            let drift = if nth == 0 {
+                TWO_FLOWS_DRIFT
+            } else {
+                TWO_FLOWS_DRIFT_NARROWER
+            };
+            // A paragraph with a box floated beside it — a photo credit, a
+            // caption, a few key figures — may share a baseline with each
+            // of the box's lines: a Chinese or Japanese paragraph of four
+            // lines beside a box of three, or of one. That makes the box no
+            // column of values beside their labels, nor a cell of a row:
+            // each of its lines on a baseline of the paragraph is set in a
+            // size or on a baseline of its own, where a row's cells share
+            // both, and the paragraph's lines run on, filled to the gutter.
+            let (pairs, apart) = pairs_across(&left, &right, cfg.baseline_overlap, drift);
+            let box_beside_paragraph = sheet.exact
+                && pairs >= 1
+                && apart == pairs
+                && (paragraph(&left) || paragraph(&right));
+            let labels_beside_values = sheet.exact
+                && !self_labelled
+                && !box_beside_paragraph
+                && labels_and_values(&[left.iter().collect(), right.iter().collect()], scale, cfg);
+            let in_turn = in_turn && !labels_beside_values;
             let straddled = shared_baseline_share(&left, &right, cfg.baseline_overlap);
             // A column is a block of lines. One baseline on a side — a cell or
             // two of a row, a page number, a stray label — is never a column.
-            let thin_side = baseline_bands(&left, cfg.baseline_overlap).len() < 2
-                || baseline_bands(&right, cfg.baseline_overlap).len() < 2;
+            let thin_side = (baseline_bands(&left, cfg.baseline_overlap).len() < 2
+                || baseline_bands(&right, cfg.baseline_overlap).len() < 2)
+                && !box_beside_paragraph;
             let narrowest = horizontal_span(&left).min(horizontal_span(&right));
             let region_width = horizontal_span(&left).max(0.0) + gap + horizontal_span(&right);
             let too_narrow = narrowest < gap * cfg.column_min_width_over_gap
@@ -824,7 +908,8 @@ fn xy_cut(
                 "column split at {split:.0} (gap {gap:.0}): left {} lines / {:.0} wide, \
                  right {} lines / {:.0} wide, straddled {straddled:.2}, \
                  thin {thin_side}, too_narrow {too_narrow}, crowded {crowded}, \
-                 boxes/band L {left_boxes:.2} R {right_boxes:.2}",
+                 boxes/band L {left_boxes:.2} R {right_boxes:.2}, \
+                 box beside a paragraph {box_beside_paragraph} ({apart} of {pairs} apart)",
                 left.len(),
                 horizontal_span(&left),
                 right.len(),
@@ -833,16 +918,9 @@ fn xy_cut(
             // Text set beside a box — a fact box, a sidebar — shares its
             // baselines only by chance: the box is set smaller, or at a pitch
             // of its own, where a row's cells share size and baseline. And a
-            // letter's reference block is no column of a table either. A
-            // gutter past the widest cuts only where the two sides are set on
-            // their own; that is told there from lines a tenth of a line off
-            // each other's baselines already.
-            let drift = if nth == 0 {
-                TWO_FLOWS_DRIFT
-            } else {
-                TWO_FLOWS_DRIFT_NARROWER
-            };
+            // letter's reference block is no column of a table either.
             let two_flows = self_labelled
+                || box_beside_paragraph
                 || (sheet.exact && two_flows(&left, &right, cfg.baseline_overlap, drift));
             if thin_side
                 || !in_turn
@@ -1060,7 +1138,21 @@ fn column_corridors(lines: &[Line], sheet: Sheet<'_>, cfg: &LayoutConfig) -> Vec
         // the page draws the one column and then the other, where a table
         // draws its rows across its gutters; and each breaks its paragraphs
         // where the other goes on, where a row's cells wrap side by side.
-        let sidebar = || drawn_in_turn(lines, &splits) && breaks_of_its_own(&columns, sheet.scale);
+        // And a sidebar is running text, as the text beside it is. A list's
+        // prices, dates or values, drawn after its items, break where an
+        // item wraps too, but hold a figure a line: they are the list's
+        // second column, each beside its item. Nor is there a sidebar where
+        // the text runs on from one side to the other: a paragraph beside a
+        // box floated left whose last line goes on under the box, at the
+        // margin, leaves a gutter down to that line.
+        let sidebar = || {
+            drawn_in_turn(lines, &splits)
+                && breaks_of_its_own(&columns, sheet.scale)
+                && columns
+                    .iter()
+                    .all(|column| running_text(column.iter().copied()))
+                && !runs_on_across(lines, &splits, sheet.scale)
+        };
         let ok = columns.iter().all(|column| reads_as_column(column, cfg))
             && (evenly_wide(&columns, cfg) || (sheet.exact && sidebar()))
             && (!sheet.exact
@@ -1147,6 +1239,14 @@ fn labels_and_values(columns: &[Vec<&Line>], scale: f32, cfg: &LayoutConfig) -> 
 /// of a table's row are set in one size on one baseline; a paragraph beside
 /// a fact box set at 88 % is not.
 fn two_flows(left: &[Line], right: &[Line], min_overlap: f32, drift: f32) -> bool {
+    let (pairs, apart) = pairs_across(left, right, min_overlap, drift);
+    pairs >= 2 && apart * 2 >= pairs
+}
+
+/// How many lines of `left` share a baseline with a line of `right`, and how
+/// many of those differ from it in size or sit off its baseline by `drift`
+/// of the shorter line's height (see [`two_flows`]).
+fn pairs_across(left: &[Line], right: &[Line], min_overlap: f32, drift: f32) -> (usize, usize) {
     let mut pairs = 0usize;
     let mut apart = 0usize;
     for l in left {
@@ -1169,7 +1269,48 @@ fn two_flows(left: &[Line], right: &[Line], min_overlap: f32, drift: f32) -> boo
             apart += 1;
         }
     }
-    pairs >= 2 && apart * 2 >= pairs
+    (pairs, apart)
+}
+
+/// Whether `lines` are a paragraph of running text: three lines at least,
+/// filled to their column's edge but the last, and most of them several
+/// words long.
+fn paragraph(lines: &[Line]) -> bool {
+    lines.len() >= PARAGRAPH_LINES && filled(lines) && running_text(lines)
+}
+
+/// How many lines a paragraph beside a box has at least to be told from the
+/// cells of a row: one line may be a label, two a label that wraps.
+const PARAGRAPH_LINES: usize = 3;
+
+/// How many words with letters in them a line of running text has at least.
+/// A sidebar's lines run on in sentences, two words a line and more even
+/// where a narrow one sets long German words; a column of prices, dates or
+/// amounts holds a figure a line, and a word at most.
+const RUNNING_WORDS: usize = 2;
+
+/// Whether a line reads as running text: [`RUNNING_WORDS`] words or more
+/// with letters in them — Chinese and Japanese, written without spaces,
+/// counted two characters to a word. `189,00 €`, `12,50`, `$29` and
+/// `12 March` are no running text.
+fn running_line(text: &str) -> bool {
+    let words: usize = text
+        .split_whitespace()
+        .map(|word| match word.chars().filter(|&c| unspaced(c)).count() {
+            0 => usize::from(word.chars().any(char::is_alphabetic)),
+            characters => characters / 2,
+        })
+        .sum();
+    words >= RUNNING_WORDS
+}
+
+/// Whether half of `lines` at least read as running text (see
+/// [`running_line`]): a paragraph's last line may be a word or two.
+fn running_text<'a>(lines: impl IntoIterator<Item = &'a Line>) -> bool {
+    let (running, all) = lines.into_iter().fold((0, 0), |(running, all), line| {
+        (running + usize::from(running_line(&line.text)), all + 1)
+    });
+    all > 0 && running * 2 >= all
 }
 
 /// Whether most of `lines`, two at least, open with a bullet or a number:
@@ -1575,7 +1716,8 @@ fn paragraphs(
             Some(prev) => {
                 let gap = line.bbox.y0 - prev.bbox.y1;
                 let shares_column = line.bbox.horizontal_overlap(&prev.bbox)
-                    > 0.25 * prev.bbox.width().min(line.bbox.width());
+                    > 0.25 * prev.bbox.width().min(line.bbox.width())
+                    || (exact && goes_on_under_a_float(&current, &line, scale));
                 let set_apart = leading.is_some_and(|leading| {
                     let height = prev.bbox.height().min(line.bbox.height()).max(1.0);
                     gap / height - leading > EXACT_PARAGRAPH_SPACE
@@ -1615,6 +1757,42 @@ fn paragraphs(
     blocks.reverse();
     blocks
 }
+
+/// Whether `line` is the next line of the paragraph `current` holds so far,
+/// gone on under a box floated left of it: the paragraph's lines beside the
+/// box start where the box ends, the last of them runs full to the
+/// paragraph's edge, and `line` starts further left, at the margin under the
+/// box — short, it may not reach under them at all. It is set in the
+/// paragraph's size, as far under the line before as the paragraph's lines
+/// are apart. A caption under a picture floated there is set in a size or
+/// on a pitch of its own.
+fn goes_on_under_a_float(current: &[Line], line: &Line, scale: f32) -> bool {
+    let [.., before, prev] = current else {
+        return false;
+    };
+    let edge = current.iter().map(|l| l.bbox.x1).fold(f32::MIN, f32::max);
+    let (spacing, gap) = (prev.bbox.y0 - before.bbox.y1, line.bbox.y0 - prev.bbox.y1);
+    let (short, tall) = (
+        line.bbox.height().min(prev.bbox.height()),
+        line.bbox.height().max(prev.bbox.height()),
+    );
+    // The paragraph's first line may be indented.
+    current[1..]
+        .iter()
+        .all(|l| (l.bbox.x0 - prev.bbox.x0).abs() <= scale * 0.5)
+        && prev.bbox.x1 >= edge - scale
+        && line.bbox.x0 < prev.bbox.x0 - scale
+        && (gap - spacing).abs() <= scale * UNDER_A_FLOAT_SPACING
+        && short >= tall * UNDER_A_FLOAT_SIZE
+}
+
+/// How far a paragraph's line gone on under a float may be off the
+/// paragraph's spacing, in line heights: a browser rounds each line's place
+/// to its pixels.
+const UNDER_A_FLOAT_SPACING: f32 = 0.25;
+/// How much smaller or larger than the paragraph's line before it a line
+/// gone on under a float may be set: hardly at all.
+const UNDER_A_FLOAT_SIZE: f32 = 0.95;
 
 /// How much larger, as a factor, one line's text has to be than the next
 /// one's to be set apart from it where sizes are exact: less than a heading
@@ -2049,10 +2227,16 @@ mod tests {
         let side_rows = (0..17).filter(|row| ![3, 8, 14].contains(row));
         let at = |row: i32| row as f32 * 14.0;
         let text: Vec<Line> = text_rows
-            .map(|row| line_at(&format!("T{row}"), 0.0, at(row), 600.0, at(row) + 12.0))
+            .map(|row| {
+                let words = format!("the text goes on in line {row}");
+                line_at(&words, 0.0, at(row), 600.0, at(row) + 12.0)
+            })
             .collect();
         let side: Vec<Line> = side_rows
-            .map(|row| line_at(&format!("S{row}"), 640.0, at(row), 840.0, at(row) + 12.0))
+            .map(|row| {
+                let words = format!("a note in line {row}");
+                line_at(&words, 640.0, at(row), 840.0, at(row) + 12.0)
+            })
             .collect();
         let cfg = LayoutConfig::default();
         let in_turn: Vec<Line> = text.iter().chain(&side).cloned().collect();
@@ -2064,6 +2248,149 @@ mod tests {
         row_by_row.sort_by(|a, b| a.bbox.y0.total_cmp(&b.bbox.y0));
         let ordered = reading_order_exact(row_by_row, &cfg);
         assert_eq!(ordered.len(), 17, "rows merged across the gutter");
+    }
+
+    #[test]
+    fn a_list_drawn_column_by_column_keeps_each_price_beside_its_item() {
+        // A price list set as two columns, the items and then their prices
+        // drawn one column after the other, and a note under the list. Two
+        // items wrap onto a second line, so the price column breaks where
+        // the items go on, as a sidebar would. But it holds a figure a line,
+        // each on its item's first baseline: the list's second column.
+        let item = |text: &str, y: f32, x1: f32| line_at(text, 0.0, y, x1, y + 12.0);
+        let price = |text: &str, y: f32| line_at(text, 440.0, y, 480.0, y + 12.0);
+        let lines = vec![
+            line_at("Preisliste", 0.0, -30.0, 80.0, -12.0),
+            item("Wartung der Heizung mit Abgasmessung und", 0.0, 330.0),
+            item("Reinigung des Brenners", 13.0, 130.0),
+            item("Austausch des Ausdehnungsgefäßes", 28.0, 200.0),
+            item("Hydraulischer Abgleich für ein Haus mit", 56.0, 345.0),
+            item("zwölf Heizkörpern und Dokumentation", 69.0, 210.0),
+            item("Anfahrtspauschale", 84.0, 90.0),
+            item("Notdienstzuschlag am Wochenende", 112.0, 180.0),
+            price("189,00 €", 0.0),
+            price("145,50 €", 28.0),
+            price("420,00 €", 56.0),
+            price("35,00 €", 84.0),
+            price("80,00 €", 112.0),
+            item("Alle Preise inklusive Mehrwertsteuer.", 150.0, 190.0),
+        ];
+        let ordered = reading_order_exact(lines, &LayoutConfig::default());
+        let texts = texts(&ordered);
+        for row in [
+            "Wartung der Heizung mit Abgasmessung und 189,00 €",
+            "Austausch des Ausdehnungsgefäßes 145,50 €",
+            "Hydraulischer Abgleich für ein Haus mit 420,00 €",
+            "Anfahrtspauschale 35,00 €",
+            "Notdienstzuschlag am Wochenende 80,00 €",
+        ] {
+            assert!(texts.contains(&row), "{texts:?}");
+        }
+        assert_eq!(texts.last(), Some(&"Alle Preise inklusive Mehrwertsteuer."));
+    }
+
+    #[test]
+    fn a_box_floated_beside_a_short_paragraph_stays_out_of_its_lines() {
+        // A Chinese paragraph of four lines beside a box of key figures
+        // floated right, set smaller and at a pitch of its own. Three of the
+        // paragraph's lines share a baseline with a line of the box, as a
+        // label and its value would; but each pair differs in size, and the
+        // paragraph's lines run on, filled to the gutter. The page draws the
+        // box first, as a browser paints a float.
+        let text = [
+            "由于两名新同事加入团队，等待时间减少了一",
+            "半。现在有三千多户家庭接入了集中供暖系统",
+            "。正如冬季测试所显示的那样，即使在严寒天",
+            "气下供应也有保障。",
+        ];
+        let paragraph: Vec<Line> = text
+            .iter()
+            .enumerate()
+            .map(|(row, words)| {
+                let y = row as f32 * 15.0;
+                let end = if row < 3 { 300.0 } else { 135.0 };
+                line_at(words, 0.0, y, end, y + 12.0)
+            })
+            .collect();
+        let figures = ["Kennzahlen", "Umsatz 4,2 Mio.", "EBIT 0,48 Mio."];
+        let boxed: Vec<Line> = figures
+            .iter()
+            .enumerate()
+            .map(|(row, words)| {
+                let y = 4.1 + row as f32 * 11.25;
+                line_at(words, 330.0, y, 400.0, y + 9.0)
+            })
+            .collect();
+        let cfg = LayoutConfig::default();
+        let drawn: Vec<Line> = boxed.iter().chain(&paragraph).cloned().collect();
+        let ordered = reading_order_exact(drawn, &cfg);
+        let want: Vec<&str> = text.iter().chain(&figures).copied().collect();
+        assert_eq!(texts(&ordered), want);
+        // A photo credit of one line beside it, on its first line's baseline.
+        let credit = line_at("Foto: Stadtwerke", 330.0, 4.1, 400.0, 13.1);
+        let drawn: Vec<Line> = std::iter::once(credit)
+            .chain(paragraph.iter().cloned())
+            .collect();
+        let ordered = reading_order_exact(drawn, &cfg);
+        let want: Vec<&str> = text.iter().copied().chain(["Foto: Stadtwerke"]).collect();
+        assert_eq!(texts(&ordered), want);
+        // Set in the paragraph's size on its first baseline, the line is the
+        // value of a cell that wraps, and stays in its row.
+        let value = line_at("189,00 €", 330.0, 0.0, 400.0, 12.0);
+        let drawn: Vec<Line> = paragraph.iter().cloned().chain([value]).collect();
+        let ordered = reading_order_exact(drawn, &cfg);
+        assert_eq!(ordered[0].text, format!("{} 189,00 €", text[0]));
+    }
+
+    #[test]
+    fn the_last_line_of_a_paragraph_under_a_left_float_is_read_with_it() {
+        // A box of key figures floated left, set smaller, and a Chinese
+        // paragraph beside it that goes on under the box, at the margin,
+        // for one short line: a gutter runs down the page to that line. The
+        // page draws the box first, then the paragraph line by line.
+        let boxed: Vec<Line> = ["Kennzahlen", "Umsatz 4,2 Mio.", "EBIT 0,48 Mio."]
+            .iter()
+            .enumerate()
+            .map(|(row, words)| {
+                let y = 4.1 + row as f32 * 11.25;
+                line_at(words, 0.0, y, 70.0, y + 9.0)
+            })
+            .collect();
+        let beside: Vec<Line> = (0..8)
+            .map(|row| {
+                let y = row as f32 * 15.0;
+                let words = "与去年相比，客户满意度明显提高，尤其是在电话服务方";
+                line_at(words, 100.0, y, 400.0, y + 12.0)
+            })
+            .collect();
+        let under = line_at("家庭接入了集中供暖系统。", 0.0, 120.0, 60.0, 132.0);
+        let drawn: Vec<Line> = boxed
+            .iter()
+            .chain(&beside)
+            .chain([&under])
+            .cloned()
+            .collect();
+        let cfg = LayoutConfig::default();
+        let ordered = reading_order_exact(drawn.clone(), &cfg);
+        assert_eq!(texts(&ordered), texts(&drawn));
+        let blocks = group_exact_blocks(ordered, &cfg, 0.0, &[]);
+        let sizes: Vec<usize> = blocks.iter().map(|b| b.lines.len()).collect();
+        assert_eq!(
+            sizes,
+            [3, 9],
+            "the box, then the paragraph with its last line"
+        );
+        // A picture's caption there, off the paragraph's pitch or set a
+        // little smaller, is no line of it.
+        for caption in [
+            line_at("Foto: Stadtarchiv", 0.0, 111.5, 60.0, 123.5),
+            line_at("Foto: Stadtarchiv", 0.0, 120.0, 60.0, 130.8),
+        ] {
+            let lines: Vec<Line> = beside.iter().cloned().chain([caption]).collect();
+            let blocks = group_exact_blocks(lines, &cfg, 0.0, &[]);
+            let sizes: Vec<usize> = blocks.iter().map(|b| b.lines.len()).collect();
+            assert_eq!(sizes, [8, 1]);
+        }
     }
 
     #[test]

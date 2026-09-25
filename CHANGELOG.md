@@ -167,7 +167,10 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   paragraph over an indented one stays its own; text beside a picture, a
   column of figures or long compounds beside a box, and Chinese beside a box
   wrap without hard breaks; and a formula in a slide's title is math in its
-  heading.
+  heading. Chinese, Japanese and Korean text beside a floated box keeps the
+  box out of its lines, a paragraph's last line under a picture floated left
+  stays with it, and a list drawn column by column keeps each price beside
+  its item.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and
