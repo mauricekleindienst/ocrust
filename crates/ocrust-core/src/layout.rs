@@ -198,6 +198,29 @@ fn body_text_height(
             chosen.retain(|l| size(l) >= smallest);
         }
     }
+    // A listing is set in a monospaced font, as a rule smaller than the
+    // text; however many lines it has, the text around it is the body. A
+    // size is the listing's when most of its lines that can be told are
+    // monospaced — a line of a word or two cannot, and goes with its size.
+    let same_size = |a: f32, b: f32| a.max(b) <= a.min(b) * 1.05;
+    let listing: Vec<f32> = chosen
+        .iter()
+        .filter(|l| monospace_verdict(l) == Some(true))
+        .map(|l| size(l))
+        .filter(|&height| {
+            let verdicts: Vec<bool> = chosen
+                .iter()
+                .filter(|l| same_size(size(l), height))
+                .filter_map(|l| monospace_verdict(l))
+                .collect();
+            let mono = verdicts.iter().filter(|&&m| m).count();
+            mono >= 3 && mono * 4 >= verdicts.len() * 3
+        })
+        .collect();
+    let in_listing = |l: &Line| listing.iter().any(|&height| same_size(size(l), height));
+    if chosen.iter().any(|l| !in_listing(l)) {
+        chosen.retain(|l| !in_listing(l));
+    }
     if chosen.is_empty() {
         return None;
     }
@@ -285,6 +308,11 @@ fn order(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Line> {
     if lines.is_empty() {
         return turned;
     }
+    let lines = if exact {
+        attach_drop_caps(lines)
+    } else {
+        lines
+    };
     let scale = median_height(&lines);
     // Whether the page has a repeating column structure is a property of the
     // whole page, so it is decided here: after the first horizontal cut a single
@@ -308,8 +336,104 @@ fn order(lines: Vec<Line>, cfg: &LayoutConfig, exact: bool) -> Vec<Line> {
     out
 }
 
+/// Whether a line is set in a monospaced font, as code is: from one word to
+/// the next, its words advance by the same width for each character of the
+/// text between them. The first word is left out: the others' boxes begin
+/// halfway across the space before them, its box where its text does.
+/// `None` for a line of too few words to tell.
+fn monospace_verdict(line: &Line) -> Option<bool> {
+    let mut offsets = Vec::with_capacity(line.words.len());
+    let mut from = 0usize;
+    for word in &line.words {
+        let at = line.text[from..].find(word.text.as_str())?;
+        offsets.push((line.text[..from + at].chars().count(), word.bbox.x0));
+        from += at + word.text.len();
+    }
+    let steps: Vec<f32> = offsets
+        .windows(2)
+        .skip(1)
+        .filter(|pair| pair[1].0 > pair[0].0)
+        .map(|pair| (pair[1].1 - pair[0].1) / (pair[1].0 - pair[0].0) as f32)
+        .collect();
+    let (least, most) = steps
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &w| (lo.min(w), hi.max(w)));
+    (steps.len() >= 2).then_some(least > 0.0 && most <= least * MONOSPACED_SPREAD)
+}
+
+/// How far a monospaced line's advance per character may spread: rounding.
+const MONOSPACED_SPREAD: f32 = 1.03;
+
 /// How far from the page's own angle, in degrees, a line is set at another.
 const TURNED_DEGREES: f32 = 5.0;
+/// How many of the text's lines tall a single letter is, at least, to be a
+/// paragraph's drop cap.
+const DROP_CAP_LINES: f32 = 2.0;
+
+/// Puts each drop cap back at the start of its paragraph's first line.
+///
+/// A paragraph's initial set two or three lines tall (a magazine's, a
+/// chapter's, Word's Drop Cap) shares a baseline with every line beside it,
+/// and read as a line of its own it joins whichever of them sits lowest. It
+/// is a single letter, clearly taller than the text, and a line starts just
+/// to its right, level with its top: the letter is that line's first.
+fn attach_drop_caps(mut lines: Vec<Line>) -> Vec<Line> {
+    let scale = median_height(&lines);
+    let mut i = 0;
+    while i < lines.len() {
+        let cap = &lines[i];
+        let letter = cap.text.trim();
+        let is_cap = letter.chars().count() == 1
+            && letter.chars().all(char::is_alphabetic)
+            && cap.bbox.height() >= scale * DROP_CAP_LINES;
+        let first = is_cap
+            .then(|| {
+                lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, line)| {
+                        *j != i
+                            && line.bbox.height() < cap.bbox.height() / DROP_CAP_LINES
+                            && line.bbox.x0 >= cap.bbox.x1 - scale * 0.2
+                            && line.bbox.x0 - cap.bbox.x1 <= scale * 1.5
+                            && line.bbox.center_y() > cap.bbox.y0
+                            && line.bbox.center_y() < cap.bbox.y1
+                    })
+                    .min_by(|a, b| cmp_f32(a.1.bbox.y0, b.1.bbox.y0))
+                    .map(|(j, _)| j)
+            })
+            .flatten()
+            .filter(|&j| lines[j].bbox.y0 - cap.bbox.y0 <= scale);
+        let Some(j) = first else {
+            i += 1;
+            continue;
+        };
+        let cap = lines.remove(i);
+        let j = if j > i { j - 1 } else { j };
+        let line = &mut lines[j];
+        let letter = cap.text.trim().to_string();
+        line.text = format!("{letter}{}", line.text.trim_start());
+        if let Some(word) = line.words.first_mut() {
+            word.text = format!("{letter}{}", word.text);
+            word.bbox.x0 = cap.bbox.x0;
+        }
+        if let Some(segment) = line.segments.first_mut() {
+            segment.text = format!("{letter}{}", segment.text.trim_start());
+            segment.bbox.x0 = cap.bbox.x0;
+        }
+        line.bbox.x0 = cap.bbox.x0;
+        line.quad = Quad::from_rect(line.bbox);
+    }
+    lines
+}
+/// How much smaller than a line across the gutter a line may be set and still
+/// be a cell of its row.
+const TWO_FLOWS_SIZE: f32 = 0.92;
+/// How far off a line's baseline across the gutter, in line heights, a line
+/// may sit and still be a cell of its row.
+const TWO_FLOWS_DRIFT: f32 = 0.2;
+/// How long a label before a colon may be: `Leistungszeitraum`, `Ihr Zeichen`.
+const LABEL_CHARS: usize = 32;
 
 /// Where a page's table columns begin and end: left edges, right edges and
 /// middles that three rows share.
@@ -533,8 +657,14 @@ fn xy_cut(
             let in_turn = !sheet.exact || read_in_turn(&lines, &[split]);
             let (left, right): (Vec<Line>, Vec<Line>) =
                 lines.into_iter().partition(|l| l.bbox.center_x() < split);
+            // A letter's reference block, each line with its own label, is
+            // no column of values whose labels stand beside it; nor is a
+            // list beside a paragraph a column of a table.
+            let self_labelled = sheet.exact
+                && (labelled(&left) != labelled(&right) || listed(&left) != listed(&right));
             let in_turn = in_turn
                 && !(sheet.exact
+                    && !self_labelled
                     && labels_and_values(
                         &[left.iter().collect(), right.iter().collect()],
                         scale,
@@ -565,9 +695,17 @@ fn xy_cut(
                 right.len(),
                 horizontal_span(&right),
             );
+            // Text set beside a box — a fact box, a sidebar — shares its
+            // baselines only by chance: the box is set smaller, or at a pitch
+            // of its own, where a row's cells share size and baseline. And a
+            // letter's reference block is no column of a table either.
+            let two_flows =
+                self_labelled || (sheet.exact && two_flows(&left, &right, cfg.baseline_overlap));
             if thin_side
                 || !in_turn
-                || (straddled >= cfg.column_shared_baseline_veto && (too_narrow || crowded))
+                || (straddled >= cfg.column_shared_baseline_veto
+                    && (too_narrow || crowded)
+                    && !two_flows)
             {
                 // The gutter runs through rows, not between columns.
                 emit_leaf(lines_from(left, right), cfg, max_merge_gap, out);
@@ -777,6 +915,75 @@ fn labels_and_values(columns: &[Vec<&Line>], scale: f32, cfg: &LayoutConfig) -> 
 }
 
 /// Share of the left side's baselines that also carry a box on the right.
+/// Whether the lines either side of a gutter are set independently of each
+/// other: most of the lines that share a baseline with one across it differ
+/// from it in size, or sit off its baseline by a fifth of a line. The cells
+/// of a table's row are set in one size on one baseline; a paragraph beside
+/// a fact box set at 88 % is not.
+fn two_flows(left: &[Line], right: &[Line], min_overlap: f32) -> bool {
+    let mut pairs = 0usize;
+    let mut apart = 0usize;
+    for l in left {
+        let across = right
+            .iter()
+            .map(|r| (r, l.bbox.vertical_overlap(&r.bbox)))
+            .filter(|(r, overlap)| {
+                *overlap / l.bbox.height().min(r.bbox.height()).max(1.0) >= min_overlap
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((r, _)) = across else { continue };
+        let (short, tall) = (
+            l.bbox.height().min(r.bbox.height()),
+            l.bbox.height().max(r.bbox.height()).max(1.0),
+        );
+        pairs += 1;
+        if short / tall < TWO_FLOWS_SIZE
+            || (l.bbox.center_y() - r.bbox.center_y()).abs() > short * TWO_FLOWS_DRIFT
+        {
+            apart += 1;
+        }
+    }
+    pairs >= 2 && apart * 2 >= pairs
+}
+
+/// Whether most of `lines`, two at least, open with a bullet or a number:
+/// `1. Konzeption (Q1)`, `• Server`.
+fn listed(lines: &[Line]) -> bool {
+    let opens_item = |text: &str| {
+        let text = text.trim_start();
+        let digits = text.chars().take_while(char::is_ascii_digit).count();
+        let rest = &text[digits..];
+        let numbered =
+            (1..=3).contains(&digits) && (rest.starts_with(". ") || rest.starts_with(") "));
+        numbered || text.starts_with(['•', '◦', '▪', '●', '○', '■', '–', '-', '*', '►', '✓'])
+    };
+    let count = lines.iter().filter(|l| opens_item(&l.text)).count();
+    lines.len() >= 2 && count * 4 >= lines.len() * 3
+}
+
+/// Whether most of `lines`, two at least, carry their own label:
+/// `Kundennummer: K-4711`, `Tel.: 030 1234`.
+fn labelled(lines: &[Line]) -> bool {
+    let count = lines.iter().filter(|l| carries_label(&l.text)).count();
+    lines.len() >= 2 && count * 4 >= lines.len() * 3
+}
+
+/// Whether a line is a label and its value: a few words ending in a colon,
+/// then the value after a space. A time (`10:30`) is not.
+fn carries_label(text: &str) -> bool {
+    let Some((label, value)) = text.trim().split_once(':') else {
+        return false;
+    };
+    let label = label.trim();
+    label.chars().next().is_some_and(char::is_alphabetic)
+        && label.chars().count() <= LABEL_CHARS
+        && label
+            .chars()
+            .all(|c| c.is_alphanumeric() || " .-/()".contains(c))
+        && value.starts_with(' ')
+        && !value.trim().is_empty()
+}
+
 fn shared_baseline_share(left: &[Line], right: &[Line], min_overlap: f32) -> f32 {
     let left: Vec<&Line> = left.iter().collect();
     let right: Vec<&Line> = right.iter().collect();
@@ -1323,11 +1530,13 @@ fn dehyphenate(lines: &mut Vec<Line>) {
             && !head.chars().rev().nth(1).is_some_and(char::is_numeric);
         let next = lines[i + 1].text.trim_start();
         let next_starts_lower = next.chars().next().is_some_and(|c| c.is_lowercase());
-        // "E-Mail-" over "Adresse": the hyphen is the compound's own, and the
-        // word goes on without a space.
+        // "E-Mail-" over "Adresse", "IT-" over "basierten": the hyphen is the
+        // compound's own, and the word goes on without a space.
         let compound = head.ends_with('-')
             && head.chars().rev().nth(1).is_some_and(char::is_alphabetic)
-            && next.chars().next().is_some_and(char::is_uppercase);
+            && (next.chars().next().is_some_and(char::is_uppercase)
+                || (abbreviation_before_hyphen(head)
+                    && next.chars().next().is_some_and(char::is_alphabetic)));
         if compound {
             let tail = lines.remove(i + 1);
             let head = &mut lines[i];
@@ -1350,6 +1559,29 @@ fn dehyphenate(lines: &mut Vec<Line>) {
         }
         i += 1;
     }
+}
+
+/// Whether the word a line ends in, before its hyphen, is an abbreviation in
+/// capitals — `IT-`, `PDF-`, `GPU-`: hyphenation never breaks a word right
+/// after a run of capitals, so the hyphen is the compound's own.
+pub(crate) fn abbreviation_before_hyphen(text: &str) -> bool {
+    let word = text
+        .trim_end()
+        .trim_end_matches(['-', '\u{2010}'])
+        .rsplit(|c: char| c.is_whitespace() || c == '-' || c == '/')
+        .next()
+        .unwrap_or("");
+    word.chars().filter(|c| c.is_alphabetic()).count() >= 2
+        && word.chars().all(|c| c.is_uppercase() || c.is_ascii_digit())
+}
+
+/// Whether a character belongs to a script written without spaces between
+/// its words: Chinese, Japanese, and their punctuation.
+pub(crate) fn unspaced(c: char) -> bool {
+    matches!(c,
+        '\u{3000}'..='\u{303F}' | '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{FF00}'..='\u{FFEF}'
+        | '\u{20000}'..='\u{2FFFF}')
 }
 
 /// Turns CTC character positions into word boxes along a line quad.
@@ -2284,6 +2516,75 @@ mod tests {
         ];
         let blocks = group_blocks(lines, &LayoutConfig::default());
         assert_eq!(blocks[0].text(), "Nord-Süd-Achse");
+        let lines = vec![
+            line_at("Wir bieten IT-", 0.0, 0.0, 100.0, 10.0),
+            line_at("basierte Dienste an.", 0.0, 12.0, 100.0, 22.0),
+        ];
+        let blocks = group_blocks(lines, &LayoutConfig::default());
+        assert_eq!(blocks[0].text(), "Wir bieten IT-basierte Dienste an.");
+        assert!(abbreviation_before_hyphen("GPU-") && abbreviation_before_hyphen("für PDF-"));
+        assert!(!abbreviation_before_hyphen("Instandhal-") && !abbreviation_before_hyphen("A-"));
+    }
+
+    #[test]
+    fn a_line_of_code_is_monospaced_and_a_sentence_is_not() {
+        let with_words = |text: &str, words: &[(&str, f32, f32)]| {
+            let mut line = line_at(text, words[0].1, 0.0, words[words.len() - 1].2, 10.0);
+            line.words = words
+                .iter()
+                .map(|(t, x0, x1)| Word {
+                    text: (*t).into(),
+                    bbox: Rect::new(*x0, 0.0, *x1, 10.0),
+                    confidence: 1.0,
+                })
+                .collect();
+            line
+        };
+        let code = with_words(
+            "result_0 = compute(value_0, factor=0)",
+            &[
+                ("result_0", 159.0, 297.6),
+                ("=", 297.6, 330.2),
+                ("compute(value_0,", 330.2, 607.4),
+                ("factor=0)", 607.4, 762.3),
+            ],
+        );
+        assert_eq!(monospace_verdict(&code), Some(true));
+        let prose = with_words(
+            "Run the processing function over",
+            &[
+                ("Run", 93.7, 153.5),
+                ("the", 153.5, 202.5),
+                ("processing", 202.5, 353.4),
+                ("function", 353.4, 472.9),
+                ("over", 472.9, 540.4),
+            ],
+        );
+        assert_eq!(monospace_verdict(&prose), Some(false));
+    }
+
+    #[test]
+    fn a_drop_cap_opens_its_paragraphs_first_line() {
+        // The initial three lines tall, level with the first line's top.
+        let lines = vec![
+            line_at("D", 0.0, 0.0, 30.0, 34.0),
+            line_at("ie Stadt liegt am Ufer", 34.0, 0.0, 300.0, 10.0),
+            line_at("des Flusses und ist seit", 34.0, 12.0, 300.0, 22.0),
+            line_at("dem Mittelalter ein Ort.", 34.0, 24.0, 300.0, 34.0),
+            line_at("Im neunzehnten Jahrhundert", 0.0, 36.0, 300.0, 46.0),
+        ];
+        let lines = attach_drop_caps(lines);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts[0], "Die Stadt liegt am Ufer");
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].bbox.x0, 0.0);
+        // A large single letter with nothing level with its top is left be.
+        let alone = vec![
+            line_at("A", 0.0, 0.0, 30.0, 34.0),
+            line_at("text below it", 0.0, 40.0, 300.0, 50.0),
+            line_at("more text", 0.0, 52.0, 300.0, 62.0),
+        ];
+        assert_eq!(attach_drop_caps(alone).len(), 3);
     }
 
     #[test]

@@ -507,8 +507,9 @@ fn over_the_header(
 
 /// The columns each cell of a group row stands over: the narrowest run of
 /// them whose stretch covers it and is centred on it, one run after the
-/// other. `None` unless every cell finds its run and one of them spans two
-/// columns or more — else the line is not a row of groups.
+/// other. `None` unless every cell finds its run, one of them spans two
+/// columns or more and none spans them all — else the line is not a row of
+/// groups.
 fn grouped(row: &[Candidate], columns: &[(f32, f32)]) -> Option<Vec<(usize, usize, String)>> {
     let n = columns.len();
     // Where each column's stretch begins and ends: halfway across the gaps.
@@ -547,7 +548,9 @@ fn grouped(row: &[Candidate], columns: &[(f32, f32)]) -> Option<Vec<(usize, usiz
         next = best.1 + 1;
         out.push((best.0, best.1, candidate.cell.text.clone()));
     }
-    out.iter().any(|&(a, b, _)| b > a).then_some(out)
+    // A line over every column is the table's caption, not a group of it.
+    (out.iter().any(|&(a, b, _)| b > a) && out.iter().all(|&(a, b, _)| b + 1 - a < n))
+        .then_some(out)
 }
 
 /// Whether a line of one cell sits in one of the table's columns: a row
@@ -1093,11 +1096,15 @@ fn grid(
 fn join_wrapped(first: &str, next: &str) -> String {
     let compound = first.ends_with('-')
         && first.chars().rev().nth(1).is_some_and(char::is_alphabetic)
-        && next.chars().next().is_some_and(char::is_uppercase);
+        && (next.chars().next().is_some_and(char::is_uppercase)
+            || crate::layout::abbreviation_before_hyphen(first));
+    let unspaced = first.chars().last().is_some_and(crate::layout::unspaced)
+        && next.chars().next().is_some_and(crate::layout::unspaced);
     if broken_word(first, next) {
         format!("{}{}", &first[..first.len() - 1], next)
-    } else if compound {
-        // "E-Mail-" over "Adresse": the compound's own hyphen stays.
+    } else if compound || unspaced {
+        // "E-Mail-" over "Adresse": the compound's own hyphen stays; and
+        // Chinese or Japanese goes on without a space.
         format!("{first}{next}")
     } else {
         format!("{first} {next}")
@@ -1109,6 +1116,7 @@ fn join_wrapped(first: &str, next: &str) -> String {
 fn broken_word(first: &str, next: &str) -> bool {
     let mut chars = first.trim_end().chars().rev();
     first.ends_with('-')
+        && !crate::layout::abbreviation_before_hyphen(first)
         && chars.next() == Some('-')
         && chars.next().is_some_and(char::is_alphabetic)
         && next
@@ -1387,6 +1395,14 @@ mod tests {
         assert_eq!(join_wrapped("Vor-", "und Nachname"), "Vor- und Nachname");
         assert_eq!(join_wrapped("Schmidt,", "Weber"), "Schmidt, Weber");
         assert_eq!(join_wrapped("E-Mail-", "Adresse"), "E-Mail-Adresse");
+        assert_eq!(
+            join_wrapped("für IT-", "basierte Dienste"),
+            "für IT-basierte Dienste"
+        );
+        assert_eq!(
+            join_wrapped("项目的下一阶段", "将于四月开始"),
+            "项目的下一阶段将于四月开始"
+        );
         assert!(figure("4,90") && figure("030 1234") && figure("12.03.2026"));
         assert!(!figure("Muttern M4") && !figure("12.06. Hinweis:"));
     }

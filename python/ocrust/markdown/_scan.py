@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from ocrust._types import Block as ScanBlock
 from ocrust._types import Document, Line, Page
 
-from ._ir import Block, Break, Entry, Heading, Inline, Marker, Paragraph, Table, nest, plain
+from ._ir import Block, Break, Code, Entry, Heading, Inline, Marker, Paragraph, Table, nest, plain
 
 #: How much of the page height, at the top and at the bottom, running heads and
 #: page numbers are looked for in.
@@ -63,6 +63,26 @@ def extraction(doc: Document) -> str:
     if origins == {"pdf_text"}:
         return "text"
     return "mixed" if "pdf_text" in origins else "ocr"
+
+
+#: Characters of the scripts written without spaces between words: Chinese,
+#: Japanese, and their punctuation and full-width forms.
+_UNSPACED = re.compile(
+    "[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef"
+    "\U00020000-\U0002ffff]"
+)
+
+
+def _glue(before: str, after: str) -> str:
+    """What joins two lines of one paragraph: a space, or nothing between
+    two characters of Chinese or Japanese, which set no spaces between words."""
+    if before and after and _UNSPACED.match(before[-1]) and _UNSPACED.match(after[0]):
+        return ""
+    return " "
+
+
+#: A line that starts with its own label: a few words, a colon, the value.
+_LABELLED = re.compile(r"[^\W\d][\w .\-/()]{0,31}:\s+\S")
 
 
 def _key(text: str) -> str:
@@ -231,7 +251,10 @@ def _page(
         if lines and any(line.text.strip() for line in lines):
             blocks.append((block, lines))
 
-    columns = _column_edges([(b, ls) for b, ls in blocks if b.kind == "paragraph"])
+    columns = _Columns(
+        _column_edges([(b, ls) for b, ls in blocks if b.kind == "paragraph"]),
+        [_extent(ls) for _, ls in blocks],
+    )
     out: list[Block] = []
     items: list[_Item] = []
 
@@ -255,6 +278,10 @@ def _page(
             level = levels.get(round(lines[0].box.height, 1), 2)
             out.append(Heading(level, [text]))
             continue
+        listing = _listing(lines)
+        if listing is not None:
+            out.append(Code(listing))
+            continue
         out.append(Paragraph(_joined(lines, _right_edge(lines, columns))))
     flush_list()
     return out
@@ -268,21 +295,88 @@ def _column_edges(blocks: list[tuple[ScanBlock, list[Line]]]) -> list[tuple[floa
     ]
 
 
-def _right_edge(lines: list[Line], columns: list[tuple[float, float]]) -> float:
+@dataclass
+class _Columns:
+    """What a page's blocks say about where its columns end: the extent of
+    each paragraph, and the box of every block."""
+
+    paragraphs: list[tuple[float, float]]
+    blocks: list[tuple[float, float, float, float]]
+
+
+def _extent(lines: Sequence[Line]) -> tuple[float, float, float, float]:
+    return (
+        min(line.box.x0 for line in lines),
+        min(line.box.y0 for line in lines),
+        max(line.box.x1 for line in lines),
+        max(line.box.y1 for line in lines),
+    )
+
+
+def _right_edge(lines: list[Line], columns: _Columns) -> float:
     """Where the column this block sits in ends.
 
     Not where the block itself ends: a two-line signature — `Mit freundlichen
     Grüßen`, then a name — is narrower than the column, and measured against
-    itself its first line would look full.
+    itself its first line would look full. The column is that of the
+    paragraphs starting where the block starts: a column beside it, or under
+    an indented abstract, is another. Nor does it reach past a block set
+    beside it: a paragraph beside a fact box ends where the box begins.
     """
-    x0 = min(line.box.x0 for line in lines)
-    x1 = max(line.box.x1 for line in lines)
+    x0, y0, x1, y1 = _extent(lines)
     right = x1
-    for left, end in columns:
+    same_start = 2 * max(line.box.height for line in lines)
+    for left, end in columns.paragraphs:
         overlap = min(x1, end) - max(x0, left)
-        if overlap > 0.5 * min(x1 - x0, end - left):
+        if overlap > 0.5 * min(x1 - x0, end - left) and abs(left - x0) <= same_start:
             right = max(right, end)
+    beside = [
+        bx0
+        for bx0, by0, _, by1 in columns.blocks
+        if bx0 >= x1 - 1 and min(y1, by1) - max(y0, by0) > 0
+    ]
+    if beside:
+        right = max(x1, min(right, min(beside)))
     return right
+
+
+def _advance(line: Line) -> float | None:
+    """A monospaced line's advance per character, or None when it is not
+    monospaced or has too few words to tell: from its second word on, its
+    words advance by the same width for each character of text between them.
+    (The first word's box starts where its text does, the others' halfway
+    across the space before them.)"""
+    offsets: list[tuple[int, float]] = []
+    start = 0
+    for word in line.words:
+        at = line.text.find(word.text, start)
+        if at < 0:
+            return None
+        offsets.append((at, word.box.x0))
+        start = at + len(word.text)
+    steps = [(b[1] - a[1]) / (b[0] - a[0]) for a, b in zip(offsets[1:], offsets[2:]) if b[0] > a[0]]
+    if len(steps) < 2 or min(steps) <= 0 or max(steps) > min(steps) * 1.03:
+        return None
+    return sorted(steps)[len(steps) // 2]
+
+
+def _listing(lines: Sequence[Line]) -> str | None:
+    """A block's lines as code, when they are set in a monospaced font: most
+    of the lines that can be told are, two at least, and none is running
+    text. Each line keeps its indent, counted in characters."""
+    told = [_advance(line) for line in lines if len(line.words) >= 4]
+    mono = sorted(advance for advance in told if advance is not None)
+    if len(mono) < 2 or len(mono) * 4 < len(told) * 3:
+        return None
+    advance = mono[len(mono) // 2]
+
+    def start(line: Line) -> float:
+        return line.words[0].box.x0 if line.words else line.box.x0
+
+    left = min(start(line) for line in lines)
+    return "\n".join(
+        " " * max(round((start(line) - left) / advance), 0) + line.text.strip() for line in lines
+    )
 
 
 def _first_word_width(line: Line) -> float:
@@ -299,6 +393,8 @@ def _joined(lines: Sequence[Line], right: float) -> list[Inline]:
 
     That is how a line broken on purpose — an address, a list of names, a
     signature — tells itself apart from one the column was simply full at.
+    Two lines that each carry their own label — `Kundennummer: K-4711` over
+    `Datum: 12.09.2026` — are two fields, however full the first one is.
     """
     content: list[Inline] = []
     for index, line in enumerate(lines):
@@ -309,7 +405,11 @@ def _joined(lines: Sequence[Line], right: float) -> list[Inline]:
             previous = lines[index - 1]
             room = right - previous.box.x1
             needed = _first_word_width(line) + 0.35 * previous.box.height
-            content.append(Break() if room > needed else " ")
+            fields = _LABELLED.match(previous.text.strip()) and _LABELLED.match(text)
+            if room > needed or fields:
+                content.append(Break())
+            elif _glue(previous.text.strip(), text):
+                content.append(" ")
         content.append(text)
     return content
 
@@ -322,7 +422,7 @@ class _Item:
     content: list[Inline]
 
 
-def _items(lines: list[Line], columns: list[tuple[float, float]]) -> list[_Item]:
+def _items(lines: list[Line], columns: _Columns) -> list[_Item]:
     """A list-item block's items: a line with a bullet or a number opens one,
     any other line carries on the one before."""
     items: list[_Item] = []
@@ -397,6 +497,16 @@ def _nest(items: list[_Item]) -> list[Block]:
     return nest(entries)
 
 
+def _abbreviation_hyphen(text: str) -> bool:
+    """Whether a line ends in an abbreviation in capitals and a hyphen —
+    `IT-`, `PDF-`: hyphenation never breaks a word right after a run of
+    capitals, so the hyphen is the compound's own."""
+    if not text.endswith("-"):
+        return False
+    word = re.split(r"[\s/-]", text[:-1])[-1]
+    return sum(c.isalpha() for c in word) >= 2 and all(c.isupper() or c.isdigit() for c in word)
+
+
 def _join_across_pages(blocks: list[Block]) -> list[Block]:
     """Joins a paragraph a page break cut in two.
 
@@ -415,9 +525,19 @@ def _join_across_pages(blocks: list[Block]) -> list[Block]:
             and isinstance(blocks[index + 2], Paragraph)
         ):
             head, tail = plain(block.content), plain(blocks[index + 2].content)
-            if head and tail and not _ENDS_SENTENCE.search(head) and tail[0].islower():
+            unspaced = _glue(head, tail) == ""
+            if (
+                head
+                and tail
+                and not _ENDS_SENTENCE.search(head)
+                and (tail[0].islower() or unspaced)
+            ):
                 content = list(block.content)
-                if head.endswith("-") and len(head) > 1 and head[-2].isalpha():
+                if unspaced or _abbreviation_hyphen(head):
+                    # Chinese or Japanese runs on without a space; `IT-` over
+                    # `basierten` keeps the compound's own hyphen.
+                    content.extend(blocks[index + 2].content)
+                elif head.endswith("-") and len(head) > 1 and head[-2].isalpha():
                     # A word hyphenated across the page break.
                     last = content[-1]
                     if isinstance(last, str) and last.endswith("-"):
