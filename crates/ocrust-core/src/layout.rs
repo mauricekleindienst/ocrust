@@ -242,6 +242,18 @@ fn body_text_height(
                 && b.bbox.horizontal_overlap(&a.bbox) > 0.0
         })
     };
+    // Notes set under the text, smaller and however many — a page of
+    // footnotes — leave the text its size: every smaller line stands below
+    // the larger size's last line, and a note opens on its number.
+    let over_notes = |set: &[&&Line], height: f32| {
+        let bottom = set.iter().map(|l| l.bbox.y1).fold(f32::MIN, f32::max);
+        let notes: Vec<&&Line> = chosen
+            .iter()
+            .filter(|l| !same(size(l), height) && size(l) < height)
+            .collect();
+        notes.iter().all(|l| l.bbox.y0 >= bottom - 0.5 * height)
+            && notes.iter().any(|l| opens_a_note(&l.text))
+    };
     let body = sizes
         .iter()
         .copied()
@@ -250,11 +262,23 @@ fn body_text_height(
             let set: Vec<&&Line> = chosen.iter().filter(|l| same(size(l), height)).collect();
             let share: usize = set.iter().map(|l| chars(l)).sum();
             set.len() >= BODY_LINES
-                && share as f32 >= BODY_SHARE * total as f32
+                && (share as f32 >= BODY_SHARE * total as f32 || over_notes(&set, height))
                 && paragraph(height)
         })
         .fold(median, f32::max);
     Some(body)
+}
+
+/// Whether a line opens a note on its number: `¹ See …`, `12 Ibid.`.
+fn opens_a_note(text: &str) -> bool {
+    let mut words = text.split_whitespace();
+    let (Some(mark), Some(_)) = (words.next(), words.next()) else {
+        return false;
+    };
+    mark.chars().count() <= 3
+        && mark
+            .chars()
+            .all(|c| c.is_ascii_digit() || "¹²³⁴⁵⁶⁷⁸⁹⁰*†‡".contains(c))
 }
 
 fn median_height(lines: &[Line]) -> f32 {
@@ -2139,9 +2163,25 @@ fn paragraphs(
                     let (l0, l1) = (largest_size(prev), largest_size(&line));
                     apart(s0, s1) && apart(l0, l1)
                 };
-                // So is a change between a bold face and the body's: a heading
-                // set but a little larger than its text, or not at all.
-                let reweighted = exact && !body.bold && prev.bold != line.bold;
+                // So is a change between a bold face and the body's where the
+                // line before ends short of the column: a heading set but a
+                // little larger than its text, or not at all, over its text or
+                // under a paragraph's end. A bold phrase filling its line goes
+                // on in the paragraph, and a list item's bold title goes on in
+                // its description.
+                let reweighted = exact && !body.bold && prev.bold != line.bold && {
+                    let edge = current
+                        .iter()
+                        .chain([&line])
+                        .chain(lines.iter().take(2))
+                        .map(|l| l.bbox.x1)
+                        .fold(f32::MIN, f32::max);
+                    let short = prev.bbox.x1 + first_word_width(&line) + scale * WRAP_SPACE < edge;
+                    let opening = &current[0].text;
+                    let item = strip_bullet(opening).len() < opening.trim_start().len()
+                        || numbered(opening);
+                    short && (!prev.bold || (current.iter().all(|l| l.bold) && !item))
+                };
                 // A bullet opens an item, however close it follows: a list set
                 // right under its lead-in is still a list. A dash in running
                 // text set at a line's start opens none.
@@ -2406,6 +2446,11 @@ fn classify_block(
     let most_lines = if exact { EXACT_HEADING_LINES } else { 2 };
     let chars: usize = lines.iter().map(|l| l.text.chars().count()).sum();
     let trimmed = first.text.trim_start();
+    let text: String = lines
+        .iter()
+        .map(|l| l.text.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
     // Where sizes are exact, a short line or two ending in no stop is a
     // section's heading set but a little larger than the text — Word's and
     // LibreOffice's styles set it at 13 points over 11 — or as large as the
@@ -2413,31 +2458,24 @@ fn classify_block(
     let size = first.quad.edge_height();
     let short = lines.len() <= SHORT_HEADING_LINES
         && chars <= 120
-        && !lines
-            .last()
-            .is_some_and(|l| l.text.trim_end().ends_with(['.', ',', ';', ':']))
-        && !captioned(trimmed);
+        && !text.ends_with(['.', ',', ';', ':', '!'])
+        && !captioned(trimmed)
+        && !priced(&text);
     let set_off = exact
         && short
         && ((body.settled && size > text_height * EXACT_SIZE_CHANGE)
             || (!body.bold
                 && lines.iter().all(|l| l.bold)
                 && size >= text_height * BOLD_HEADING_SIZE));
-    let heading = set_off
-        || (tall && lines.len() <= most_lines && first.text.chars().count() <= 120 && chars <= 240);
-    // `3. Punkt` and `3) Punkt`; not `12.03.2026 fand …` or `3.5 Tonnen …`,
-    // whose number runs on past the dot.
-    let numbered = trimmed.split_once(['.', ')']).is_some_and(|(head, rest)| {
-        !head.is_empty()
-            && head.len() <= 3
-            && head.chars().all(|c| c.is_ascii_digit())
-            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-    });
-    // A number in front of a large line numbers a chapter, not a list item.
+    let large =
+        tall && lines.len() <= most_lines && first.text.chars().count() <= 120 && chars <= 240;
+    let heading = set_off || large;
+    // A number in front of a large line numbers a chapter, not a list item;
+    // one in front of a line in the text's size, bold or not, an item.
     // A hyphen opens an item as a dash does, spaced from its text: `- Brot`,
     // not `-5 °C`; in a monospaced font it is code's, a YAML list's.
     let hyphen = trimmed.starts_with("- ") && !first.monospaced;
-    if trimmed.starts_with(BULLETS) || hyphen || (numbered && !heading) {
+    if trimmed.starts_with(BULLETS) || hyphen || (numbered(trimmed) && !large) {
         return BlockKind::ListItem;
     }
     if heading {
@@ -2452,6 +2490,36 @@ const SHORT_HEADING_LINES: usize = 2;
 /// How large, against the text, a bold heading is set at least: as large,
 /// give or take a box's rounding.
 const BOLD_HEADING_SIZE: f32 = 0.95;
+
+/// Whether a line opens with a list item's number: `3. Punkt` and `3) Punkt`;
+/// not `12.03.2026 fand …` or `3.5 Tonnen …`, whose number runs on past the
+/// dot.
+fn numbered(text: &str) -> bool {
+    text.trim_start()
+        .split_once(['.', ')'])
+        .is_some_and(|(head, rest)| {
+            !head.is_empty()
+                && head.len() <= 3
+                && head.chars().all(|c| c.is_ascii_digit())
+                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+}
+
+/// Whether a line names an amount after its first word, `Total 1,234.50
+/// EUR`: a total, a price, no heading. A section's number comes first.
+fn priced(text: &str) -> bool {
+    text.split_whitespace().skip(1).any(|word| {
+        let word = word.trim_matches(|c: char| !c.is_ascii_digit());
+        let mut parts = word.rsplitn(2, ['.', ',']);
+        let (cents, units) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        cents.len() == 2
+            && cents.chars().all(|c| c.is_ascii_digit())
+            && units
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_digit())
+    })
+}
 
 /// Whether a line opens a caption: `Figure 3`, `Tabelle 2:`.
 fn captioned(text: &str) -> bool {
@@ -2527,6 +2595,15 @@ const AFTER_SUSPENDED_HYPHEN: &[(&str, bool)] = &[
     ("o", true),
 ];
 
+/// Whether a line ending in a figure's hyphen goes on with the second half
+/// of a pair joined by a little word no figure's compound starts with:
+/// `1-` over `or 2-bedroom`, `5-` over `to 10-minute`.
+fn continues_a_figures_hyphen(next: &str) -> bool {
+    let word: String = next.chars().take_while(|c| c.is_alphabetic()).collect();
+    ["or", "and", "to", "nor", "und", "oder", "bis", "et", "ou"].contains(&word.as_str())
+        && next[word.len()..].starts_with(char::is_whitespace)
+}
+
 /// Whether a line that ends in a hyphen goes on with a conjunction and the
 /// second half of a pair — "und Nachname" — rather than the rest of a word.
 pub(crate) fn continues_a_suspended_hyphen(next: &str) -> bool {
@@ -2600,7 +2677,8 @@ fn dehyphenate(lines: &mut Vec<Line>) {
             || (head.ends_with(['-', '\u{2010}'])
                 && head.chars().rev().nth(1).is_some_and(|c| c.is_ascii_digit())
                 && next.chars().next().is_some_and(char::is_alphabetic)
-                && !continues_a_suspended_hyphen(next))
+                && !continues_a_suspended_hyphen(next)
+                && !continues_a_figures_hyphen(next))
             || (head.ends_with(['-', '\u{2010}'])
                 && head.chars().rev().nth(1).is_some_and(char::is_alphabetic)
                 && next.chars().next().is_some_and(|c| c.is_ascii_digit()));
@@ -4131,6 +4209,7 @@ mod tests {
             ("die Euro-6-", "Norm", "die Euro-6-Norm"),
             ("eine 3-", "fache Menge", "eine 3-fache Menge"),
             ("die 2-", "und 3-Zimmer", "die 2-\nund 3-Zimmer"),
+            ("a 1-", "or 2-bedroom flat", "a 1-\nor 2-bedroom flat"),
             (
                 "die Instand\u{00ad}\u{2010}",
                 "haltung der",

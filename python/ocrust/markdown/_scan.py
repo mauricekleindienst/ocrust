@@ -129,6 +129,16 @@ _SLUG = re.compile(r"[a-z\d]+(?:-[a-z\d]+){2,}(?![\w-])")
 _PATH_DOT = re.compile(r"(?:(?<!\S)(?:\w+://|~|\.{0,2}/)\S*|\S*/\S*/\S*)[A-Za-z]\.$")
 
 
+#: A letter's closing, which the sender's name follows: a short line
+#: ending in a comma, or one of the usual formulas.
+_CLOSING = re.compile(
+    r"^[^.!?]{0,40},$|^(?:(?:kind|best|warm|warmest|many)\s+)?regards\W*$"
+    r"|^(?:yours\s+)?(?:sincerely|faithfully|truly)\W*$|^mit\s+freundlichen\s+grü(?:ß|ss)en\W*$"
+    r"|^(?:viele|beste|liebe|herzliche|freundliche|schöne)\s+grü(?:ß|ss)e\W*$"
+    r"|^hochachtungsvoll\W*$|^cordialement\W*$|^met\s+vriendelijke\s+groet(?:en)?\W*$",
+    re.IGNORECASE,
+)
+
 #: A line that starts with its own label: a few words, a colon, the value.
 _LABELLED = re.compile(r"[^\W\d][\w .\-/()]{0,31}:\s+\S")
 
@@ -182,7 +192,7 @@ def _sentence(
     words = re.findall(r"[^\W\d_]+", text)
     if (
         len(words) < _SENTENCE_WORDS
-        or not re.search(r"[^.]\.[\"'”’»)]*$", text)
+        or not re.search(r"[^.]\.[\"'”’»)]*[¹²³⁴⁵⁶⁷⁸⁹⁰]*$", text)
         or re.match(r"^(?:§\s*)?\d+(?:\.\d+)*\.?\s", text)
     ):
         return False
@@ -431,7 +441,17 @@ def _page(
                 out.append(Table([[[cell] for cell in row] for row in rows]))
                 spots.append(_Spot(_extent(lines)))
                 continue
-        if block.kind == "heading" and not _sentence(lines, body, top, coded, _opens(page, lines)):
+        # A name set apart under a closing — `Kind regards,` — signs it.
+        signed = (
+            bool(out)
+            and isinstance(out[-1], Paragraph)
+            and bool(_CLOSING.search(plain(out[-1].content).strip()))
+        )
+        if (
+            block.kind == "heading"
+            and not signed
+            and not _sentence(lines, body, top, coded, _opens(page, lines))
+        ):
             text = " ".join(line.text.strip() for line in lines)
             level = levels.get(round(lines[0].box.height, 1), 2)
             out.append(Heading(level, [text]))
@@ -765,6 +785,10 @@ def _carried_on(
         at -= 1
         if at < 0 or len(out) - at > _BOXES_BESIDE:
             return False
+    # A heading is passed only beside the paragraph, a box's title: one at
+    # the head of the next column heads the text under it.
+    if way == "column" and any(isinstance(block, Heading) for block in out[at + 1 :]):
+        return False
     flow = _one_flow(head, head_spot, tail, spot, page) if way == "column" else "long"
     if flow is None:
         return False

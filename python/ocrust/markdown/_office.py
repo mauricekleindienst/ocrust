@@ -624,11 +624,11 @@ class _Word:
         if self._hidden(rpr):
             return
         fmt: set[str] = set()
-        if _on(child(rpr, "b")):
+        if self._flag(rpr, "b"):
             fmt.add("strong")
-        if _on(child(rpr, "i")):
+        if self._flag(rpr, "i"):
             fmt.add("emph")
-        if _on(child(rpr, "strike")) or _on(child(rpr, "dstrike")):
+        if self._flag(rpr, "strike") or self._flag(rpr, "dstrike"):
             fmt.add("strike")
         if monospaced_font(self._font(rpr)):
             fmt.add("code")
@@ -715,6 +715,21 @@ class _Word:
             runs.append(("(", fmt, state.link or link))
             runs.extend(reading)
             runs.append((")", fmt, state.link or link))
+
+    def _flag(self, rpr: Element | None, name: str) -> bool:
+        """Whether a run is set bold, italic or struck through (`name`): by
+        its own formatting, else by its character style — Word's `Strong`
+        and `Emphasis`."""
+        own = child(rpr, name)
+        if own is not None:
+            return _on(own)
+        style = child(rpr, "rStyle")
+        if style is not None:
+            for each in self.styles.chain(attr(style, "val") or ""):
+                flag = child(child(each, "rPr"), name)
+                if flag is not None:
+                    return _on(flag)
+        return False
 
     def _font(self, rpr: Element | None) -> str | None:
         """The font a run is set in: its own, else its character style's,
@@ -1721,15 +1736,13 @@ _MAX_SHEET_COLUMNS = 16384
 #: the first row, within its first few kilobytes.
 _SHEET_HEAD = 1024 * 1024
 _PERCENT_FORMATS = {9, 10}
-#: A totals row or two set off from its table by up to this many empty rows.
-_TOTAL_ROWS = 2
+#: How many empty rows, at most, set off rows that still go on the table
+#: above them: a totals row, a balance, the next months.
 _TOTAL_GAP = 2
-#: What a totals row says it is in its first cell.
-_TOTAL_LABEL = re.compile(
-    r"(?:grand\s+|sub)?(?:total|sum|summe|zwischensumme|gesamt|insgesamt|endsumme|netto"
-    r"|brutto|mwst|ust|vat|tax|average|mean|durchschnitt|mittelwert|somme|totaal|totale|suma)",
-    re.IGNORECASE,
-)
+#: A cell holding a figure: an amount, a count, a share, a date.
+_FIGURE = re.compile(r"[-+−(]?\s*[€$£]?\s*\d[\d.,'’\s/:]*\s*(?:%|[€$£]|[A-Z]{3})?\)?")
+#: A row of years heads a table of its own.
+_YEAR = re.compile(r"(?:19|20)\d\d")
 
 
 def _is_date_format(code: str) -> bool:
@@ -2008,6 +2021,24 @@ def _duration(days: float) -> str:
     return f"{text}:{seconds:02d}" if seconds else text
 
 
+def _shaped_like(row: dict[int, str], model: dict[int, str]) -> bool:
+    """Whether a row holds figures where `model`, a table's row, does and
+    words where it does, its first cell aside — a label, `Balance`, under a
+    column of dates — and a figure at least."""
+    first = min(row)
+    figures = 0
+    for column, value in row.items():
+        figure = bool(_FIGURE.fullmatch(value.strip()))
+        figures += figure
+        if (
+            column != first
+            and column in model
+            and figure != bool(_FIGURE.fullmatch(model[column].strip()))
+        ):
+            return False
+    return figures > 0
+
+
 def _sheet_blocks(rows: dict[int, dict[int, str]], dropped: int = 0) -> list[Block]:
     """A sheet's cells as tables, split where whole rows are empty.
 
@@ -2033,17 +2064,17 @@ def _sheet_blocks(rows: dict[int, dict[int, str]], dropped: int = 0) -> list[Blo
             table = None
         elif (
             table is not None
-            and len(group) <= _TOTAL_ROWS
             and group[0] - table[1] <= _TOTAL_GAP + 1
             and set(columns) <= set(table[0])
-            and all(
-                _TOTAL_LABEL.match(rows[r][min(rows[r])].strip())
-                and any(char.isdigit() for v in rows[r].values() for char in v)
-                for r in group
+            and all(_shaped_like(rows[r], rows[table[1]]) for r in group)
+            and not all(
+                _YEAR.fullmatch(v.strip())
+                for c, v in rows[group[0]].items()
+                if c != min(rows[group[0]])
             )
         ):
-            # A totals row set off by an empty row stays under the columns
-            # it totals.
+            # Rows set off by an empty row in the table's shape — a totals
+            # row, a balance, the next months — stay under its columns.
             last = out[-1]
             assert isinstance(last, Table)
             last.rows.extend([[rows[r].get(c, "")] for c in table[0]] for r in group)

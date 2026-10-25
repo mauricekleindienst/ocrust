@@ -240,8 +240,17 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   slide's title stating its point stays a heading over two or three lines.
   A justified table cell whose first line stretches its words across the
   gutter stays one cell, a sheet's title in a row of its own over the table
-  is no longer taken for its header, and only a row labelled as a total
-  joins the table above it.
+  is no longer taken for its header, and rows set off by an empty row join
+  the table above where they have its shape — a total, a balance, the next
+  months — but not a table of their own headed by years.
+- **Bold where it is no heading, and notes under the text**: a bold phrase
+  filling a line stays in its paragraph, a list item's bold title keeps its
+  description and its number, and a bold total, a warning or the name under
+  a letter's closing is no heading. A page whose footnotes outnumber its
+  text keeps the text's size for its paragraphs, and a paragraph ending in
+  a note's raised number is no longer torn before it. `1-` over `or 2-room`
+  keeps its space, a heading at the head of the next column is not passed,
+  and Word's `Strong` and `Emphasis` character styles are bold and italic.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and

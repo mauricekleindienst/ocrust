@@ -656,6 +656,10 @@ struct Run {
     tracking: f64,
 }
 
+/// How large a letter is set, against the largest of its word, to count
+/// toward how tall the word stands: a raised mark is smaller.
+const RAISED_SIZE: f64 = 0.9;
+
 /// How many of a line's letters are set in a monospaced font, at least, for
 /// the line to be (see [`Line::monospaced`]).
 const MONOSPACED_SHARE: f32 = 0.9;
@@ -1049,12 +1053,44 @@ impl Run {
             return None;
         }
         let opens: Vec<bool> = spans.iter().map(|s| s.2).collect();
+        // How large each word's letters are set at most: a raised mark — a
+        // note's number, `view.³` — is set smaller than its word, and says
+        // nothing of how tall the word stands.
+        let largest: Vec<f64> = spans
+            .iter()
+            .map(|(range, _, _)| {
+                self.pieces[range.clone()]
+                    .iter()
+                    .filter_map(|piece| match piece {
+                        Piece::Char(letter) => Some(letter.size),
+                        _ => None,
+                    })
+                    .fold(0.0, f64::max)
+            })
+            .collect();
         let mut words: Vec<Word> = spans
             .iter()
-            .map(|(range, bbox, _)| Word {
-                text: read(range.clone()),
-                bbox: *bbox,
-                confidence: 1.0,
+            .zip(&largest)
+            .map(|((range, bbox, _), &size)| {
+                let mut bbox = *bbox;
+                let set: Option<Rect> = self.pieces[range.clone()]
+                    .iter()
+                    .filter_map(|piece| match piece {
+                        Piece::Char(letter) if letter.size >= RAISED_SIZE * size => {
+                            Some(letter.bbox)
+                        }
+                        _ => None,
+                    })
+                    .reduce(|a, b| a.union(&b));
+                if let Some(set) = set {
+                    bbox.y0 = set.y0;
+                    bbox.y1 = set.y1;
+                }
+                Word {
+                    text: read(range.clone()),
+                    bbox,
+                    confidence: 1.0,
+                }
             })
             .collect();
         // A gap between two words of one cell was judged a word space: a
@@ -1115,9 +1151,11 @@ impl Run {
             point(e + bottom),
             point(s + bottom),
         ]);
+        // The line's box takes in its raised marks: the white above it is
+        // what is left over them.
         let mut bbox = quad.bounds();
-        for word in &words {
-            bbox = bbox.union(&word.bbox);
+        for (_, span, _) in &spans {
+            bbox = bbox.union(span);
         }
         // Set in a monospaced font: nearly every letter of it.
         let (fixed, letters) = self
