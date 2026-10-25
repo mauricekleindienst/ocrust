@@ -24,7 +24,10 @@ classifiers = [
 dependencies = [
   # Supplies libonnxruntime; the extension dlopens it from the wheel, so no
   # system packages are involved.
-  "onnxruntime>=1.20",
+  "onnxruntime>=1.20; sys_platform != 'darwin' or platform_machine != 'arm64'",
+  # onnxruntime 1.31 reads text as garbage on Apple Silicon (1.30 and every
+  # other platform read it right).
+  "onnxruntime>=1.20,<1.31; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.optional-dependencies]

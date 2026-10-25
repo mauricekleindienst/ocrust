@@ -94,8 +94,12 @@ jobs:
           # treats PyPI as an equal candidate for the same version number, so
           # once 0.1.0 was released it started installing *that* and testing the
           # release instead of the commit.
-          pip install onnxruntime pytest numpy pillow
+          pip install pytest numpy pillow
           pip install --no-index --no-deps dist/ocrust-*.whl dist/ocrust_models-*.whl
+          # The runtime as the wheel asks for it: a version it rules out on a
+          # platform must not be the one tested there.
+          python -c "from importlib.metadata import requires; print('\n'.join(r for r in requires('ocrust') or () if 'extra ==' not in r))" > runtime-requirements.txt
+          pip install -r runtime-requirements.txt
           python -c "import ocrust; print(ocrust.__version__); print(ocrust.runtime_info())"
           ocrust languages
           pytest -q

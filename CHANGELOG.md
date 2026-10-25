@@ -196,8 +196,9 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   and a sentence set larger than a page of notes is no heading.
 - **One ONNX Runtime per process**: ocrust finds the `onnxruntime` package's
   library without importing its Python binding, which loaded a second copy
-  of the runtime; with onnxruntime 1.31 on Apple Silicon the two clashed and
-  text was recognized as garbage.
+  of the runtime. And on Apple Silicon ocrust asks for onnxruntime below 1.31,
+  which recognizes text there as garbage (1.30 and every other platform read
+  it right); CI installs the runtime as the wheel asks for it.
 - **Short columns, CVs and pull quotes**: a short two-column section is read
   column by column with its heading and the section after it in place, also
   when one column holds a single line; a CV's label of two lines beside its
