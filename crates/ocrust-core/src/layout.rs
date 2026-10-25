@@ -810,9 +810,25 @@ fn xy_cut(
     if sheet.exact && cfg.detect_columns {
         let content_width = horizontal_span(&lines);
         let min_gap = (scale * EXACT_GUTTER_FACTOR).max(content_width * EXACT_GUTTER_FRACTION);
-        if let Some(split) = spanning_edge(&lines, scale, min_gap) {
-            let (top, bottom): (Vec<Line>, Vec<Line>) =
-                lines.into_iter().partition(|l| l.bbox.center_y() < split);
+        if let Some(edge) = spanning_edge(&lines, scale, min_gap) {
+            // A paragraph that runs on around a box floated into it is read
+            // whole, and the box after it.
+            if let Some(floated) = floated_into(&lines, &edge, scale) {
+                let (mut flow, mut float) = (Vec::new(), Vec::new());
+                for (line, floated) in lines.into_iter().zip(floated) {
+                    if floated {
+                        float.push(line);
+                    } else {
+                        flow.push(line);
+                    }
+                }
+                xy_cut(flow, sheet, cfg, max_merge_gap, depth + 1, out);
+                xy_cut(float, sheet, cfg, max_merge_gap, depth + 1, out);
+                return;
+            }
+            let (top, bottom): (Vec<Line>, Vec<Line>) = lines
+                .into_iter()
+                .partition(|l| l.bbox.center_y() < edge.cut);
             xy_cut(top, sheet, cfg, max_merge_gap, depth + 1, out);
             xy_cut(bottom, sheet, cfg, max_merge_gap, depth + 1, out);
             return;
@@ -887,13 +903,65 @@ fn xy_cut(
                 && !self_labelled
                 && !box_beside_paragraph
                 && labels_and_values(&[left.iter().collect(), right.iter().collect()], scale, cfg);
-            let in_turn = in_turn && !labels_beside_values;
+            // A label of several lines beside a value that wraps as a
+            // paragraph — a CV's dates over the employer, beside what was
+            // done there — is no row of cells to read across: each line of
+            // the label after its first would go into a sentence of the
+            // value. A region of several such rows is cut between them
+            // first, where both sides open up by more than their lines'
+            // spacing; a single one, drawn a cell at a time, at the gutter,
+            // the label read before its value.
+            let (labels_left, labels_right) =
+                if sheet.exact && !self_labelled && !box_beside_paragraph {
+                    let mut by_side: Vec<&Line> = Vec::with_capacity(lines.len());
+                    for side in [&left, &right] {
+                        let start = by_side.len();
+                        by_side.extend(side.iter());
+                        by_side[start..].sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0));
+                    }
+                    let leading = usual_leading(&by_side);
+                    let left_cells = cells(&left, leading, scale);
+                    let right_cells = cells(&right, leading, scale);
+                    let overlap = cfg.baseline_overlap;
+                    let woven = |labels: &[Vec<&Line>], values: &[Vec<&Line>]| {
+                        weaves(labels, values, scale, overlap).then_some(labels.len() == 1)
+                    };
+                    let sides = (
+                        woven(&left_cells, &right_cells),
+                        woven(&right_cells, &left_cells),
+                    );
+                    let row = leading
+                        .filter(|_| sides.0.is_some() || sides.1.is_some())
+                        .and_then(|leading| {
+                            let min_gap = (leading + EXACT_PARAGRAPH_SPACE) * scale;
+                            find_gap(&lines, min_gap, |l| (l.bbox.y0, l.bbox.y1))
+                        });
+                    if let Some((row, _)) = row {
+                        let (top, bottom): (Vec<Line>, Vec<Line>) =
+                            lines.into_iter().partition(|l| l.bbox.center_y() < row);
+                        xy_cut(top, sheet, cfg, max_merge_gap, depth + 1, out);
+                        xy_cut(bottom, sheet, cfg, max_merge_gap, depth + 1, out);
+                        return;
+                    }
+                    sides
+                } else {
+                    (None, None)
+                };
+            let label_cell = (labels_left == Some(true) || labels_right == Some(true))
+                && drawn_in_turn(&lines, &[split]);
+            let in_turn = (in_turn && !labels_beside_values) || label_cell;
             let straddled = shared_baseline_share(&left, &right, cfg.baseline_overlap);
             // A column is a block of lines. One baseline on a side — a cell or
             // two of a row, a page number, a stray label — is never a column.
+            // But for a short section in two balanced columns, the second
+            // of them one line.
+            let column_head = sheet.exact
+                && right.len() == 1
+                && goes_on_at_its_head(&left.iter().collect::<Vec<_>>(), &right[0], &lines, scale);
             let thin_side = (baseline_bands(&left, cfg.baseline_overlap).len() < 2
                 || baseline_bands(&right, cfg.baseline_overlap).len() < 2)
-                && !box_beside_paragraph;
+                && !box_beside_paragraph
+                && !column_head;
             let narrowest = horizontal_span(&left).min(horizontal_span(&right));
             let region_width = horizontal_span(&left).max(0.0) + gap + horizontal_span(&right);
             let too_narrow = narrowest < gap * cfg.column_min_width_over_gap
@@ -921,6 +989,7 @@ fn xy_cut(
             // letter's reference block is no column of a table either.
             let two_flows = self_labelled
                 || box_beside_paragraph
+                || label_cell
                 || (sheet.exact && two_flows(&left, &right, cfg.baseline_overlap, drift));
             if thin_side
                 || !in_turn
@@ -943,25 +1012,34 @@ fn xy_cut(
     emit_leaf(lines, cfg, max_merge_gap, out);
 }
 
+/// Where [`spanning_edge`] cuts a region, and what it cuts there.
+struct SpanningEdge {
+    /// The height to cut at.
+    cut: f32,
+    /// Where the gutter between the columns runs.
+    gutter: f32,
+    /// The top and the foot of the columns, between the lines across.
+    beside: (f32, f32),
+}
+
 /// Where to cut lines that run across the full width off the columns under
 /// or over them: the height between them, when the lines past the first (or
 /// before the last) few leave a gutter at least `min_gap` wide with two
-/// lines on either side, every one of those few lines crosses it, and they
-/// end above (begin below) the rest.
-fn spanning_edge(lines: &[Line], scale: f32, min_gap: f32) -> Option<f32> {
+/// lines on either side (or a second column of one, see
+/// [`goes_on_at_its_head`]), every one of those few lines crosses it, and
+/// they end above (begin below) the rest.
+fn spanning_edge(lines: &[Line], scale: f32, min_gap: f32) -> Option<SpanningEdge> {
     let mut sorted: Vec<&Line> = lines.iter().collect();
     sorted.sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0));
     let n = sorted.len();
-    // The gutter of `rest` that the lines of `across` cross — each group of
-    // them but its last line, which a paragraph may end short under the
-    // others, not beside them — with two lines of `rest` at least on either
-    // side.
-    let gutter = |groups: &[&[&Line]], rest: &[&Line]| -> bool {
+    // The gutter of `rest` that the lines of `top` and `bottom` cross — each
+    // group of them but its last line, which a paragraph may end short under
+    // the others, not beside them — with two lines of `rest` at least on
+    // either side, or a second column of one line the first goes on in.
+    let gutter = |top: &[&Line], bottom: &[&Line], rest: &[&Line]| -> Option<f32> {
         let mut spans: Vec<(f32, f32)> = rest.iter().map(|l| (l.bbox.x0, l.bbox.x1)).collect();
         spans.sort_by(|a, b| cmp_f32(a.0, b.0));
-        let Some(&(_, first_end)) = spans.first() else {
-            return false;
-        };
+        let &(_, first_end) = spans.first()?;
         let mut reach = first_end;
         for &(start, end) in &spans[1..] {
             let (from, to) = (reach, start);
@@ -970,9 +1048,18 @@ fn spanning_edge(lines: &[Line], scale: f32, min_gap: f32) -> Option<f32> {
                 continue;
             }
             let split = (from + to) / 2.0;
-            let left = rest.iter().filter(|l| l.bbox.center_x() < split).count();
             let crosses = |l: &&Line| l.bbox.x0 < from && l.bbox.x1 > to;
-            let across = groups.iter().all(|group| match group.split_last() {
+            // A heading over the lead ends short of the gutter: set above
+            // the lines that cross it, it is read before them whatever it
+            // stands over. A short line over the lines across the foot may
+            // be the foot of the longer column instead.
+            let heading = top.iter().take_while(|l| l.bbox.x1 < to).count();
+            let top = if heading < top.len() {
+                &top[heading..]
+            } else {
+                top
+            };
+            let across = [top, bottom].iter().all(|group| match group.split_last() {
                 Some((last, before)) => {
                     let under = before
                         .iter()
@@ -981,36 +1068,98 @@ fn spanning_edge(lines: &[Line], scale: f32, min_gap: f32) -> Option<f32> {
                 }
                 None => true,
             });
-            if left >= 2 && rest.len() - left >= 2 && across {
-                return true;
+            let (first, second): (Vec<&Line>, Vec<&Line>) =
+                rest.iter().partition(|l| l.bbox.center_x() < split);
+            let columns = (first.len() >= 2 && second.len() >= 2)
+                || (second.len() == 1 && goes_on_at_its_head(&first, second[0], lines, scale));
+            if columns && across {
+                return Some(split);
             }
         }
-        false
+        None
     };
     let bottom_of = |ls: &[&Line]| ls.iter().map(|l| l.bbox.y1).fold(f32::MIN, f32::max);
     let top_of = |ls: &[&Line]| ls.iter().map(|l| l.bbox.y0).fold(f32::MAX, f32::min);
     // A few lines across the top and a few across the bottom, the columns
     // between them: either set may be empty, not both. The most lines across
     // the top first: a lead's short last line over the columns is the lead's.
+    let cut = |head: usize, tail: usize| -> Option<SpanningEdge> {
+        if head + tail == 0 || head + tail + 3 > n {
+            return None;
+        }
+        let (top, rest, bottom) = (
+            &sorted[..head],
+            &sorted[head..n - tail],
+            &sorted[n - tail..],
+        );
+        let clear_top = head == 0 || bottom_of(top) <= top_of(rest) + scale * 0.3;
+        let clear_bottom = tail == 0 || top_of(bottom) >= bottom_of(rest) - scale * 0.3;
+        if !(clear_top && clear_bottom) {
+            return None;
+        }
+        Some(SpanningEdge {
+            gutter: gutter(top, bottom, rest)?,
+            cut: if head > 0 {
+                (bottom_of(top) + top_of(rest)) / 2.0
+            } else {
+                (bottom_of(rest) + top_of(bottom)) / 2.0
+            },
+            beside: (top_of(rest), bottom_of(rest)),
+        })
+    };
     let most = SPANNING_LINES.min(n);
     for head in 0..=most {
         for tail in 0..=most {
-            if head + tail == 0 || head + tail + 4 > n {
-                continue;
+            if let Some(edge) = cut(head, tail) {
+                return Some(edge);
             }
-            let (top, rest, bottom) = (
-                &sorted[..head],
-                &sorted[head..n - tail],
-                &sorted[n - tail..],
-            );
-            let clear_top = head == 0 || bottom_of(top) <= top_of(rest) + scale * 0.3;
-            let clear_bottom = tail == 0 || top_of(bottom) >= bottom_of(rest) - scale * 0.3;
-            if clear_top && clear_bottom && gutter(&[top, bottom], rest) {
-                return Some(if head > 0 {
-                    (bottom_of(top) + top_of(rest)) / 2.0
-                } else {
-                    (bottom_of(rest) + top_of(bottom)) / 2.0
-                });
+        }
+    }
+    // A paragraph across the full width that runs on around a box floated
+    // into it may go on for any number of lines over and under the box (see
+    // [`floated_into`]). More lines across are looked for only while all of
+    // them, but a group's last, share a band as wide as a gutter, which they
+    // would all cross; and only where the fewest lines the columns could be
+    // still leave a gutter between them, which more lines would only fill.
+    if n < 5 {
+        return None;
+    }
+    let has_gap = |ls: &[&Line]| {
+        let mut spans: Vec<(f32, f32)> = ls.iter().map(|l| (l.bbox.x0, l.bbox.x1)).collect();
+        spans.sort_by(|a, b| cmp_f32(a.0, b.0));
+        let mut reach = spans[0].1;
+        spans[1..].iter().any(|&(start, end)| {
+            let gap = start - reach > min_gap;
+            reach = reach.max(end);
+            gap
+        })
+    };
+    let shared =
+        |band: (f32, f32), line: &Line| (band.0.max(line.bbox.x0), band.1.min(line.bbox.x1));
+    let wide = |band: (f32, f32)| band.1 - band.0 > min_gap;
+    let mut over = (f32::MIN, f32::MAX);
+    for head in 0..=n - 4 {
+        if head >= 2 {
+            over = shared(over, sorted[head - 2]);
+        }
+        if head > most && !wide(over) {
+            break;
+        }
+        if !has_gap(&sorted[head..head + 4]) {
+            continue;
+        }
+        let mut under = (f32::MIN, f32::MAX);
+        for tail in 0..=n - head - 4 {
+            if tail >= 2 {
+                under = shared(under, sorted[n - tail]);
+            }
+            if tail > most && !wide(under) {
+                break;
+            }
+            if head > most || tail > most {
+                if let Some(edge) = cut(head, tail) {
+                    return Some(edge);
+                }
             }
         }
     }
@@ -1020,6 +1169,47 @@ fn spanning_edge(lines: &[Line], scale: f32, min_gap: f32) -> Option<f32> {
 /// How many lines across the full width, above or below two columns, are
 /// looked for at most: a lead of a dozen lines.
 const SPANNING_LINES: usize = 12;
+
+/// Which of `lines`, in the order the page draws them, are a box floated
+/// into a paragraph — a pull quote, a fact box, a picture's caption — when
+/// the "columns" [`spanning_edge`] found under lines across the full width
+/// are the paragraph going on beside the box: the page draws a line across
+/// and then, right under it, a line on one side of the gutter, and from
+/// that side's lines goes on again right under them, across the full width.
+/// The lines beside them on the other side are the box. A lead over two
+/// columns runs on into the first column, but the lines across under them
+/// are drawn after the second.
+fn floated_into(lines: &[Line], edge: &SpanningEdge, scale: f32) -> Option<Vec<bool>> {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Place {
+        Above,
+        Left,
+        Right,
+        Below,
+    }
+    let place = |line: &Line| {
+        if line.bbox.y0 < edge.beside.0 {
+            Place::Above
+        } else if line.bbox.y1 > edge.beside.1 {
+            Place::Below
+        } else if line.bbox.center_x() < edge.gutter {
+            Place::Left
+        } else {
+            Place::Right
+        }
+    };
+    let runs_on = |from: Place, to: Place| {
+        lines.windows(2).any(|pair| {
+            place(&pair[0]) == from
+                && place(&pair[1]) == to
+                && next_line_under(&pair[0], &pair[1], scale)
+        })
+    };
+    [(Place::Left, Place::Right), (Place::Right, Place::Left)]
+        .into_iter()
+        .find(|&(side, _)| runs_on(Place::Above, side) && runs_on(side, Place::Below))
+        .map(|(_, float)| lines.iter().map(|line| place(line) == float).collect())
+}
 
 /// Emits one region of the page: boxes on a shared baseline become one line.
 fn emit_leaf(mut lines: Vec<Line>, cfg: &LayoutConfig, max_merge_gap: f32, out: &mut Vec<Line>) {
@@ -1270,6 +1460,113 @@ fn pairs_across(left: &[Line], right: &[Line], min_overlap: f32, drift: f32) -> 
         }
     }
     (pairs, apart)
+}
+
+/// The lines of one side of a gutter, top to bottom, in runs set at the
+/// side's `leading` (see [`usual_leading`]): a cell's or a paragraph's
+/// lines. Where they open up by more than that, as [`paragraphs`] breaks a
+/// paragraph, the next run begins; without a leading to go by, where a
+/// region would be cut.
+fn cells(side: &[Line], leading: Option<f32>, scale: f32) -> Vec<Vec<&Line>> {
+    let mut sorted: Vec<&Line> = side.iter().collect();
+    sorted.sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0));
+    let mut runs: Vec<Vec<&Line>> = Vec::new();
+    for line in sorted {
+        let goes_on = runs.last().and_then(|run| run.last()).is_some_and(|prev| {
+            let gap = line.bbox.y0 - prev.bbox.y1;
+            let height = prev.bbox.height().min(line.bbox.height()).max(1.0);
+            gap >= -scale * NEXT_LINE_OVERLAP
+                && match leading {
+                    Some(leading) => gap / height - leading <= EXACT_PARAGRAPH_SPACE,
+                    None => gap <= scale * PARAGRAPH_CUT,
+                }
+        });
+        match runs.last_mut() {
+            Some(run) if goes_on => run.push(line),
+            _ => runs.push(vec![line]),
+        }
+    }
+    runs
+}
+
+/// Whether one of `labels`' cells of two lines or more — a label that
+/// wraps, or was broken by hand — has a line after its first on a baseline
+/// of a line after the first of one of `values`' cells that wraps as a
+/// paragraph does (see [`wraps`]). Read across, that label line goes into
+/// the middle of the value's sentence. A form's labels each share a
+/// baseline with a value of its own, which ends where it ends.
+fn weaves(labels: &[Vec<&Line>], values: &[Vec<&Line>], scale: f32, min_overlap: f32) -> bool {
+    labels.iter().filter(|label| label.len() >= 2).any(|label| {
+        values
+            .iter()
+            .filter(|value| wraps(value, scale))
+            .any(|value| {
+                label[1..].iter().any(|l| {
+                    value[1..].iter().any(|v| {
+                        let overlap = l.bbox.vertical_overlap(&v.bbox);
+                        overlap / l.bbox.height().min(v.bbox.height()).max(1.0) >= min_overlap
+                    })
+                })
+            })
+    })
+}
+
+/// Whether the lines of a cell, two at least, wrap as a paragraph's do:
+/// running text, each line but the last ending where the next one's first
+/// word, and a space before it, would not have fit after it.
+fn wraps(cell: &[&Line], scale: f32) -> bool {
+    let edge = cell.iter().map(|l| l.bbox.x1).fold(f32::MIN, f32::max);
+    cell.len() >= 2
+        && running_text(cell.iter().copied())
+        && cell
+            .windows(2)
+            .all(|pair| pair[0].bbox.x1 + first_word_width(pair[1]) + scale * WRAP_SPACE >= edge)
+}
+
+/// How wide a space before a word that did not fit on a line may be, in
+/// line heights: a word space and the rounding of a browser's pixels.
+const WRAP_SPACE: f32 = 0.5;
+
+/// How wide the first word of `line` is: its word box, or its share of the
+/// line's width by its characters.
+fn first_word_width(line: &Line) -> f32 {
+    if let Some(word) = line.words.first() {
+        return word.bbox.width();
+    }
+    let text = line.text.trim();
+    let chars = text.chars().count().max(1) as f32;
+    let first = text.split_whitespace().next().unwrap_or("").chars().count() as f32;
+    line.bbox.width() * first / chars
+}
+
+/// Whether `head`, a line alone beside `column`, is where the text of the
+/// column goes on, at the head of a second one: a short section set in two
+/// balanced columns of three lines puts two in the first and one in the
+/// second. The page draws it right after the column's last line, and sets
+/// it on the column's first baseline, in its size; the column's lines wrap
+/// as a paragraph's do, its last into the line at the head of the next, and
+/// both are running text. A date beside an address, a figure beside its
+/// label, a page number are none of that.
+fn goes_on_at_its_head(column: &[&Line], head: &Line, drawn: &[Line], scale: f32) -> bool {
+    let mut column = column.to_vec();
+    column.sort_by(|a, b| cmp_f32(a.bbox.y0, b.bbox.y0));
+    let (Some(first), Some(last)) = (column.first(), column.last()) else {
+        return false;
+    };
+    let same = |a: &Line, b: &Line| a.bbox == b.bbox && a.text == b.text;
+    let (short, tall) = (
+        first.bbox.height().min(head.bbox.height()),
+        first.bbox.height().max(head.bbox.height()).max(1.0),
+    );
+    let edge = column.iter().map(|l| l.bbox.x1).fold(f32::MIN, f32::max);
+    short / tall >= TWO_FLOWS_SIZE
+        && (first.bbox.center_y() - head.bbox.center_y()).abs() <= short * TWO_FLOWS_DRIFT
+        && wraps(&column, scale)
+        && running_line(&head.text)
+        && last.bbox.x1 + first_word_width(head) + scale * WRAP_SPACE >= edge
+        && drawn
+            .windows(2)
+            .any(|pair| same(&pair[0], last) && same(&pair[1], head))
 }
 
 /// Whether `lines` are a paragraph of running text: three lines at least,
@@ -1676,11 +1973,11 @@ const EXACT_SIZE_STEP: f32 = 0.2;
 /// The quarter point of the gaps between neighbouring lines of one size in
 /// one column: most such pairs are two lines of one paragraph, and the
 /// quarter point stays among them on a page of short paragraphs too.
-fn usual_leading(lines: &[Line]) -> Option<f32> {
+fn usual_leading<L: std::borrow::Borrow<Line>>(lines: &[L]) -> Option<f32> {
     let mut gaps: Vec<f32> = lines
         .windows(2)
         .filter_map(|pair| {
-            let (a, b) = (&pair[0].bbox, &pair[1].bbox);
+            let (a, b) = (&pair[0].borrow().bbox, &pair[1].borrow().bbox);
             let (ha, hb) = (a.height(), b.height());
             let height = ha.min(hb).max(1.0);
             let same_size = (ha - hb).abs() <= EXACT_SIZE_STEP * ha.max(hb);
@@ -3301,10 +3598,196 @@ mod tests {
             lines.push(line_at("linke Spalte mit Text", 0.0, y, 230.0, y + 10.0));
             lines.push(line_at("rechte Spalte mit Text", 270.0, y, 500.0, y + 10.0));
         }
-        let split = spanning_edge(&lines, 10.0, 20.0).expect("a cut under the lead");
+        let split = spanning_edge(&lines, 10.0, 20.0)
+            .expect("a cut under the lead")
+            .cut;
         assert!(split > 22.0 && split < 24.0, "{split}");
         // No text across the gutter, no cut: the columns are read as they are.
         assert!(spanning_edge(&lines[2..], 10.0, 20.0).is_none());
+    }
+
+    #[test]
+    fn a_heading_over_a_lead_over_a_short_two_column_section_reads_column_by_column() {
+        // A heading, a lead across the full width and a section in two
+        // balanced columns, each set close under the one before: no white
+        // band runs across them. The heading ends short of the gutter.
+        let lead = [
+            line_at("Bericht des Vorstands", 0.0, 0.0, 200.0, 18.0),
+            line_at(
+                "Der Vorstand traf sich im Maerz und beriet ueber den Haushalt",
+                0.0,
+                21.0,
+                600.0,
+                33.0,
+            ),
+            line_at(
+                "des kommenden Jahres und die Reisekosten.",
+                0.0,
+                35.0,
+                450.0,
+                47.0,
+            ),
+        ];
+        let first = [
+            line_at(
+                "Eine kleine Arbeitsgruppe wird die neuen",
+                0.0,
+                50.0,
+                280.0,
+                62.0,
+            ),
+            line_at(
+                "Regeln entwerfen und im Herbst vorstellen.",
+                0.0,
+                64.0,
+                275.0,
+                76.0,
+            ),
+        ];
+        let second = [
+            line_at(
+                "Die Mitglieder waren sich einig, dass die",
+                320.0,
+                50.0,
+                600.0,
+                62.0,
+            ),
+            line_at(
+                "Reisekosten gesenkt werden sollen.",
+                320.0,
+                64.0,
+                530.0,
+                76.0,
+            ),
+        ];
+        let cfg = LayoutConfig::default();
+        let drawn: Vec<Line> = lead.iter().chain(&first).chain(&second).cloned().collect();
+        let want: Vec<&str> = drawn.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts(&reading_order_exact(drawn.clone(), &cfg)), want);
+        // Three lines in two columns: two in the first, one in the second,
+        // where the first's last line goes on.
+        let second = [line_at("gesenkt werden sollen.", 320.0, 50.0, 470.0, 62.0)];
+        let drawn: Vec<Line> = lead.iter().chain(&first).chain(&second).cloned().collect();
+        let want: Vec<&str> = drawn.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts(&reading_order_exact(drawn.clone(), &cfg)), want);
+    }
+
+    #[test]
+    fn a_paragraph_running_on_around_a_pull_quote_is_read_whole() {
+        // A paragraph across the full width, narrowed beside a pull quote
+        // floated right and set larger, and across again under it, its lines
+        // set close. The page paints the float first, then the paragraph.
+        let line = |text: &str, y: f32, x1: f32| line_at(text, 0.0, y, x1, y + 12.0);
+        let paragraph = [
+            line(
+                "Der Stadtrat hat beschlossen, die alte Markthalle neu",
+                0.0,
+                600.0,
+            ),
+            line(
+                "zu bauen, die seit dem Hochwasser geschlossen ist. Drei",
+                14.0,
+                590.0,
+            ),
+            line("Bueros stellten ihre Plaene in einer", 28.0, 380.0),
+            line("Sitzung vor, die bis in den Abend", 42.0, 370.0),
+            line("dauerte. Die Anwohner fragten, ob der", 56.0, 380.0),
+            line("Wochenmarkt bleibt und ob es in der", 70.0, 375.0),
+            line(
+                "Naehe Parkplaetze geben wird. Der Buergermeister sagte zu,",
+                84.0,
+                600.0,
+            ),
+            line(
+                "dass der Markt zurueckkehrt und die Kosten vor dem Sommer",
+                98.0,
+                595.0,
+            ),
+            line("veroeffentlicht werden.", 112.0, 200.0),
+        ];
+        let quote = [
+            line_at("„Niemand will einen", 420.0, 30.0, 600.0, 46.0),
+            line_at("Parkplatz, wo der", 420.0, 47.0, 590.0, 63.0),
+            line_at("Brunnen war.“", 420.0, 64.0, 540.0, 80.0),
+        ];
+        let cfg = LayoutConfig::default();
+        let drawn: Vec<Line> = quote.iter().chain(&paragraph).cloned().collect();
+        let want: Vec<&str> = paragraph
+            .iter()
+            .chain(&quote)
+            .map(|l| l.text.as_str())
+            .collect();
+        assert_eq!(texts(&reading_order_exact(drawn.clone(), &cfg)), want);
+        // Drawn as a lead, two columns and a line across under them, which
+        // follows the second column, the same lines are read as such.
+        let drawn: Vec<Line> = paragraph[..6]
+            .iter()
+            .chain(&quote)
+            .chain(&paragraph[6..])
+            .cloned()
+            .collect();
+        let want: Vec<&str> = drawn.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts(&reading_order_exact(drawn.clone(), &cfg)), want);
+        // However many lines the paragraph goes on for under the quote.
+        let mut longer = paragraph[..8].to_vec();
+        for k in 0..SPANNING_LINES {
+            let y = 112.0 + 14.0 * k as f32;
+            longer.push(line(
+                "und der Absatz geht ueber die ganze Breite weiter",
+                y,
+                598.0,
+            ));
+        }
+        let y = 112.0 + 14.0 * SPANNING_LINES as f32;
+        longer.push(line("veroeffentlicht werden.", y, 200.0));
+        let drawn: Vec<Line> = quote.iter().chain(&longer).cloned().collect();
+        let want: Vec<&str> = longer
+            .iter()
+            .chain(&quote)
+            .map(|l| l.text.as_str())
+            .collect();
+        assert_eq!(texts(&reading_order_exact(drawn.clone(), &cfg)), want);
+    }
+
+    #[test]
+    fn a_label_of_two_lines_stays_out_of_the_paragraph_beside_it() {
+        // A CV set as a grid without rules: each row a label of two lines
+        // beside what was done there, a paragraph that wraps. The rows are
+        // a little further apart than the lines, not far enough for a cut;
+        // the page draws them a cell at a time.
+        let row = |y: f32, label: [&'static str; 2], value: [&'static str; 3]| {
+            let at = |k: usize| y + 13.0 * k as f32;
+            vec![
+                line_at(label[0], 0.0, at(0), 100.0, at(0) + 14.0),
+                line_at(label[1], 0.0, at(1), 80.0, at(1) + 14.0),
+                line_at(value[0], 140.0, at(0), 600.0, at(0) + 14.0),
+                line_at(value[1], 140.0, at(1), 580.0, at(1) + 14.0),
+                line_at(value[2], 140.0, at(2), 400.0, at(2) + 14.0),
+            ]
+        };
+        let lines: Vec<Line> = row(
+            0.0,
+            ["2015 – 2017", "Gamma KG"],
+            [
+                "Betreute die Umstellung von zweihundert Arbeitsplaetzen",
+                "auf ein neues Betriebssystem und schrieb die",
+                "Dokumentation fuer den Helpdesk.",
+            ],
+        )
+        .into_iter()
+        .chain(row(
+            47.0,
+            ["2017 – 2020", "Beta GmbH"],
+            [
+                "Entwickelte Werkzeuge fuer die Buchhaltung, pflegte die",
+                "Datenbank der Lieferanten und fuehrte automatische",
+                "Tests der Monatsberichte ein.",
+            ],
+        ))
+        .collect();
+        let want: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        let ordered = reading_order_exact(lines.clone(), &LayoutConfig::default());
+        assert_eq!(texts(&ordered), want);
     }
 
     #[test]

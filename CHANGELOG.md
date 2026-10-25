@@ -194,6 +194,12 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   between them and over a column break, and a page range broken at its dash
   stays whole. A dash at a line's start or end stays a dash in its sentence,
   and a sentence set larger than a page of notes is no heading.
+- **Short columns, CVs and pull quotes**: a short two-column section is read
+  column by column with its heading and the section after it in place, also
+  when one column holds a single line; a CV's label of two lines beside its
+  description is read before it instead of woven into its lines; and a pull
+  quote floated into a paragraph no longer tears it or turns it into a table
+  — the paragraph is read whole, the quote after it.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and
