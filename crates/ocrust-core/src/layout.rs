@@ -810,27 +810,34 @@ fn xy_cut(
     if sheet.exact && cfg.detect_columns {
         let content_width = horizontal_span(&lines);
         let min_gap = (scale * EXACT_GUTTER_FACTOR).max(content_width * EXACT_GUTTER_FRACTION);
-        if let Some(edge) = spanning_edge(&lines, scale, min_gap) {
-            // A paragraph that runs on around a box floated into it is read
-            // whole, and the box after it.
-            if let Some(floated) = floated_into(&lines, &edge, scale) {
-                let (mut flow, mut float) = (Vec::new(), Vec::new());
-                for (line, floated) in lines.into_iter().zip(floated) {
-                    if floated {
-                        float.push(line);
-                    } else {
-                        flow.push(line);
-                    }
+        // A paragraph that runs on around a box floated into it is read
+        // whole, and the box after it: one floated between its lines across,
+        // or one floated at its head, beside its first lines.
+        let floated = match spanning_edge(&lines, scale, min_gap) {
+            Some(edge) => match floated_into(&lines, &edge, scale) {
+                Some(floated) => Some(floated),
+                None => {
+                    let (top, bottom): (Vec<Line>, Vec<Line>) = lines
+                        .into_iter()
+                        .partition(|l| l.bbox.center_y() < edge.cut);
+                    xy_cut(top, sheet, cfg, max_merge_gap, depth + 1, out);
+                    xy_cut(bottom, sheet, cfg, max_merge_gap, depth + 1, out);
+                    return;
                 }
-                xy_cut(flow, sheet, cfg, max_merge_gap, depth + 1, out);
-                xy_cut(float, sheet, cfg, max_merge_gap, depth + 1, out);
-                return;
+            },
+            None => floated_at_head(&lines, scale, min_gap),
+        };
+        if let Some(floated) = floated {
+            let (mut flow, mut float) = (Vec::new(), Vec::new());
+            for (line, floated) in lines.into_iter().zip(floated) {
+                if floated {
+                    float.push(line);
+                } else {
+                    flow.push(line);
+                }
             }
-            let (top, bottom): (Vec<Line>, Vec<Line>) = lines
-                .into_iter()
-                .partition(|l| l.bbox.center_y() < edge.cut);
-            xy_cut(top, sheet, cfg, max_merge_gap, depth + 1, out);
-            xy_cut(bottom, sheet, cfg, max_merge_gap, depth + 1, out);
+            xy_cut(flow, sheet, cfg, max_merge_gap, depth + 1, out);
+            xy_cut(float, sheet, cfg, max_merge_gap, depth + 1, out);
             return;
         }
     }
@@ -910,9 +917,12 @@ fn xy_cut(
             // value. A region of several such rows is cut between them
             // first, where both sides open up by more than their lines'
             // spacing; a single one, drawn a cell at a time, at the gutter,
-            // the label read before its value.
+            // the label read before its value. A CV has those two columns
+            // and no more: a short cell that wraps beside a description in
+            // a table of three columns or more — an amount over its `€`, a
+            // name over two lines — is a cell of its row, read across.
             let (labels_left, labels_right) =
-                if sheet.exact && !self_labelled && !box_beside_paragraph {
+                if sheet.exact && !self_labelled && !box_beside_paragraph && gaps.len() == 1 {
                     let mut by_side: Vec<&Line> = Vec::with_capacity(lines.len());
                     for side in [&left, &right] {
                         let start = by_side.len();
@@ -1171,6 +1181,80 @@ fn spanning_edge(lines: &[Line], scale: f32, min_gap: f32) -> Option<SpanningEdg
 const SPANNING_LINES: usize = 12;
 
 /// Which of `lines`, in the order the page draws them, are a box floated
+/// into a paragraph at its head — an info box, a note — where no line runs
+/// across above it for [`floated_into`] to go by. The page draws the
+/// paragraph's lines one right under the other, from its first beside the
+/// box to those going on under it, and the box's lines apart from them,
+/// before or after. The box stands beside the paragraph's lines on one
+/// side, clear of them by a gutter, and within their height; its margin,
+/// border and padding set its first line lower than the paragraph's, where
+/// a column beside the text, a CV's label or a table's cell begins on the
+/// first line of the text beside it. And the paragraph goes on under the
+/// box, in running text.
+fn floated_at_head(lines: &[Line], scale: f32, min_gap: f32) -> Option<Vec<bool>> {
+    let mut start = 0;
+    for end in 1..=lines.len() {
+        if end < lines.len() && next_line_under(&lines[end - 1], &lines[end], scale) {
+            continue;
+        }
+        let run = start..end;
+        start = end;
+        let paragraph = &lines[run.clone()];
+        if paragraph.len() < PARAGRAPH_LINES || !running_text(paragraph) {
+            continue;
+        }
+        let (top, bottom) = (paragraph[0].bbox.y0, paragraph[paragraph.len() - 1].bbox.y1);
+        let float: Vec<usize> = (0..lines.len())
+            .filter(|k| !run.contains(k))
+            .filter(|&k| (top..bottom).contains(&lines[k].bbox.center_y()))
+            .collect();
+        let (Some(&first), Some(&last)) = (float.first(), float.last()) else {
+            continue;
+        };
+        // Left (`Some(true)`) or right of the paragraph's lines beside it.
+        let side = |line: &Line| {
+            let beside: Vec<&Line> = paragraph
+                .iter()
+                .filter(|p| p.bbox.vertical_overlap(&line.bbox) > 0.0)
+                .collect();
+            if beside.is_empty() {
+                None
+            } else if beside.iter().all(|p| line.bbox.x1 + min_gap <= p.bbox.x0) {
+                Some(true)
+            } else if beside.iter().all(|p| p.bbox.x1 + min_gap <= line.bbox.x0) {
+                Some(false)
+            } else {
+                None
+            }
+        };
+        let one_side = side(&lines[first])
+            .is_some_and(|left| float.iter().all(|&k| side(&lines[k]) == Some(left)));
+        let apart = last < run.start || first >= run.end;
+        let bounds = float
+            .iter()
+            .map(|&k| lines[k].bbox)
+            .reduce(|a, b| a.union(&b))?;
+        let dropped = bounds.y0 >= top + scale * FLOAT_DROP;
+        let goes_on_under = paragraph.iter().any(|p| {
+            p.bbox.y0 >= bounds.y1 - scale * NEXT_LINE_OVERLAP
+                && p.bbox.horizontal_overlap(&bounds) > 0.0
+        });
+        if one_side && apart && dropped && goes_on_under {
+            let mut floated = vec![false; lines.len()];
+            for k in float {
+                floated[k] = true;
+            }
+            return Some(floated);
+        }
+    }
+    None
+}
+
+/// How far below a paragraph's first line, in line heights, a box floated
+/// at its head begins at least (see [`floated_at_head`]).
+const FLOAT_DROP: f32 = 0.5;
+
+/// Which of `lines`, in the order the page draws them, are a box floated
 /// into a paragraph — a pull quote, a fact box, a picture's caption — when
 /// the "columns" [`spanning_edge`] found under lines across the full width
 /// are the paragraph going on beside the box: the page draws a line across
@@ -1343,11 +1427,15 @@ fn column_corridors(lines: &[Line], sheet: Sheet<'_>, cfg: &LayoutConfig) -> Vec
                     .all(|column| running_text(column.iter().copied()))
                 && !runs_on_across(lines, &splits, sheet.scale)
         };
+        // Nor are two sides as wide as each other columns where the text
+        // runs on from the one to the other: a box floated into the head of
+        // a paragraph, its last line gone on under the box.
         let ok = columns.iter().all(|column| reads_as_column(column, cfg))
             && (evenly_wide(&columns, cfg) || (sheet.exact && sidebar()))
             && (!sheet.exact
                 || (read_in_turn(lines, &splits)
-                    && !labels_and_values(&columns, sheet.scale, cfg)));
+                    && !labels_and_values(&columns, sheet.scale, cfg)
+                    && !runs_on_across(lines, &splits, sheet.scale)));
         log::debug!(
             "corridors {:?} of {width:.0}: {:?} lines, columns {ok}",
             splits.iter().map(|s| *s as i32).collect::<Vec<_>>(),
@@ -2009,7 +2097,8 @@ fn paragraphs(
     let mut blocks: Vec<Block> = Vec::new();
     let mut current: Vec<Line> = Vec::new();
 
-    for line in lines {
+    let mut lines = std::collections::VecDeque::from(lines);
+    while let Some(line) = lines.pop_front() {
         let starts_new = match current.last() {
             None => false,
             Some(prev) => {
@@ -2033,7 +2122,12 @@ fn paragraphs(
                 // right under its lead-in is still a list. A dash in running
                 // text set at a line's start opens none.
                 let bullet = strip_bullet(&line.text).len() < line.text.trim_start().len()
-                    && !dash_goes_on(&current, &line, scale);
+                    && !dash_goes_on(
+                        &current,
+                        &line,
+                        &lines.iter().take(2).collect::<Vec<_>>(),
+                        scale,
+                    );
                 gap > scale * cfg.line_gap_factor
                     || !shares_column
                     || set_apart
@@ -2170,20 +2264,74 @@ pub(crate) fn strip_bullet(line: &str) -> &str {
 /// running text — `Unsere Partner in Spanien` over `– und später auch in
 /// Italien – unterstützten …` — set flush under a line whose sentence is
 /// open, the word after it in lower case, in a block that is no list.
-fn dash_goes_on(current: &[Line], line: &Line, scale: f32) -> bool {
+///
+/// Such a dash begins a line only because it did not fit at the end of the
+/// one before, which runs full to the paragraph's edge; a lead-in without a
+/// colon — `The package contains` over `– a power supply` — mostly ends
+/// short of it. And where the line `after` it opens on the same dash right
+/// under it, `line` is a list's item when it ends short of the edge itself
+/// (running text would have taken that dash onto it), when a third line
+/// opens on the dash again, or when the second ends the lines without
+/// ending a sentence: running text, with an aside exactly a line long
+/// between two dashes, goes on, or ends its paragraph with a full stop.
+fn dash_goes_on(current: &[Line], line: &Line, after: &[&Line], scale: f32) -> bool {
     let (Some(first), Some(prev)) = (current.first(), current.last()) else {
         return false;
     };
-    let text = line.text.trim_start();
-    let dash = text.starts_with(['–', '—']) || text.starts_with("- ");
+    let Some(dash) = opening_dash(&line.text) else {
+        return false;
+    };
     let listed = strip_bullet(&first.text).len() < first.text.trim_start().len();
-    dash && !listed
-        && strip_bullet(text)
+    let flush = |a: &Line, b: &Line| (a.bbox.x0 - b.bbox.x0).abs() <= scale * DASH_FLUSH;
+    // The lines after, while each goes on right under the one before at its
+    // margin.
+    let mut below: Vec<&Line> = Vec::with_capacity(after.len());
+    for &next in after {
+        let above = below.last().copied().unwrap_or(line);
+        if !(flush(next, above) && next_line_under(above, next, scale)) {
+            break;
+        }
+        below.push(next);
+    }
+    let edge = current
+        .iter()
+        .chain([line])
+        .chain(below.iter().copied())
+        .map(|l| l.bbox.x1)
+        .fold(f32::MIN, f32::max);
+    // Whether the first word of `next`, and a space before it, would not have
+    // fit after `before`.
+    let full = |before: &Line, next: &Line| {
+        before.bbox.x1 + first_word_width(next) + scale * WRAP_SPACE >= edge
+    };
+    let same_dash = |l: &&Line| opening_dash(&l.text) == Some(dash);
+    let ends_sentence = |l: &Line| l.text.trim_end().ends_with(['.', '!', '?', ':', ';']);
+    let item_follows = match below[..] {
+        [next, ..] if !same_dash(&next) => false,
+        [next] => !full(line, next) || !ends_sentence(next),
+        [next, third, ..] => !full(line, next) || same_dash(&third),
+        [] => false,
+    };
+    !listed
+        && strip_bullet(&line.text)
             .chars()
             .next()
             .is_some_and(char::is_lowercase)
-        && !prev.text.trim_end().ends_with(['.', '!', '?', ':', ';'])
-        && (line.bbox.x0 - prev.bbox.x0).abs() <= scale * DASH_FLUSH
+        && !ends_sentence(prev)
+        && flush(line, prev)
+        && full(prev, line)
+        && !item_follows
+}
+
+/// The dash a line opens on, spaced as in running text or as a list's
+/// bullet: an en or em dash, or a hyphen with a space after it.
+fn opening_dash(text: &str) -> Option<char> {
+    let text = text.trim_start();
+    match text.chars().next()? {
+        dash @ ('–' | '—') => Some(dash),
+        '-' if text[1..].starts_with(' ') => Some('-'),
+        _ => None,
+    }
 }
 
 /// How far off the line above, in line heights, a line opening on a dash
@@ -2292,35 +2440,80 @@ fn dehyphenate(lines: &mut Vec<Line>) {
         let next = lines[i + 1].text.trim_start();
         let next_starts_lower = next.chars().next().is_some_and(|c| c.is_lowercase());
         // "E-Mail-" over "Adresse", "IT-" over "basierten": the hyphen is the
-        // compound's own, and the word goes on without a space.
-        let compound = head.ends_with('-')
+        // compound's own, and the word goes on without a space. So does a
+        // link, an address or a command broken at one of its own hyphens:
+        // "…/open-" over "data/…", "info@mueller-" over "partner.de".
+        let compound = (head.ends_with('-')
             && head.chars().rev().nth(1).is_some_and(char::is_alphabetic)
             && (next.chars().next().is_some_and(char::is_uppercase)
                 || (abbreviation_before_hyphen(head)
                     && next.chars().next().is_some_and(char::is_alphabetic)
-                    && !continues_a_suspended_hyphen(next)));
+                    && !continues_a_suspended_hyphen(next))))
+            || (head.ends_with(['-', '\u{2010}'])
+                && hyphen_inside_a_token(head)
+                && next.chars().next().is_some_and(char::is_alphanumeric)
+                && !continues_a_suspended_hyphen(next));
         if compound {
-            let tail = lines.remove(i + 1);
-            let head = &mut lines[i];
-            head.text = format!("{}{}", head.text.trim_end(), tail.text.trim_start());
-            head.bbox = head.bbox.union(&tail.bbox);
-            head.confidence = (head.confidence + tail.confidence) * 0.5;
-            head.words.extend(tail.words);
+            join_hyphenated(lines, i, true);
             continue;
         }
         if ends_hyphen && next_starts_lower && !continues_a_suspended_hyphen(next) {
-            let tail = lines.remove(i + 1);
-            let head = &mut lines[i];
-            let stem = head.text.trim_end();
-            let stem = &stem[..stem.len() - stem.chars().last().map_or(0, char::len_utf8)];
-            head.text = format!("{}{}", stem, tail.text.trim_start());
-            head.bbox = head.bbox.union(&tail.bbox);
-            head.confidence = (head.confidence + tail.confidence) * 0.5;
-            head.words.extend(tail.words);
+            join_hyphenated(lines, i, false);
             continue; // the joined line may end in a hyphen again
         }
         i += 1;
     }
+}
+
+/// Joins line `i + 1` onto line `i`, which ends in a hyphen, without a space
+/// between them: keeping the hyphen, or dropping it where it broke a word.
+/// The joined line is monospaced only where both were: a command that runs
+/// on in the text font is no line of code.
+fn join_hyphenated(lines: &mut Vec<Line>, i: usize, keep_hyphen: bool) {
+    let tail = lines.remove(i + 1);
+    let head = &mut lines[i];
+    let stem = head.text.trim_end();
+    let stem = if keep_hyphen {
+        stem
+    } else {
+        &stem[..stem.len() - stem.chars().last().map_or(0, char::len_utf8)]
+    };
+    head.text = format!("{}{}", stem, tail.text.trim_start());
+    head.bbox = head.bbox.union(&tail.bbox);
+    head.confidence = (head.confidence + tail.confidence) * 0.5;
+    head.monospaced = head.monospaced && tail.monospaced;
+    head.words.extend(tail.words);
+}
+
+/// Whether the hyphen a line ends in is inside a token no typesetter
+/// hyphenates — a link, an e-mail address, a file name, an identifier: the
+/// word before it holds a slash, an at sign, or an underscore, colon or dot
+/// between letters or figures, or mixes figures with letters (`…/open-`,
+/// `info@mueller-`, `report_v2-`). Such a word was broken at one of its own
+/// hyphens, and keeps it. A slash right after a hyphen ends a pair's
+/// suspended half (`Ein-/Aus-`), no path.
+fn hyphen_inside_a_token(text: &str) -> bool {
+    let word = text
+        .trim_end()
+        .trim_end_matches(['-', '\u{2010}'])
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("");
+    let chars: Vec<char> = word.chars().collect();
+    let between = |k: usize| {
+        k > 0
+            && k + 1 < chars.len()
+            && chars[k - 1].is_alphanumeric()
+            && chars[k + 1].is_alphanumeric()
+    };
+    let marked = chars.iter().enumerate().any(|(k, &c)| match c {
+        '_' | ':' | '.' => between(k),
+        '@' => k > 0 && k + 1 < chars.len(),
+        '/' => k + 1 < chars.len() && (k == 0 || chars[k - 1] != '-'),
+        _ => false,
+    });
+    let mixed = chars.iter().any(char::is_ascii_digit) && chars.iter().any(|c| c.is_alphabetic());
+    marked || mixed
 }
 
 /// Whether the word a line ends in, before its hyphen, is an abbreviation in
@@ -3463,6 +3656,156 @@ mod tests {
     }
 
     #[test]
+    fn a_dash_list_under_a_lead_in_without_a_colon_is_a_list() {
+        let kinds = |lines: Vec<Line>| -> Vec<BlockKind> {
+            group_blocks(lines, &LayoutConfig::default())
+                .iter()
+                .map(|b| b.kind)
+                .collect()
+        };
+        let item = BlockKind::ListItem;
+        // The lead-in ends short of the items' edge.
+        let lines = vec![
+            line_at("Please bring", 0.0, 0.0, 120.0, 12.0),
+            line_at("– something to drink", 0.0, 14.0, 200.0, 26.0),
+            line_at("– sunscreen", 0.0, 28.0, 110.0, 40.0),
+        ];
+        assert_eq!(kinds(lines), [BlockKind::Paragraph, item, item]);
+        // As long as the first item, which is the longest: three dashes in
+        // a row, or two whose last ends without a full stop.
+        for count in [2, 3] {
+            let mut lines = vec![
+                line_at("The package contains", 0.0, 0.0, 200.0, 12.0),
+                line_at("– support for dark mode", 0.0, 14.0, 210.0, 26.0),
+                line_at("– something to drink", 0.0, 28.0, 190.0, 40.0),
+                line_at("– the quick start guide", 0.0, 42.0, 205.0, 54.0),
+            ];
+            lines.truncate(count + 1);
+            let mut want = vec![BlockKind::Paragraph];
+            want.resize(count + 1, item);
+            assert_eq!(kinds(lines), want);
+        }
+        // Running text set justified may bring two dashes to the start of
+        // two lines in a row; the paragraph goes on.
+        let lines = vec![
+            line_at("Die Kosten etwa zwei Millionen Euro", 0.0, 0.0, 300.0, 12.0),
+            line_at(
+                "— teilen sich Stadt und Land. Wir danken",
+                0.0,
+                14.0,
+                300.0,
+                26.0,
+            ),
+            line_at(
+                "— besonders den Freiwilligen. Die Kosten",
+                0.0,
+                28.0,
+                300.0,
+                40.0,
+            ),
+            line_at("teilen sich Stadt und Land.", 0.0, 42.0, 180.0, 54.0),
+        ];
+        assert_eq!(kinds(lines), [BlockKind::Paragraph]);
+    }
+
+    #[test]
+    fn a_link_broken_at_its_own_hyphen_keeps_it() {
+        for (head, tail, joined) in [
+            (
+                "found at https://data.example.org/open-",
+                "data/air-quality in May.",
+                "found at https://data.example.org/open-data/air-quality in May.",
+            ),
+            (
+                "write to info@mueller-",
+                "partner.de today",
+                "write to info@mueller-partner.de today",
+            ),
+            (
+                "see the city-of-example.gov/council-",
+                "meetings/2024-agenda",
+                "see the city-of-example.gov/council-meetings/2024-agenda",
+            ),
+        ] {
+            let lines = vec![
+                line_at(head, 0.0, 0.0, 300.0, 10.0),
+                line_at(tail, 0.0, 12.0, 300.0, 22.0),
+            ];
+            let blocks = group_blocks(lines, &LayoutConfig::default());
+            assert_eq!(blocks[0].text(), joined);
+        }
+        assert!(hyphen_inside_a_token("…/open-") && hyphen_inside_a_token("run report_v2-"));
+        assert!(!hyphen_inside_a_token("die Instandhal-") && !hyphen_inside_a_token("Ein-/Aus-"));
+        assert!(!hyphen_inside_a_token("Dipl.-Kauf-"));
+        // A command set in code that runs on in the text font is no line of
+        // code.
+        let mut head = line_at("run sphinx-", 0.0, 0.0, 300.0, 10.0);
+        head.monospaced = true;
+        let lines = vec![head, line_at("build_docs-tool now", 0.0, 12.0, 300.0, 22.0)];
+        let blocks = group_blocks(lines, &LayoutConfig::default());
+        assert_eq!(blocks[0].lines.len(), 1);
+        assert!(!blocks[0].lines[0].monospaced);
+    }
+
+    #[test]
+    fn a_box_floated_at_a_paragraphs_head_is_read_after_it() {
+        // The page draws the box first, then the paragraph: three lines
+        // beside the box, the rest across the full width under it.
+        let lines = vec![
+            line_at("Contact the office for a form.", 20.0, 20.0, 300.0, 32.0),
+            line_at(
+                "The committee met in March to review",
+                340.0,
+                0.0,
+                700.0,
+                12.0,
+            ),
+            line_at(
+                "the budget for the coming year. The",
+                340.0,
+                14.0,
+                700.0,
+                26.0,
+            ),
+            line_at(
+                "savings should go to the library and",
+                340.0,
+                28.0,
+                700.0,
+                40.0,
+            ),
+            line_at(
+                "the youth programme. New members will be welcomed",
+                0.0,
+                42.0,
+                700.0,
+                54.0,
+            ),
+            line_at(
+                "at the reception after the assembly.",
+                0.0,
+                56.0,
+                400.0,
+                68.0,
+            ),
+        ];
+        let want = [
+            "The committee met in March to review",
+            "the budget for the coming year. The",
+            "savings should go to the library and",
+            "the youth programme. New members will be welcomed",
+            "at the reception after the assembly.",
+            "Contact the office for a form.",
+        ];
+        let ordered = reading_order_exact(lines.clone(), &LayoutConfig::default());
+        assert_eq!(texts(&ordered), want);
+        // A column beside the text begins on its first line: no float.
+        let mut column = lines;
+        column[0].bbox = Rect::new(20.0, 0.0, 300.0, 12.0);
+        assert!(floated_at_head(&column, 12.0, 6.0).is_none());
+    }
+
+    #[test]
     fn a_suspended_hyphen_is_not_a_broken_word() {
         for (head, tail, joined) in [
             ("Ihren Vor-", "und Nachnamen", "Ihren Vor-\nund Nachnamen"),
@@ -3788,6 +4131,50 @@ mod tests {
         let want: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         let ordered = reading_order_exact(lines.clone(), &LayoutConfig::default());
         assert_eq!(texts(&ordered), want);
+    }
+
+    #[test]
+    fn a_wrapped_amount_in_a_table_stays_in_its_row() {
+        // An invoice's rows without rules, drawn a cell at a time: a
+        // description that wraps beside an amount over its currency sign.
+        // Four columns are a table, no CV: the row reads across.
+        let row = |y: f32, number: &'static str, description: [&'static str; 2]| {
+            let at = |k: usize| y + 13.0 * k as f32;
+            vec![
+                line_at(number, 0.0, at(0), 10.0, at(0) + 14.0),
+                line_at(description[0], 40.0, at(0), 330.0, at(0) + 14.0),
+                line_at(description[1], 40.0, at(1), 200.0, at(1) + 14.0),
+                line_at("12", 380.0, at(0), 395.0, at(0) + 14.0),
+                line_at("1,140.00", 440.0, at(0), 500.0, at(0) + 14.0),
+                line_at("€", 490.0, at(1), 500.0, at(1) + 14.0),
+            ]
+        };
+        let lines: Vec<Line> = row(
+            0.0,
+            "1",
+            [
+                "Consulting services for the migration of the",
+                "accounting system, March",
+            ],
+        )
+        .into_iter()
+        .chain(row(
+            34.0,
+            "2",
+            [
+                "Licence fee for the reporting module including",
+                "updates for a year",
+            ],
+        ))
+        .collect();
+        let ordered = reading_order_exact(lines, &LayoutConfig::default());
+        let texts = texts(&ordered);
+        let at = |text: &str| texts.iter().position(|t| t.contains(text)).unwrap();
+        // Each amount is read with its row, before the next row begins.
+        assert!(at("1,140.00") < at("Licence fee"), "{texts:?}");
+        assert!(texts
+            .iter()
+            .any(|t| t.contains("Consulting") && t.contains("1,140.00")));
     }
 
     #[test]

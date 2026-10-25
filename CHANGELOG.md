@@ -207,6 +207,10 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   `Arial Unicode MS` or `American Typewriter`), and a letter typed in
   Courier under a letterhead stays text. Prose whose lines happen to end on
   commas is no verse, and a slide's title stating its point stays a heading.
+  A link or a command broken at one of its own hyphens keeps it, an info
+  box floated at a paragraph's start no longer tears the paragraph, a list
+  of dashes after a lead-in without a colon is a list again, and a table's
+  short cell that wraps stays in its row.
 - **Short columns, CVs and pull quotes**: a short two-column section is read
   column by column with its heading and the section after it in place, also
   when one column holds a single line; a CV's label of two lines beside its
