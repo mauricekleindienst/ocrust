@@ -217,6 +217,19 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   description is read before it instead of woven into its lines; and a pull
   quote floated into a paragraph no longer tears it or turns it into a table
   — the paragraph is read whole, the quote after it.
+- **Dialogue, leads and links**: a dialogue's lines, a paragraph each and
+  indented, are a paragraph each again, also where most of them run to a
+  single line; a lead paragraph or a pull quote set large under an article's
+  title is text, not a heading, and so are the sentences around a listing set
+  smaller than the text. A word hyphenated after a compound's figures
+  (`COVID-19-Pan-` over `demie`) is one word again, while `TCP/IP` and
+  `and/or` ending a line keep their space; a link broken after a slash is
+  whole however its rest is spelled, and keeps its own hyphens where its path
+  goes on. Code displayed indented in a sentence is a code block, a box
+  table's top frame opens its block, a date range wrapping at its dash in a
+  table cell stays in its row, a list whose items open on a hyphen (`- `)
+  is a list as one of dashes is, and a sheet's totals row set off by an
+  empty row stays under the columns it totals.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and

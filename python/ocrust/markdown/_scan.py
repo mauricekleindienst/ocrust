@@ -98,7 +98,11 @@ def _glue(before: str, after: str) -> str:
     if re.search(r"\d[–-]$", before) and after[:1].isdigit():
         return ""
     # A link or a path too long for its line, broken where it had no space.
-    if _LINK_END.search(before) and _LINK_GOES_ON.match(after):
+    if _LINK_END.search(before) and (
+        _LINK_GOES_ON.match(after)
+        or (before[-1] in "/?=&#" and _LINK_TAIL.match(after))
+        or (before[-1] == "/" and _SLUG.match(after))
+    ):
         return ""
     if _PATH_DOT.search(before) and re.match(r"[a-z]{1,5}\b", after):
         return ""
@@ -106,10 +110,17 @@ def _glue(before: str, after: str) -> str:
 
 
 #: A line ending in a link or a path cut short: `https://example.org/2`,
-#: `/usr/local/sha`, `xample/structured/re`.
-_LINK_END = re.compile(r"(?:\w+://|www\.|(?<!\S)/|\S*/)\S*[\w/=-]$")
+#: `/usr/local/sha`, `xample/structured/re` — a scheme, `www.`, a leading
+#: slash or two slashes say it is one; `TCP/IP` and `and/or` are words.
+_LINK_END = re.compile(r"(?:(?<!\S)(?:\w+://|www\.|~?/)\S*|(?=\S*/\S*/)\S*)[\w/=?&#-]$")
 #: A line going on with the rest of one: `024/annual_report.pdf`.
 _LINK_GOES_ON = re.compile(r"[\w.-]*[/_?=#][\w./?=#&%-]*[\w/]")
+#: The rest of a link broken right after a slash or a query's mark: a name
+#: with a dot or a figure in it, `annualreport2024.pdf`, `j.jclepro.2020`.
+_LINK_TAIL = re.compile(r"[\w-]*[.\d][\w./?=#&%-]*\w")
+#: Or a page's name of words in lower case strung with hyphens:
+#: `new-library-opens-its-doors`.
+_SLUG = re.compile(r"[a-z\d]+(?:-[a-z\d]+){2,}(?![\w-])")
 #: A path ending in a dot over its extension in lower case, `defaults.` over
 #: `yaml`: prose starts its next sentence in a capital. Not `2024/25.`.
 _PATH_DOT = re.compile(r"(?:(?<!\S)(?:\w+://|~|\.{0,2}/)\S*|\S*/\S*/\S*)[A-Za-z]\.$")
@@ -147,24 +158,43 @@ def _heading_key(text: str) -> str:
     return " ".join(text.lower().split())
 
 
-def _sentence(lines: Sequence[Line], body: float | None, top: float = 0.0) -> bool:
-    """Whether a block set larger than the page's commonest size reads as a
-    sentence of running text, no heading: eight words and more ending in a
-    full stop, no section's number before them, set but a little larger
-    than that size (`body`), under a larger heading (`top`, the page's
-    largest). A page with more lines in a smaller size — notes, a listing —
-    makes its running text the larger; a slide's title stating its point
-    is the largest text on its page."""
-    height = lines[0].box.height
-    if body is None or height >= _SENTENCE_SIZE * body or height >= _SENTENCE_UNDER * top:
-        return False
+def _sentence(
+    lines: Sequence[Line], body: float | None, top: float = 0.0, coded: bool = False
+) -> bool:
+    """Whether a block set larger than the page's commonest size reads as
+    running text, no heading: eight words and more ending in a full stop,
+    no section's number before them, and set as running text is — several
+    lines of it, or two under a larger heading, or in quotation marks (a
+    lead, a pull quote), or but a little larger than that size (`body`)
+    under a larger heading (`top`, the page's largest). A page with more
+    lines in a smaller size — notes — makes its running text the larger,
+    and one whose other text is but a listing (`coded`) has no other; a
+    slide's title stating its point is the largest text on its page."""
     text = " ".join(line.text.strip() for line in lines)
     words = re.findall(r"[^\W\d_]+", text)
-    return (
-        len(words) >= _SENTENCE_WORDS
-        and bool(re.search(r"[^.]\.[\"'”’)]*$", text))
-        and not re.match(r"^(?:§\s*)?\d+(?:\.\d+)*\.?\s", text)
-    )
+    if (
+        len(words) < _SENTENCE_WORDS
+        or not re.search(r"[^.]\.[\"'”’»)]*$", text)
+        or re.match(r"^(?:§\s*)?\d+(?:\.\d+)*\.?\s", text)
+    ):
+        return False
+    height = lines[0].box.height
+    under = height < _SENTENCE_UNDER * top
+    lead = len(lines) >= _LEAD_LINES or (len(lines) >= 2 and (len(words) >= _LEAD_WORDS or under))
+    if lead or _QUOTED.match(text):
+        return True
+    if body is None:
+        return coded
+    return height < _SENTENCE_SIZE * body and under
+
+
+#: How many lines, or words over two lines, a sentence set large runs to at
+#: least to be a lead or a pull quote: a title is a line or two of a few.
+#: Two lines under a larger heading are a lead whatever their words.
+_LEAD_LINES = 3
+_LEAD_WORDS = 16
+#: A sentence in quotation marks: a pull quote.
+_QUOTED = re.compile(r"^[\"„“«‘‚»].*[\"”“»’‘«]\W*$")
 
 
 #: How much larger than the page's commonest size, at most, a sentence is
@@ -186,15 +216,23 @@ def _top_height(page: Page) -> float:
 
 
 def _body_height(page: Page) -> float | None:
-    """The height most of a page's lines outside its headings are set in."""
+    """The height most of a page's lines outside its headings and listings
+    are set in."""
     heights = Counter(
         round(line.box.height)
         for block in page.blocks
         if block.kind != "heading"
         for line in block.lines
-        if line.text.strip()
+        if line.text.strip() and not line.monospaced
     )
     return float(heights.most_common(1)[0][0]) if heights else None
+
+
+def _coded(page: Page) -> bool:
+    """Whether a page sets lines in a monospaced font outside its headings."""
+    return any(
+        line.monospaced for block in page.blocks if block.kind != "heading" for line in block.lines
+    )
 
 
 #: How many words a sentence set large has at least to be running text.
@@ -298,7 +336,7 @@ def _heading_levels(pages: Sequence[Page]) -> dict[float, int]:
             for block in page.blocks
             if block.kind == "heading"
             and block.lines
-            and not _sentence(block.lines, _body_height(page), _top_height(page))
+            and not _sentence(block.lines, _body_height(page), _top_height(page), _coded(page))
         },
         reverse=True,
     )
@@ -344,7 +382,7 @@ def _page(
             else:
                 blocks.append((block, lines))
 
-    body, top = _body_height(page), _top_height(page)
+    body, top, coded = _body_height(page), _top_height(page), _coded(page)
     columns = _Columns(
         _column_edges([(b, ls) for b, ls in blocks if b.kind == "paragraph"]),
         [_extent(ls) for _, ls in blocks],
@@ -371,7 +409,7 @@ def _page(
                 out.append(Table([[[cell] for cell in row] for row in rows]))
                 spots.append(_Spot(_extent(lines)))
                 continue
-        if block.kind == "heading" and not _sentence(lines, body, top):
+        if block.kind == "heading" and not _sentence(lines, body, top, coded):
             text = " ".join(line.text.strip() for line in lines)
             level = levels.get(round(lines[0].box.height, 1), 2)
             out.append(Heading(level, [text]))
@@ -408,8 +446,12 @@ def _by_font(lines: list[Line]) -> list[list[Line]]:
     runs: list[list[Line]] = []
     for line in lines:
         # A line of a tree's or a table's frame alone goes with the lines
-        # around it, whatever font drew it.
-        if runs and (_drawn_only(line.text) or _fixed(runs[-1]) == line.monospaced):
+        # around it, whatever font drew it, the frame's top with those below.
+        if runs and (
+            _drawn_only(line.text)
+            or all(_drawn_only(drawn.text) for drawn in runs[-1])
+            or _fixed(runs[-1]) == line.monospaced
+        ):
             runs[-1].append(line)
         else:
             runs.append([line])
@@ -423,6 +465,7 @@ def _by_font(lines: list[Line]) -> list[list[Line]]:
             and _fixed(merged[-1])
             and len(merged[-1]) <= _INLINE_CODE_LINES
             and _goes_on_through(merged[-2][-1].text, run[0].text)
+            and _flush_with(merged[-1], merged[-2])
         ):
             code = merged.pop()
             merged[-1] = [*merged[-1], *code, *run]
@@ -442,6 +485,15 @@ def _fixed(lines: Sequence[Line]) -> bool:
     """Whether lines are set in a monospaced font, a frame's lines aside."""
     told = [line.monospaced for line in lines if not _drawn_only(line.text)]
     return bool(told) and all(told)
+
+
+def _flush_with(code: Sequence[Line], text: Sequence[Line]) -> bool:
+    """Whether a span of code set on lines of its own starts at the left
+    edge of the text before it, as a span the column wrapped does: a display
+    is indented."""
+    height = statistics.median(line.box.height for line in text)
+    edge = min(line.box.x0 for line in text)
+    return abs(min(line.box.x0 for line in code) - edge) <= _FLUSH * height
 
 
 #: How many lines a span of code in a sentence takes at most.
@@ -471,29 +523,57 @@ def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
     hanging = _hanging_entries(lines, flush, left, right, height)
     if hanging is not None:
         return hanging
-    if len(lines) < 3 or sum(flush) * 2 < len(lines):
+    verse = _set_as_verse(lines)
+    # Lines that each end a sentence, every one of them, are a paragraph
+    # each: running text hardly ever breaks all its lines at a sentence's end.
+    if (
+        len(lines) >= _OWN_LINES
+        and not verse
+        and all(_FULL_STOP.search(line.text.strip()) for line in lines)
+    ):
+        return [[line] for line in lines]
+    # A dialogue's paragraphs, a line or two each: nearly every indented
+    # line, all indented alike, follows one ending its sentence with a full
+    # stop, and starts a paragraph however short its lines are. A block that
+    # starts indented starts with one.
+    indented = [index for index in range(len(lines)) if not flush[index]]
+    starts = [index for index in indented if index]
+    indents = [lines[index].box.x0 - left for index in indented]
+    stopped = [bool(_FULL_STOP.search(lines[index - 1].text.strip())) for index in starts]
+    dialogue = (
+        len(indented) >= 2
+        and bool(starts)
+        and sum(stopped) >= _WRAPPED_SHARE * len(starts)
+        and max(indents) - min(indents) <= _FLUSH * height
+        and _INDENT_MIN * height <= min(indents) <= _INDENT_MAX * height
+        and not verse
+    )
+    if not dialogue and (len(lines) < 3 or sum(flush) * 2 < len(lines)):
         return [lines]
     # The lines beside a drop cap or a small picture set at the start of a
     # paragraph start past it, and no paragraph starts there: after a flush
     # first line that is full — the paragraph goes on — the next few lines
     # as long as they are indented. A flush line that ends short is a
-    # paragraph of one line.
+    # paragraph of one line, and so is a dialogue's that ends its sentence.
     beside_cap = 1
     full = right - lines[0].box.x1 <= _first_word_width(lines[1]) + 0.35 * height
-    if flush[0] and full:
+    spoken = dialogue and _FULL_STOP.search(lines[0].text.strip())
+    if flush[0] and full and not spoken:
         while beside_cap < min(len(lines), _BESIDE_CAP + 1) and not flush[beside_cap]:
             beside_cap += 1
     parts: list[list[Line]] = [[lines[0]]]
     for index in range(1, len(lines)):
         line = lines[index]
         indent = line.box.x0 - left
-        if (
-            index >= beside_cap
-            and _INDENT_MIN * height <= indent <= _INDENT_MAX * height
-            and _ENDS_SENTENCE.search(lines[index - 1].text.strip())
-            and index + 1 < len(lines)
-            and flush[index + 1]
-            and right - line.box.x1 <= _first_word_width(lines[index + 1]) + 0.35 * height
+        if index >= beside_cap and (
+            (
+                _INDENT_MIN * height <= indent <= _INDENT_MAX * height
+                and _ENDS_SENTENCE.search(lines[index - 1].text.strip())
+                and index + 1 < len(lines)
+                and flush[index + 1]
+                and right - line.box.x1 <= _first_word_width(lines[index + 1]) + 0.35 * height
+            )
+            or (dialogue and not flush[index] and _FULL_STOP.search(lines[index - 1].text.strip()))
         ):
             parts.append([])
         parts[-1].append(line)
@@ -551,6 +631,13 @@ def _hanging_entries(
         parts[-1].append(line)
     return parts
 
+
+#: A line ending its sentence with a full stop, a question or an
+#: exclamation, closing quotes after it.
+_FULL_STOP = re.compile(r"[.!?…][\"'”’»)]*\s*$")
+
+#: How many lines, each ending a sentence, are a paragraph each at least.
+_OWN_LINES = 3
 
 #: How far a paragraph's first line is indented, in line heights, at least
 #: and at most.
@@ -1529,7 +1616,15 @@ def _with_listings(
             height = statistics.median(line.box.height for line in lines)
             left = min(_start(line) for line in lines)
             after = index + 1
-            while after < len(blocks) and blocks[after][0].kind == "paragraph":
+            # A YAML list's items in a scan, where no font tells them code,
+            # come as list items opening on a hyphen.
+            while after < len(blocks) and (
+                blocks[after][0].kind == "paragraph"
+                or (
+                    blocks[after][0].kind == "list_item"
+                    and blocks[after][1][0].text.lstrip().startswith("- ")
+                )
+            ):
                 more = blocks[after][1]
                 gap = _extent(more)[1] - _extent(run[-1])[3]
                 if (

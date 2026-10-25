@@ -1721,6 +1721,9 @@ _MAX_SHEET_COLUMNS = 16384
 #: the first row, within its first few kilobytes.
 _SHEET_HEAD = 1024 * 1024
 _PERCENT_FORMATS = {9, 10}
+#: A totals row or two set off from its table by up to this many empty rows.
+_TOTAL_ROWS = 2
+_TOTAL_GAP = 2
 
 
 def _is_date_format(code: str) -> bool:
@@ -2007,16 +2010,34 @@ def _sheet_blocks(rows: dict[int, dict[int, str]], dropped: int = 0) -> list[Blo
     """
     out: list[Block] = []
     group: list[int] = []
+    # The last table's columns and its last row, while nothing came after it.
+    table: tuple[list[int], int] | None = None
 
     def flush() -> None:
+        nonlocal table
         if not group:
             return
         columns = sorted({c for r in group for c in rows[r]})
-        lines = [[rows[r].get(c, "") for c in columns] for r in group]
         if all(len(rows[r]) <= 1 for r in group):
             out.extend(Paragraph([next(iter(rows[r].values()))]) for r in group)
+            table = None
+        elif (
+            table is not None
+            and len(group) <= _TOTAL_ROWS
+            and group[0] - table[1] <= _TOTAL_GAP + 1
+            and set(columns) <= set(table[0])
+            and all(any(char.isdigit() for v in rows[r].values() for char in v) for r in group)
+        ):
+            # A totals row set off by an empty row stays under the columns
+            # it totals.
+            last = out[-1]
+            assert isinstance(last, Table)
+            last.rows.extend([[rows[r].get(c, "")] for c in table[0]] for r in group)
+            table = (table[0], group[-1])
         else:
+            lines = [[rows[r].get(c, "") for c in columns] for r in group]
             out.append(Table([[[v] for v in line] for line in lines]))
+            table = (columns, group[-1])
         group.clear()
 
     for index in sorted(rows):

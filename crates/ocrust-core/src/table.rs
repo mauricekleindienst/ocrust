@@ -623,10 +623,22 @@ fn figure(text: &str) -> bool {
             .all(|c| c.is_ascii_digit() || c.is_whitespace() || ".,:;-–/+%€$£()'".contains(c))
 }
 
+/// Whether a figure ends in a dash that opens a range its next line closes:
+/// `12.03.–` over `15.03.2024`. A price set the Swiss way, `12.–`, ends with
+/// its dash, and so does the price under it.
+fn opens_range(first: &str, next: &str) -> bool {
+    let next = next.trim();
+    let mut chars = first.trim_end().chars().rev();
+    matches!(chars.next(), Some('–' | '-'))
+        && chars.next().is_some_and(|c| c.is_ascii_digit() || c == '.')
+        && next.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && !next.ends_with(['–', '-'])
+}
+
 /// The cell of `above` each cell of `row` lies under, when there is exactly
 /// one for every cell, a different one for each, and no figure lies under a
 /// figure: figures do not wrap, so a second one under the first is a new
-/// row's.
+/// row's — unless the first opens a range the second closes.
 fn under_one_each<'a>(row: &[Candidate], above: &'a [Candidate]) -> Option<Vec<&'a Candidate>> {
     if row.is_empty() {
         return None;
@@ -638,7 +650,8 @@ fn under_one_each<'a>(row: &[Candidate], above: &'a [Candidate]) -> Option<Vec<&
                 .filter(|a| a.cell.bbox.horizontal_overlap(&candidate.cell.bbox) > 0.0);
             match (over.next(), over.next()) {
                 (Some(upper), None)
-                    if !(figure(&upper.cell.text) && figure(&candidate.cell.text)) =>
+                    if !(figure(&upper.cell.text) && figure(&candidate.cell.text))
+                        || opens_range(&upper.cell.text, &candidate.cell.text) =>
                 {
                     Some(upper)
                 }
@@ -1416,9 +1429,10 @@ fn join_wrapped(first: &str, next: &str) -> String {
         && next.chars().next().is_some_and(crate::layout::unspaced);
     if broken_word(first, next) {
         format!("{}{}", &first[..first.len() - 1], next)
-    } else if compound || unspaced {
-        // "E-Mail-" over "Adresse": the compound's own hyphen stays; and
-        // Chinese or Japanese goes on without a space.
+    } else if compound || unspaced || opens_range(first, next) {
+        // "E-Mail-" over "Adresse": the compound's own hyphen stays; a range
+        // goes on after its dash; and Chinese or Japanese goes on without a
+        // space.
         format!("{first}{next}")
     } else {
         format!("{first} {next}")
@@ -1721,6 +1735,9 @@ mod tests {
             "für IT-basierte Dienste"
         );
         assert_eq!(join_wrapped("IT-", "und TK-Anlagen"), "IT- und TK-Anlagen");
+        assert_eq!(join_wrapped("12.03.–", "15.03.2024"), "12.03.–15.03.2024");
+        assert_eq!(join_wrapped("2019-", "2021"), "2019-2021");
+        assert_eq!(join_wrapped("Fr. 12.–", "15.–"), "Fr. 12.– 15.–");
         assert_eq!(
             join_wrapped("项目的下一阶段", "将于四月开始"),
             "项目的下一阶段将于四月开始"

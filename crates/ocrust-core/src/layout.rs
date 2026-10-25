@@ -2373,7 +2373,10 @@ fn classify_block(lines: &[Line], text_height: f32, exact: bool, cfg: &LayoutCon
             && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     });
     // A number in front of a large line numbers a chapter, not a list item.
-    if trimmed.starts_with(BULLETS) || (numbered && !heading) {
+    // A hyphen opens an item as a dash does, spaced from its text: `- Brot`,
+    // not `-5 °C`; in a monospaced font it is code's, a YAML list's.
+    let hyphen = trimmed.starts_with("- ") && !first.monospaced;
+    if trimmed.starts_with(BULLETS) || hyphen || (numbered && !heading) {
         return BlockKind::ListItem;
     }
     if heading {
@@ -2450,7 +2453,7 @@ fn dehyphenate(lines: &mut Vec<Line>) {
                     && next.chars().next().is_some_and(char::is_alphabetic)
                     && !continues_a_suspended_hyphen(next))))
             || (head.ends_with(['-', '\u{2010}'])
-                && hyphen_inside_a_token(head)
+                && hyphen_inside_a_token(head, next)
                 && next.chars().next().is_some_and(char::is_alphanumeric)
                 && !continues_a_suspended_hyphen(next));
         if compound {
@@ -2491,15 +2494,30 @@ fn join_hyphenated(lines: &mut Vec<Line>, i: usize, keep_hyphen: bool) {
 /// between letters or figures, or mixes figures with letters (`…/open-`,
 /// `info@mueller-`, `report_v2-`). Such a word was broken at one of its own
 /// hyphens, and keeps it. A slash right after a hyphen ends a pair's
-/// suspended half (`Ein-/Aus-`), no path.
-fn hyphen_inside_a_token(text: &str) -> bool {
+/// suspended half (`Ein-/Aus-`), no path. A slash in an earlier part of the
+/// word marks a path where the path goes on in the next line's word
+/// (`example-org/document-layout-` over `toolkit/blob/main`); `TCP/IP-Proto-`
+/// over `koll` is a word.
+fn hyphen_inside_a_token(text: &str, next: &str) -> bool {
     let word = text
         .trim_end()
         .trim_end_matches(['-', '\u{2010}'])
         .rsplit(char::is_whitespace)
         .next()
         .unwrap_or("");
-    let chars: Vec<char> = word.chars().collect();
+    // A link, an address or a path says so anywhere in it.
+    let linked = word.contains("://")
+        || word.starts_with("www.")
+        || word.starts_with('/')
+        || word.starts_with("~/")
+        || word
+            .trim_start_matches(|c: char| !c.is_alphanumeric())
+            .contains('@');
+    // Other signs only in the part the hyphen ends: `COVID-19-Pan-` over
+    // `demie` is a word hyphenated after a compound's figures, `CO2-` over
+    // `Emissionen` a compound's own hyphen.
+    let part = word.rsplit(['-', '\u{2010}']).next().unwrap_or(word);
+    let chars: Vec<char> = part.chars().collect();
     let between = |k: usize| {
         k > 0
             && k + 1 < chars.len()
@@ -2509,11 +2527,26 @@ fn hyphen_inside_a_token(text: &str) -> bool {
     let marked = chars.iter().enumerate().any(|(k, &c)| match c {
         '_' | ':' | '.' => between(k),
         '@' => k > 0 && k + 1 < chars.len(),
-        '/' => k + 1 < chars.len() && (k == 0 || chars[k - 1] != '-'),
+        '/' => k + 1 < chars.len() && k > 0,
         _ => false,
     });
     let mixed = chars.iter().any(char::is_ascii_digit) && chars.iter().any(|c| c.is_alphabetic());
-    marked || mixed
+    let rest: Vec<char> = next
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .collect();
+    let path = word.contains('/')
+        && !word.contains("-/")
+        && rest.iter().enumerate().any(|(k, &c)| {
+            matches!(c, '/' | '_' | '.')
+                && k > 0
+                && k + 1 < rest.len()
+                && rest[k - 1].is_alphanumeric()
+                && rest[k + 1].is_alphanumeric()
+        });
+    linked || marked || mixed || path
 }
 
 /// Whether the word a line ends in, before its hyphen, is an abbreviation in
@@ -3734,9 +3767,39 @@ mod tests {
             let blocks = group_blocks(lines, &LayoutConfig::default());
             assert_eq!(blocks[0].text(), joined);
         }
-        assert!(hyphen_inside_a_token("…/open-") && hyphen_inside_a_token("run report_v2-"));
-        assert!(!hyphen_inside_a_token("die Instandhal-") && !hyphen_inside_a_token("Ein-/Aus-"));
-        assert!(!hyphen_inside_a_token("Dipl.-Kauf-"));
+        assert!(
+            hyphen_inside_a_token("…/open-", "data") && hyphen_inside_a_token("run report_v2-", "")
+        );
+        assert!(
+            !hyphen_inside_a_token("die Instandhal-", "tung")
+                && !hyphen_inside_a_token("Ein-/Aus-", "gabe")
+        );
+        assert!(!hyphen_inside_a_token("Dipl.-Kauf-", "mann"));
+        // A path's earlier part holds its slash where the path goes on.
+        assert!(hyphen_inside_a_token(
+            "https://github.com/ example-org/document-layout-",
+            "toolkit/blob/main/README.md"
+        ));
+        assert!(!hyphen_inside_a_token(
+            "example-org/document-layout-",
+            "toolkit"
+        ));
+        // A word hyphenated after a compound's figures or slash is a word.
+        for word in [
+            "COVID-19-Pan-",
+            "3-Zimmer-Woh-",
+            "TCP/IP-Proto-",
+            "CO2-Emis-",
+        ] {
+            assert!(!hyphen_inside_a_token(word, "koll und mehr."), "{word}");
+        }
+        for token in [
+            "CO2-",
+            "https://example.org/open-data/air-",
+            "deployment/frontend-",
+        ] {
+            assert!(hyphen_inside_a_token(token, "rest"), "{token}");
+        }
         // A command set in code that runs on in the text font is no line of
         // code.
         let mut head = line_at("run sphinx-", 0.0, 0.0, 300.0, 10.0);
@@ -4222,9 +4285,17 @@ mod tests {
 
     #[test]
     fn bullets_become_list_items() {
-        let lines = vec![line_at("• erste Position", 0.0, 0.0, 100.0, 10.0)];
-        let blocks = group_blocks(lines, &LayoutConfig::default());
-        assert_eq!(blocks[0].kind, BlockKind::ListItem);
+        for item in ["• erste Position", "- erste Position"] {
+            let lines = vec![line_at(item, 0.0, 0.0, 100.0, 10.0)];
+            let blocks = group_blocks(lines, &LayoutConfig::default());
+            assert_eq!(blocks[0].kind, BlockKind::ListItem, "{item}");
+        }
+        let mut typed = line_at("- uses: actions/checkout@v4", 0.0, 0.0, 100.0, 10.0);
+        typed.monospaced = true;
+        for line in [line_at("-5 °C in der Nacht", 0.0, 0.0, 100.0, 10.0), typed] {
+            let blocks = group_blocks(vec![line], &LayoutConfig::default());
+            assert_eq!(blocks[0].kind, BlockKind::Paragraph);
+        }
     }
 
     /// Evenly spaced character spans, as a recognizer reports them.
