@@ -36,7 +36,7 @@ from ._ir import (
     uncoded,
     verbatim,
 )
-from ._office import _TYPED_PARAGRAPHS, _TYPED_SHARE, _set_apart, _sheet_blocks
+from ._office import _set_apart, _sheet_blocks
 from ._package import (
     XML_LIMIT,
     ConversionError,
@@ -48,6 +48,7 @@ from ._package import (
     local,
     open_document_properties,
 )
+from ._scan import typed_code
 
 #: Repeats beyond this are a spreadsheet's formatting running to the edge of
 #: the sheet, not data — in a table of a text document.
@@ -76,18 +77,13 @@ _DRAWN_SHAPES = {
 
 
 def _untyped(blocks: list[Block], typed: dict[int, list[list[Inline]] | None]) -> list[Block]:
-    """`blocks` with the paragraphs typed in a monospaced font as text again
-    where nearly all of them were: a letter typed in Courier is no listing
-    (see `_office._TYPED_SHARE`)."""
-    font_paragraphs = sum(len(contents or ()) for contents in typed.values())
-    written = sum(isinstance(block, Paragraph) for block in blocks)
-    every = font_paragraphs + written
-    if every < _TYPED_PARAGRAPHS or font_paragraphs < _TYPED_SHARE * every:
-        return blocks
+    """`blocks` with the code blocks typed wholly in a monospaced font, no
+    code style among their lines, as text again where they read as none: a
+    letter typed in Courier is no listing (see `_scan.typed_code`)."""
     out: list[Block] = []
     for block in blocks:
         contents = typed.get(id(block))
-        if contents is None:
+        if contents is None or not isinstance(block, Code) or typed_code(block.text.split("\n")):
             out.append(block)
         else:
             out.extend(Paragraph(uncoded(content)) for content in contents)

@@ -652,6 +652,10 @@ struct Run {
     tracking: f64,
 }
 
+/// How many of a line's letters are set in a monospaced font, at least, for
+/// the line to be (see [`Line::monospaced`]).
+const MONOSPACED_SHARE: f32 = 0.9;
+
 /// After a space the document set itself, a gap has to be this many ems to
 /// split the line: justified text in a narrow column stretches its word
 /// spaces far past an em, and those spaces are glyphs. A table's cells and
@@ -1110,14 +1114,23 @@ impl Run {
         for word in &words {
             bbox = bbox.union(&word.bbox);
         }
-        // Set in a monospaced font: every letter of it.
-        let mut letters = self.pieces.iter().filter_map(|piece| match piece {
-            Piece::Char(letter) => Some(letter.monospaced),
-            _ => None,
-        });
-        let monospaced = letters
-            .next()
-            .is_some_and(|first| first && letters.all(|m| m));
+        // Set in a monospaced font: nearly every letter of it.
+        let (fixed, letters) = self
+            .pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                // A tree's or a table's box-drawing glyphs, a check mark, an
+                // emoji or a Chinese word, drawn from whichever font has
+                // them, say nothing of the line's: its ASCII letters do.
+                Piece::Char(letter) if letter.text.chars().all(|c| c.is_ascii_graphic()) => {
+                    Some(letter.monospaced)
+                }
+                _ => None,
+            })
+            .fold((0usize, 0usize), |(fixed, all), m| {
+                (fixed + usize::from(m), all + 1)
+            });
+        let monospaced = letters > 0 && fixed as f32 >= MONOSPACED_SHARE * letters as f32;
         Some(Line {
             text,
             confidence: 1.0,
@@ -2677,31 +2690,67 @@ fn fixed_pitch(font: &Dict<'_>) -> bool {
 /// The `FixedPitch` bit of a font descriptor's `Flags`.
 const FIXED_PITCH_FLAG: u32 = 1;
 
-/// Whether a font's name is that of a monospaced face: Courier, Consolas,
-/// Menlo, Monaco, Inconsolata, Lucida Console, a typewriter's, a code font
-/// (`Source Code Pro`, `Fira Code`) or any `…Mono…` — but no Monotype face.
+/// Whether a font's name is that of a monospaced face, by the words in it:
+/// Courier, Consolas, Menlo, Monaco, Inconsolata, Lucida Console or Lucida
+/// Sans Typewriter, a code font (`Source Code Pro`, `Fira Code`) or any
+/// `… Mono`. A word holding one is no sign: `Arial Unicode MS`, `Encode
+/// Sans`, `American Typewriter` and `Monotype Corsiva` set their letters as
+/// wide as each needs.
 fn monospaced_name(name: Option<&str>) -> bool {
     let Some(name) = name else {
         return false;
     };
-    let name = name.to_ascii_lowercase();
     // A subset's tag, `ABCDEF+`, is no part of the face's name.
-    let face = name.split_once('+').map_or(name.as_str(), |(_, face)| face);
-    let face = face.trim_start_matches("monotype");
-    MONOSPACED_FACES.iter().any(|known| face.contains(known))
+    let face = name.split_once('+').map_or(name, |(_, face)| face);
+    let words = face_words(face);
+    let has = |word: &str| words.iter().any(|w| w == word);
+    (has("lucida") && (has("console") || has("typewriter")))
+        || MONOSPACED_WORDS.iter().any(|word| has(word))
 }
 
-/// What the names of monospaced faces hold (see [`monospaced_name`]).
-const MONOSPACED_FACES: &[&str] = &[
+/// The words of a font's name, written together or not, lower-cased:
+/// `DejaVuSansMono-Bold` is `dejavu`, `sans`, `mono`, `bold`; `PTMono` is
+/// `pt`, `mono`.
+fn face_words(face: &str) -> Vec<String> {
+    let chars: Vec<char> = face.chars().collect();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphabetic() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|j| chars[j]);
+        let next = chars.get(i + 1).copied();
+        // A capital opens a word after a small letter (`Sans|Mono`), or
+        // after capitals when a small letter follows it (`PT|Mono`).
+        let opens = c.is_uppercase()
+            && prev.is_some_and(|p| {
+                p.is_lowercase() || (p.is_uppercase() && next.is_some_and(char::is_lowercase))
+            });
+        if opens && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// The words naming a monospaced face (see [`monospaced_name`]).
+const MONOSPACED_WORDS: &[&str] = &[
     "mono",
+    "monospace",
+    "monospaced",
     "courier",
     "consolas",
     "menlo",
     "monaco",
     "inconsolata",
-    "lucidaconsole",
-    "lucida console",
-    "typewriter",
     "fixedsys",
     "code",
 ];
@@ -3569,8 +3618,24 @@ mod tests {
         ] {
             assert!(monospaced_name(Some(name)), "{name}");
         }
-        for name in ["ABCDEF+LiberationSerif", "MonotypeCorsiva", "Helvetica"] {
+        for name in [
+            "ABCDEF+LiberationSerif",
+            "MonotypeCorsiva",
+            "Helvetica",
+            "ArialUnicodeMS",
+            "LucidaSansUnicode",
+            "EncodeSans-Regular",
+            "AmericanTypewriter",
+        ] {
             assert!(!monospaced_name(Some(name)), "{name}");
+        }
+        for name in [
+            "DejaVuSansMono-Bold",
+            "PTMono",
+            "LucidaConsole",
+            "Menlo-Regular",
+        ] {
+            assert!(monospaced_name(Some(name)), "{name}");
         }
         // A scan's hidden text, a page of it.
         let mut glyphs: Vec<TextGlyph> = (0..20)

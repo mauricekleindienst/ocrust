@@ -73,6 +73,7 @@ from ._package import (
     rel_id,
     relationships,
 )
+from ._scan import typed_code
 
 _OFF = {"0", "false", "off", "none"}
 # Characters of the Symbol and Wingdings fonts Word stores as private-use code
@@ -440,22 +441,31 @@ class _Word:
         out: list[Block] = []
         items: list[_Para] = []
         code: list[str] = []
-        # A letter typed in Courier throughout is no listing: where nearly
-        # all the paragraphs are set wholly in a monospaced font, its words
-        # are text like any other. A how-to's prose is in a text font.
-        paras = [e for e in entries if isinstance(e, _Para) and not is_empty(e.content)]
-        typed = sum(all_code(e.content) for e in paras)
-        if len(paras) >= _TYPED_PARAGRAPHS and typed >= _TYPED_SHARE * len(paras):
-            for entry in paras:
-                entry.content = uncoded(entry.content)
+        # The paragraphs of the run of code typed in a monospaced font with
+        # no code style, and whether a code style set any of it.
+        typed: list[_Para] = []
+        styled = False
 
         def flush() -> None:
+            nonlocal styled
             if items:
                 out.extend(_nest_items(items))
                 items.clear()
             if code:
-                out.append(Code("\n".join(code)))
+                lines = [line for text in code for line in text.split("\n")]
+                if styled or typed_code(lines):
+                    out.append(Code("\n".join(code)))
+                else:
+                    # A letter, minutes or a note typed in Courier: its words
+                    # are text like any other.
+                    for entry in typed:
+                        content = uncoded(entry.content)
+                        if not is_empty(content):
+                            out.append(Paragraph(content))
+                        out.extend(entry.extras)
                 code.clear()
+                typed.clear()
+                styled = False
 
         for entry in entries:
             if not isinstance(entry, _Para):
@@ -474,6 +484,10 @@ class _Word:
                     out.extend(_nest_items(items))
                     items.clear()
                 code.append(verbatim(entry.content))
+                if entry.style in _CODE_STYLES:
+                    styled = True
+                else:
+                    typed.append(entry)
                 continue
             flush()
             if entry.heading and not is_empty(entry.content):
@@ -1190,13 +1204,6 @@ def _formula(runs: list[Run], node: Element, link: str) -> None:
         # Two formulas that touch would be joined into one.
         runs.append((" ", frozenset(), link))
     runs.append((Span(kind, [tex]), frozenset(), link))
-
-
-#: How many paragraphs with text a document has at least for its font to
-#: say it was typed rather than written with listings in it.
-_TYPED_PARAGRAPHS = 3
-#: How many of them, at least, are set wholly in a monospaced font then.
-_TYPED_SHARE = 0.9
 
 
 def _fonts_of(rpr: Element | None) -> str | None:

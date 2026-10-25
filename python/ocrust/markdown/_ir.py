@@ -478,19 +478,25 @@ def assemble(runs: list[Run]) -> list[Inline]:
 
 
 def monospaced_font(name: str | None) -> bool:
-    """Whether a font's name is that of a monospaced face — Courier,
-    Consolas, Menlo, Monaco, Inconsolata, Lucida Console, a typewriter's, a
-    code font (`Source Code Pro`, `Fira Code`) or any `…Mono…` — the font
-    code is set in where a document has no style for it. No Monotype face
-    is one by its foundry's name."""
+    """Whether a font's name is that of a monospaced face, by the words in
+    it: Courier, Consolas, Menlo, Monaco, Inconsolata, Lucida Console or
+    Lucida Sans Typewriter, a code font (`Source Code Pro`, `Fira Code`) or
+    any `… Mono`. A word holding one is no sign: `Arial Unicode MS`,
+    `Encode Sans`, `American Typewriter` and `Monotype Corsiva` set their
+    letters as wide as each needs."""
     if not name:
         return False
-    face = name.lower().removeprefix("monotype")
-    return bool(_MONOSPACED_FACE.search(face))
+    words = {word.lower() for word in _FACE_WORD.findall(name)}
+    lucida = "lucida" in words and bool(words & {"console", "typewriter"})
+    return lucida or bool(words & _MONOSPACED_WORDS)
 
 
-_MONOSPACED_FACE = re.compile(
-    r"mono|courier|consolas|menlo|monaco|inconsolata|lucida ?console|typewriter|fixedsys|code"
+#: A word of a font's name, `DejaVuSansMono-Bold` written together or not.
+_FACE_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
+#: The words naming a monospaced face.
+_MONOSPACED_WORDS = frozenset(
+    {"mono", "monospace", "monospaced", "courier", "consolas", "menlo", "monaco"}
+    | {"inconsolata", "fixedsys", "code"}
 )
 
 

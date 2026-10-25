@@ -237,11 +237,22 @@ def test_reference_entries_of_one_line_beside_wrapped_ones_stay_apart():
 
 def test_a_sentence_set_larger_than_a_page_of_notes_is_no_heading():
     sentence = "The following table lists the results of the last quarter for all regions."
-    parts = ["BT /F1 12 Tf", text(72, 740, sentence), "/F1 9 Tf"]
+    parts = ["BT /F1 18 Tf", text(72, 770, "Results"), "/F1 12 Tf", text(72, 740, sentence)]
+    parts.append("/F1 9 Tf")
     parts += [
         text(72, 715 - 12 * k, f"{k + 1}. Note number {k + 1} on the figures above.")
         for k in range(8)
     ]
     parts.append("ET")
     md = body(_pdf_from_stream("\n".join(parts)))
-    assert f"\n{sentence}\n" in f"\n{md}\n" and "#" not in md.replace("<!--", ""), md
+    assert f"\n{sentence}\n" in f"\n{md}\n" and f"# {sentence}" not in md, md
+
+
+def test_a_slides_title_stating_its_point_stays_a_heading():
+    # Set but a little larger than its bullets, it is still the page's largest.
+    title = "Revenue grew by twelve per cent in the third quarter."
+    parts = ["BT /F1 18 Tf", text(36, 740, title), "/F1 14 Tf"]
+    parts += [text(54, 700 - 22 * k, f"- Point {k + 1} of the quarter") for k in range(3)]
+    parts.append("ET")
+    md = body(_pdf_from_stream("\n".join(parts)))
+    assert f"# {title}" in md, md

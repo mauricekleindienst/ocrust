@@ -199,6 +199,14 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   of the runtime. And on Apple Silicon ocrust asks for onnxruntime below 1.31,
   which recognizes text there as garbage (1.30 and every other platform read
   it right); CI installs the runtime as the wheel asks for it.
+- **Code in its place**: a command or a link a narrow column sets on a line
+  of its own stays in its sentence, as inline code; a listing keeps its
+  columns and a check mark or an emoji in it no longer cuts it; trees and
+  tables drawn in box characters are code. Only fonts whose names say they
+  are monospaced make code in Word and LibreOffice documents (no more
+  `Arial Unicode MS` or `American Typewriter`), and a letter typed in
+  Courier under a letterhead stays text. Prose whose lines happen to end on
+  commas is no verse, and a slide's title stating its point stays a heading.
 - **Short columns, CVs and pull quotes**: a short two-column section is read
   column by column with its heading and the section after it in place, also
   when one column holds a single line; a CV's label of two lines beside its

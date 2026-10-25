@@ -19,9 +19,22 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ocrust._types import Block as ScanBlock
-from ocrust._types import Document, Line, Page
+from ocrust._types import Box, Document, Line, Page
 
-from ._ir import Block, Break, Code, Entry, Heading, Inline, Marker, Paragraph, Table, nest, plain
+from ._ir import (
+    Block,
+    Break,
+    Code,
+    Entry,
+    Heading,
+    Inline,
+    Marker,
+    Paragraph,
+    Span,
+    Table,
+    nest,
+    plain,
+)
 
 #: How much of the page height, at the top and at the bottom, running heads and
 #: page numbers are looked for in.
@@ -78,12 +91,28 @@ _UNSPACED = re.compile(
 def _glue(before: str, after: str) -> str:
     """What joins two lines of one paragraph: a space, or nothing between
     two characters of Chinese or Japanese, which set no spaces between
-    words, or within a range of figures broken at its dash: `1–` over `35`."""
+    words, within a range of figures broken at its dash (`1–` over `35`) or
+    within a link broken where it had no space."""
     if before and after and _UNSPACED.match(before[-1]) and _UNSPACED.match(after[0]):
         return ""
     if re.search(r"\d[–-]$", before) and after[:1].isdigit():
         return ""
+    # A link or a path too long for its line, broken where it had no space.
+    if _LINK_END.search(before) and _LINK_GOES_ON.match(after):
+        return ""
+    if _PATH_DOT.search(before) and re.match(r"[a-z]{1,5}\b", after):
+        return ""
     return " "
+
+
+#: A line ending in a link or a path cut short: `https://example.org/2`,
+#: `/usr/local/sha`, `xample/structured/re`.
+_LINK_END = re.compile(r"(?:\w+://|www\.|(?<!\S)/|\S*/)\S*[\w/=-]$")
+#: A line going on with the rest of one: `024/annual_report.pdf`.
+_LINK_GOES_ON = re.compile(r"[\w.-]*[/_?=#][\w./?=#&%-]*[\w/]")
+#: A path ending in a dot over its extension in lower case, `defaults.` over
+#: `yaml`: prose starts its next sentence in a capital. Not `2024/25.`.
+_PATH_DOT = re.compile(r"(?:(?<!\S)(?:\w+://|~|\.{0,2}/)\S*|\S*/\S*/\S*)[A-Za-z]\.$")
 
 
 #: A line that starts with its own label: a few words, a colon, the value.
@@ -118,12 +147,17 @@ def _heading_key(text: str) -> str:
     return " ".join(text.lower().split())
 
 
-def _sentence(lines: Sequence[Line]) -> bool:
+def _sentence(lines: Sequence[Line], body: float | None, top: float = 0.0) -> bool:
     """Whether a block set larger than the page's commonest size reads as a
     sentence of running text, no heading: eight words and more ending in a
-    full stop, and no section's number before them. A page with more lines
-    in a smaller size — notes, a listing — makes its running text the
-    larger."""
+    full stop, no section's number before them, set but a little larger
+    than that size (`body`), under a larger heading (`top`, the page's
+    largest). A page with more lines in a smaller size — notes, a listing —
+    makes its running text the larger; a slide's title stating its point
+    is the largest text on its page."""
+    height = lines[0].box.height
+    if body is None or height >= _SENTENCE_SIZE * body or height >= _SENTENCE_UNDER * top:
+        return False
     text = " ".join(line.text.strip() for line in lines)
     words = re.findall(r"[^\W\d_]+", text)
     return (
@@ -131,6 +165,36 @@ def _sentence(lines: Sequence[Line]) -> bool:
         and bool(re.search(r"[^.]\.[\"'”’)]*$", text))
         and not re.match(r"^(?:§\s*)?\d+(?:\.\d+)*\.?\s", text)
     )
+
+
+#: How much larger than the page's commonest size, at most, a sentence is
+#: set to be running text.
+_SENTENCE_SIZE = 1.4
+#: How much smaller than the page's largest heading a sentence is set, at
+#: least, to be running text under it.
+_SENTENCE_UNDER = 0.95
+
+
+def _top_height(page: Page) -> float:
+    """The height of the largest heading on a page, 0 for none."""
+    heights = [
+        block.lines[0].box.height
+        for block in page.blocks
+        if block.kind == "heading" and block.lines
+    ]
+    return max(heights, default=0.0)
+
+
+def _body_height(page: Page) -> float | None:
+    """The height most of a page's lines outside its headings are set in."""
+    heights = Counter(
+        round(line.box.height)
+        for block in page.blocks
+        if block.kind != "heading"
+        for line in block.lines
+        if line.text.strip()
+    )
+    return float(heights.most_common(1)[0][0]) if heights else None
 
 
 #: How many words a sentence set large has at least to be running text.
@@ -232,7 +296,9 @@ def _heading_levels(pages: Sequence[Page]) -> dict[float, int]:
             round(block.lines[0].box.height, 1)
             for page in pages
             for block in page.blocks
-            if block.kind == "heading" and block.lines and not _sentence(block.lines)
+            if block.kind == "heading"
+            and block.lines
+            and not _sentence(block.lines, _body_height(page), _top_height(page))
         },
         reverse=True,
     )
@@ -278,6 +344,7 @@ def _page(
             else:
                 blocks.append((block, lines))
 
+    body, top = _body_height(page), _top_height(page)
     columns = _Columns(
         _column_edges([(b, ls) for b, ls in blocks if b.kind == "paragraph"]),
         [_extent(ls) for _, ls in blocks],
@@ -304,7 +371,7 @@ def _page(
                 out.append(Table([[[cell] for cell in row] for row in rows]))
                 spots.append(_Spot(_extent(lines)))
                 continue
-        if block.kind == "heading" and not _sentence(lines):
+        if block.kind == "heading" and not _sentence(lines, body, top):
             text = " ".join(line.text.strip() for line in lines)
             level = levels.get(round(lines[0].box.height, 1), 2)
             out.append(Heading(level, [text]))
@@ -340,11 +407,57 @@ def _by_font(lines: list[Line]) -> list[list[Line]]:
     the text font."""
     runs: list[list[Line]] = []
     for line in lines:
-        if runs and runs[-1][-1].monospaced == line.monospaced:
+        # A line of a tree's or a table's frame alone goes with the lines
+        # around it, whatever font drew it.
+        if runs and (_drawn_only(line.text) or _fixed(runs[-1]) == line.monospaced):
             runs[-1].append(line)
         else:
             runs.append([line])
-    return runs
+    # A span of code too long for the line it stood in — a command, a path —
+    # is set on a line of its own, and its sentence goes on through it.
+    merged: list[list[Line]] = []
+    for run in runs:
+        if (
+            len(merged) >= 2
+            and not _fixed(run)
+            and _fixed(merged[-1])
+            and len(merged[-1]) <= _INLINE_CODE_LINES
+            and _goes_on_through(merged[-2][-1].text, run[0].text)
+        ):
+            code = merged.pop()
+            merged[-1] = [*merged[-1], *code, *run]
+        else:
+            merged.append(run)
+    return merged
+
+
+def _drawn_only(text: str) -> bool:
+    """Whether a line is nothing but box-drawing characters: `└──────┘`."""
+    return bool(text.strip()) and all(
+        char.isspace() or "\u2500" <= char <= "\u259f" for char in text
+    )
+
+
+def _fixed(lines: Sequence[Line]) -> bool:
+    """Whether lines are set in a monospaced font, a frame's lines aside."""
+    told = [line.monospaced for line in lines if not _drawn_only(line.text)]
+    return bool(told) and all(told)
+
+
+#: How many lines a span of code in a sentence takes at most.
+_INLINE_CODE_LINES = 2
+
+
+def _goes_on_through(before: str, after: str) -> bool:
+    """Whether a sentence goes on from the line `before` a line of code to
+    the line `after` it: it is open before, and goes on in lower case or
+    with its punctuation after."""
+    before, after = before.strip(), after.strip()
+    return (
+        bool(before)
+        and not _ENDS_SENTENCE.search(before)
+        and (after[:1].islower() or after[:1] in ",.;:)")
+    )
 
 
 def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
@@ -932,13 +1045,27 @@ def _full(lines: Sequence[Line]) -> bool:
 def _set_as_verse(lines: Sequence[Line]) -> bool:
     """Whether a paragraph is verse, each line ending where its verse does:
     three lines at least that end as verses do (see `_verse_share`), two
-    in three of them — or half, where they leave room a word would have
-    fitted in. A poem's lines, as long as one another, may each look full;
-    prose with long words ends many lines on a comma, but fills them."""
-    if len(lines) < _BESIDE_PICTURE_LINES:
+    in three of them where the lines are a verse's length — or half, where
+    they leave room a word would have fitted in. A poem's lines, as long as
+    one another, may each look full; prose with long words ends many lines
+    on a comma, but fills them, and no verse is justified."""
+    if len(lines) < _BESIDE_PICTURE_LINES or _justified(lines):
         return False
     share = _verse_share(lines)
-    return share >= _VERSE_SHARE or (share >= 0.5 and not _full(lines))
+    short = statistics.mean(len(line.text.strip()) for line in lines) <= _VERSE_CHARS
+    return (share >= _VERSE_SHARE and short) or (share >= 0.5 and not _full(lines))
+
+
+#: How many characters a verse's line has, on average, at most: a sentence
+#: wrapped in a column runs on far longer.
+_VERSE_CHARS = 50
+
+
+def _justified(lines: Sequence[Line]) -> bool:
+    """Whether a paragraph is set justified: every line but the last ends
+    where the widest does. No verse is."""
+    x1 = max(line.box.x1 for line in lines)
+    return all(x1 - line.box.x1 <= 0.3 * line.box.height for line in lines[:-1])
 
 
 #: How many of a block's line ends are a verse's, at least, for it to be
@@ -966,11 +1093,28 @@ def _verse_share(lines: Sequence[Line]) -> float:
     verse = 0.0
     for line, after in pairs:
         end = line.text.rstrip()[-1:]
+        last = line.text.split()[-1].lower() if line.text.split() else ""
         if end in ".!?":
             verse += 0.5
         elif end in ",;:" or _verse_capital(after.text):
             verse += 1
-    return verse / max(len(pairs), 1)
+        elif last in _DANGLING:
+            # `will be`, `the`: a verse never ends mid-phrase.
+            verse -= 1
+    return max(verse, 0.0) / max(len(pairs), 1)
+
+
+#: Words no verse ends on, an article's, a preposition's or a conjunction's
+#: phrase going on in the next line.
+_DANGLING = frozenset(
+    word
+    for words in [
+        "the a an and or of to in on at for with by from be will would is are was",
+        "der die das den dem des ein eine einen und oder zu von mit für auf an im",
+        "le la les et de des du un une au aux el los las y en del al",
+    ]
+    for word in words.split()
+)
 
 
 def _verse_capital(text: str) -> bool:
@@ -1074,7 +1218,7 @@ def _monospaced(lines: Sequence[Line]) -> float | None:
     wide as their letters make them, never the same per character; a line
     or two of code says too little of it, but its font says enough."""
     told = _told(lines)
-    if lines and all(line.monospaced for line in lines):
+    if lines and _fixed(lines):
         if told:
             return told[len(told) // 2]
         longest = max(lines, key=lambda line: len(line.text.strip()))
@@ -1103,6 +1247,7 @@ def _listing(parts: list[list[Line]]) -> str | None:
     if not _code_like(lines, indents):
         return None
     lines_of = iter(zip(indents, lines, strict=True))
+    pitch = _pitch(lines, advance)
     height = statistics.median(line.box.height for line in lines)
     out = ""
     for at, part in enumerate(parts):
@@ -1112,8 +1257,85 @@ def _listing(parts: list[list[Line]]) -> str | None:
             gap = _extent(part)[1] - _extent(parts[at - 1])[3]
             out += "\n\n" if gap >= 0.5 * height else "\n"
         out += "\n".join(
-            " " * indent + line.text.strip() for indent, line in (next(lines_of) for _ in part)
+            _columned(line, left, pitch) or " " * indent + line.text.strip()
+            for indent, line in (next(lines_of) for _ in part)
         )
+    return out
+
+
+def typed_code(texts: Sequence[str]) -> bool:
+    """Whether lines a document sets in a monospaced font — a Word or an
+    OpenDocument paragraph each — read as code, as a PDF's listing must: a
+    letter, minutes or a note typed in Courier are none."""
+    lines = [
+        Line(text=text, box=Box(0.0, 0.0, 0.0, 0.0), confidence=1.0, angle=0.0, monospaced=True)
+        for text in texts
+        if text.strip()
+    ]
+    if not lines:
+        return False
+    indents = [len(line.text) - len(line.text.lstrip(" ")) for line in lines]
+    return _code_like(lines, indents)
+
+
+def _pitch(lines: Sequence[Line], advance: float) -> float:
+    """A listing's advance per character, from its words' boxes, where
+    `advance` counts a run of spaces between columns as one. A line's first
+    box starts where its text does, its last ends where its text does, and
+    each box between starts halfway across the white before it (see
+    `_columned`): the pitch is the widest that sets every word in a whole
+    column, a space at least after the word before."""
+    left = min(_start(line) for line in lines)
+    rows = [[word for word in line.words if word.text] for line in lines]
+    rows = [row for row in rows if row]
+    widest = max((row[-1].box.x1 - left for row in rows), default=0.0)
+    if widest <= 0 or advance <= 0:
+        return advance
+
+    def fits(pitch: float) -> bool:
+        for row in rows:
+            end = 0.0
+            for index, word in enumerate(row):
+                start = word.box.x0 if index == 0 else 2 * word.box.x0 - end
+                column = (start - left) / pitch
+                if abs(column - round(column)) > _PITCH_SLACK or (
+                    index and start < end + (1 - _PITCH_SLACK) * pitch
+                ):
+                    return False
+                end = left + (round(column) + len(word.text)) * pitch
+            if abs(end - row[-1].box.x1) > _PITCH_SLACK * pitch:
+                return False
+        return True
+
+    first = max(math.ceil(widest / advance - _PITCH_SLACK), 1)
+    for columns in range(first, int(first * _PITCH_RANGE) + 1):
+        if fits(widest / columns):
+            return widest / columns
+    return advance
+
+
+#: How far off a whole column, in characters, a word may start.
+_PITCH_SLACK = 0.25
+#: How many times as many columns as `advance` gives a listing may have.
+_PITCH_RANGE = 2.5
+
+
+def _columned(line: Line, left: float, advance: float) -> str | None:
+    """A line of a listing with its words in the columns they stand in —
+    command output, an ASCII table, aligned comments — or None where its
+    words do not add up to its text. The first word's box starts where its
+    text does, each other's halfway across the space before it: from where
+    the word before ends, its own start follows."""
+    words = [word for word in line.words if word.text]
+    if not words or " ".join(word.text for word in words) != " ".join(line.text.split()):
+        return None
+    out = ""
+    end = 0.0
+    for index, word in enumerate(words):
+        start = word.box.x0 if index == 0 else 2 * word.box.x0 - end
+        column = max(round((start - left) / advance), len(out) + 1 if out else 0)
+        out += " " * (column - len(out)) + word.text
+        end = left + (column + len(word.text)) * advance
     return out
 
 
@@ -1134,7 +1356,7 @@ def _code_like(lines: Sequence[Line], indents: Sequence[int]) -> bool:
         hits = sum(any(pattern.search(text) for pattern in patterns) for text in texts)
         return hits * 2 >= len(texts)
 
-    strong = (_COMMAND, _RECORD, _STATEMENT, _SOURCE, _CODE_COMMENT, _PROMPT)
+    strong = (_COMMAND, _RECORD, _STATEMENT, _SOURCE, _CODE_COMMENT, _PROMPT, _DRAWN)
     # A configuration has two keys at least: a line `note: …` alone is a note.
     if sum(bool(_CONFIG_KEY.search(text)) for text in texts) >= 2:
         strong = (*strong, _CONFIG_KEY)
@@ -1154,9 +1376,7 @@ def _code_like(lines: Sequence[Line], indents: Sequence[int]) -> bool:
     # Set in a font the page says is monospaced, a prompt or a command among
     # the lines makes the rest a session's output.
     plain = (_COMMAND, _RECORD, _STATEMENT, _SOURCE, _CODE_COMMENT, _PROMPT)
-    if all(line.monospaced for line in lines) and any(
-        pattern.search(text) for pattern in plain for text in texts
-    ):
+    if _fixed(lines) and any(pattern.search(text) for pattern in plain for text in texts):
         return True
     chars = [c for text in texts for c in text if not c.isspace()]
     symbols = sum(c in _CODE_SYMBOLS for c in chars)
@@ -1199,6 +1419,8 @@ _COMMENT = re.compile(r"^(?:#!|#\s|//|--\s|/\*|\*\s|;\s|%\s|REM\s|rem\s)")
 _PROMPT = re.compile(
     r"^(?:\(\S+\) )?(?:\$|>>>|PS [A-Za-z]:\\[^>]*>|[\w.-]+@[\w.-]+:[^\s$#]*[$#])(?:\s|$)"
 )
+#: A tree or a table drawn in text: `├── src/`, `│ North │ 120 │`.
+_DRAWN = re.compile(r"[\u2500-\u257f]")
 #: A comment in marks only code writes: `#!/bin/sh`, `# …`, `// …`, `/* …`.
 _CODE_COMMENT = re.compile(r"^(?:#!|#\s|//|/\*)")
 #: An argument a command is given: a flag, a path, a name with a dot or a
@@ -1323,7 +1545,7 @@ def _with_listings(
                         _listing_part(more)
                         or gap < 0.5 * height
                         or (
-                            all(line.monospaced for part in [*run, more] for line in part)
+                            _fixed([line for part in [*run, more] for line in part])
                             and min(_start(line) for line in more) > left + height
                         )
                     )
@@ -1479,6 +1701,8 @@ def _joined(lines: Sequence[Line], right: float, rtl: bool = False) -> list[Inli
     A poem's or a list's lines leave far more room.
     """
     flowing = _running(lines)
+    # A line of code in a sentence is code within it.
+    mixed = any(line.monospaced for line in lines) and not all(line.monospaced for line in lines)
     content: list[Inline] = []
     for index, line in enumerate(lines):
         text = line.text.strip()
@@ -1504,7 +1728,12 @@ def _joined(lines: Sequence[Line], right: float, rtl: bool = False) -> list[Inli
                 content.append(Break())
             elif _glue(previous.text.strip(), text):
                 content.append(" ")
-        content.append(text)
+        # Not a piece of a link the line broke inside: that stays as it is.
+        texts = [other.text.strip() for other in lines]
+        whole = (index == 0 or _glue(texts[index - 1], text)) and (
+            index + 1 == len(lines) or _glue(text, texts[index + 1])
+        )
+        content.append(Span("code", [text]) if mixed and line.monospaced and whole else text)
     return content
 
 
