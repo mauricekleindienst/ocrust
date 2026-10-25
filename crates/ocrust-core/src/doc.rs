@@ -99,6 +99,10 @@ pub struct Line {
     /// Never set for text read from an image.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub monospaced: bool,
+    /// Whether the page's text layer sets the whole line in a bold face.
+    /// Never set for text read from an image.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
 }
 
 impl Line {
@@ -344,6 +348,7 @@ mod tests {
             words: Vec::new(),
             segments: Vec::new(),
             monospaced: false,
+            bold: false,
         }
     }
 

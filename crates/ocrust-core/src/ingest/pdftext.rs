@@ -99,6 +99,8 @@ struct TextGlyph {
     actual: bool,
     /// Whether the glyph's font is monospaced (see [`FontFacts::monospaced`]).
     monospaced: bool,
+    /// Whether the glyph's font is a bold face (see [`FontFacts::bold`]).
+    bold: bool,
 }
 
 impl TextGlyph {
@@ -612,6 +614,8 @@ struct Letter {
     actual: bool,
     /// Whether the glyph's font is monospaced.
     monospaced: bool,
+    /// Whether the glyph's font is a bold face.
+    bold: bool,
 }
 
 /// What a run is made of, left to right.
@@ -718,6 +722,7 @@ impl Run {
                 size: glyph.size(),
                 actual: glyph.actual,
                 monospaced: glyph.monospaced,
+                bold: glyph.bold,
             }));
         }
         self.last_origin = glyph.origin;
@@ -1131,6 +1136,20 @@ impl Run {
                 (fixed + usize::from(m), all + 1)
             });
         let monospaced = letters > 0 && fixed as f32 >= MONOSPACED_SHARE * letters as f32;
+        // Set in a bold face: nearly every letter or figure of it.
+        let (heavy, written) = self
+            .pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                Piece::Char(letter) if letter.text.chars().any(char::is_alphanumeric) => {
+                    Some(letter.bold)
+                }
+                _ => None,
+            })
+            .fold((0usize, 0usize), |(heavy, all), b| {
+                (heavy + usize::from(b), all + 1)
+            });
+        let bold = written > 0 && heavy as f32 >= MONOSPACED_SHARE * written as f32;
         Some(Line {
             text,
             confidence: 1.0,
@@ -1142,6 +1161,7 @@ impl Run {
             words,
             segments,
             monospaced,
+            bold,
         })
     }
 }
@@ -2009,6 +2029,8 @@ struct Collector {
     facts: FontFacts,
     /// Whether each font is monospaced, by font.
     monospaced: HashMap<u128, bool>,
+    /// Whether each font is a bold face, by font.
+    bold: HashMap<u128, bool>,
     /// The tag of every marked-content sequence begun, in the order the
     /// interpreter began them (see [`marked_content`]).
     marked: Vec<Vec<u8>>,
@@ -2189,6 +2211,7 @@ fn stand_in(glyphs: &[TextGlyph], advanced: &[bool], text: &str) -> Option<TextG
         text,
         actual: true,
         monospaced: glyphs.iter().all(|g| g.monospaced),
+        bold: glyphs.iter().all(|g| g.bold),
     })
 }
 
@@ -2507,6 +2530,20 @@ impl<'a> Device<'a> for Collector {
             }
             Glyph::Type3(_) => false,
         };
+        let bold = match glyph {
+            Glyph::Outline(g) => {
+                let key = g.font_cache_key();
+                let named = &self.facts.bold;
+                *self.bold.entry(key).or_insert_with(|| {
+                    named.contains(&key)
+                        || g.font_data().is_some_and(|data| {
+                            data.weight.is_some_and(|w| w >= BOLD_WEIGHT)
+                                || bold_name(data.postscript_name.as_deref())
+                        })
+                })
+            }
+            Glyph::Type3(_) => false,
+        };
         self.drawn.push((self.open.clone(), advanced));
         self.layer.glyphs.push(TextGlyph {
             text,
@@ -2517,6 +2554,7 @@ impl<'a> Device<'a> for Collector {
             mapped,
             actual: false,
             monospaced,
+            bold,
         });
     }
 
@@ -2561,6 +2599,9 @@ struct FontFacts {
     /// standard Courier has no descriptor, and hayro hands over no name
     /// for a Type1 font's glyphs.
     monospaced: HashSet<u128>,
+    /// The fonts, by cache key, whose dictionary says they are bold: the
+    /// descriptor's weight or `ForceBold` flag, or a bold face's name.
+    bold: HashSet<u128>,
 }
 
 impl FontFacts {
@@ -2614,6 +2655,9 @@ fn font_facts<'a>(page: &Page<'a>, cache: &InterpreterCache<'a>) -> FontFacts {
             }
             if fixed_pitch(&font) {
                 facts.monospaced.insert(font.cache_key());
+            }
+            if heavy(&font) {
+                facts.bold.insert(font.cache_key());
             }
             let subtype = font.get::<Name<'_>>(b"Subtype");
             if subtype.as_ref().is_some_and(|s| s.as_str() == "Type3") {
@@ -2689,6 +2733,54 @@ fn fixed_pitch(font: &Dict<'_>) -> bool {
 
 /// The `FixedPitch` bit of a font descriptor's `Flags`.
 const FIXED_PITCH_FLAG: u32 = 1;
+
+/// Whether a font's dictionary says it is a bold face: its descriptor's
+/// `FontWeight` or `ForceBold` flag — a composite font's in its
+/// descendant's — or its name (`Arial-BoldMT`, `Calibri,Bold`).
+fn heavy(font: &Dict<'_>) -> bool {
+    let descriptor = font.get::<Dict<'_>>(b"FontDescriptor").or_else(|| {
+        font.get::<Array<'_>>(b"DescendantFonts")?
+            .iter::<Dict<'_>>()
+            .next()?
+            .get::<Dict<'_>>(b"FontDescriptor")
+    });
+    let weighted = descriptor.as_ref().is_some_and(|d| {
+        d.get::<f32>(b"FontWeight")
+            .is_some_and(|w| w >= BOLD_WEIGHT as f32)
+            || d.get::<u32>(b"Flags")
+                .is_some_and(|flags| flags & FORCE_BOLD_FLAG != 0)
+    });
+    let name = font.get::<Name<'_>>(b"BaseFont");
+    weighted || bold_name(name.as_ref().map(|n| n.as_str()))
+}
+
+/// The `ForceBold` bit of a font descriptor's `Flags`.
+const FORCE_BOLD_FLAG: u32 = 1 << 18;
+/// The weight a bold face has at least: semibold.
+const BOLD_WEIGHT: u32 = 600;
+
+/// Whether a font's name is that of a bold face, by the words in it:
+/// `Bold`, `SemiBold`, `Black`, `Heavy`.
+fn bold_name(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    let face = name.split_once('+').map_or(name, |(_, face)| face);
+    face_words(face)
+        .iter()
+        .any(|word| BOLD_WORDS.contains(&word.as_str()))
+}
+
+/// The words naming a bold face (see [`bold_name`]).
+const BOLD_WORDS: &[&str] = &[
+    "bold",
+    "semibold",
+    "demibold",
+    "extrabold",
+    "ultrabold",
+    "black",
+    "heavy",
+];
 
 /// Whether a font's name is that of a monospaced face, by the words in it:
 /// Courier, Consolas, Menlo, Monaco, Inconsolata, Lucida Console or Lucida
@@ -2930,6 +3022,7 @@ fn form_boxes(page: &Page<'_>, initial: Affine) -> Vec<TextGlyph> {
             mapped: true,
             actual: false,
             monospaced: false,
+            bold: false,
         });
     }
     boxes
@@ -3179,6 +3272,7 @@ pub(crate) fn read<'a>(page: &'a Page<'a>, cache: &InterpreterCache<'a>, scale: 
         unnamed: HashMap::new(),
         facts: font_facts(page, cache),
         monospaced: HashMap::new(),
+        bold: HashMap::new(),
         marked: Vec::new(),
         open: Vec::new(),
         drawn: Vec::new(),
@@ -3210,6 +3304,7 @@ mod tests {
             mapped: true,
             actual: false,
             monospaced: false,
+            bold: false,
         }
     }
 
@@ -3584,6 +3679,7 @@ mod tests {
                 mapped: true,
                 actual: false,
                 monospaced: false,
+                bold: false,
             });
         }
         let texts: Vec<String> = layer(glyphs)
@@ -4114,6 +4210,7 @@ mod tests {
             unnamed: HashMap::new(),
             facts: FontFacts::default(),
             monospaced: HashMap::new(),
+            bold: HashMap::new(),
             marked: vec![b"Span".to_vec()],
             open: Vec::new(),
             drawn: vec![(vec![0], true), (vec![0], true)],

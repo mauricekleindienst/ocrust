@@ -97,6 +97,9 @@ def _glue(before: str, after: str) -> str:
         return ""
     if re.search(r"\d[–-]$", before) and after[:1].isdigit():
         return ""
+    # A compound broken at its own hyphen before a figure: `COVID-` over `19`.
+    if re.search(r"[^\W\d_][-\u2010]$", before) and after[:1].isdigit():
+        return ""
     # A link or a path too long for its line, broken where it had no space.
     if _LINK_END.search(before) and (
         _LINK_GOES_ON.match(after)
@@ -159,14 +162,19 @@ def _heading_key(text: str) -> str:
 
 
 def _sentence(
-    lines: Sequence[Line], body: float | None, top: float = 0.0, coded: bool = False
+    lines: Sequence[Line],
+    body: float | None,
+    top: float = 0.0,
+    coded: bool = False,
+    first: bool = False,
 ) -> bool:
     """Whether a block set larger than the page's commonest size reads as
     running text, no heading: eight words and more ending in a full stop,
     no section's number before them, and set as running text is — several
     lines of it, or two under a larger heading, or in quotation marks (a
-    lead, a pull quote), or but a little larger than that size (`body`)
-    under a larger heading (`top`, the page's largest). A page with more
+    lead, a pull quote) where it is not the largest text opening its page
+    (`first`), or but a little larger than that size (`body`) under a
+    larger heading (`top`, the page's largest). A page with more
     lines in a smaller size — notes — makes its running text the larger,
     and one whose other text is but a listing (`coded`) has no other; a
     slide's title stating its point is the largest text on its page."""
@@ -181,7 +189,7 @@ def _sentence(
     height = lines[0].box.height
     under = height < _SENTENCE_UNDER * top
     lead = len(lines) >= _LEAD_LINES or (len(lines) >= 2 and (len(words) >= _LEAD_WORDS or under))
-    if lead or _QUOTED.match(text):
+    if (lead or _QUOTED.match(text)) and (under or not first):
         return True
     if body is None:
         return coded
@@ -226,6 +234,14 @@ def _body_height(page: Page) -> float | None:
         if line.text.strip() and not line.monospaced
     )
     return float(heights.most_common(1)[0][0]) if heights else None
+
+
+def _opens(page: Page, lines: Sequence[Line]) -> bool:
+    """Whether a block stands first on its page, no text above it."""
+    top = lines[0].box.y0
+    return not any(
+        line.box.y1 <= top for block in page.blocks for line in block.lines if line.text.strip()
+    )
 
 
 def _coded(page: Page) -> bool:
@@ -336,7 +352,13 @@ def _heading_levels(pages: Sequence[Page]) -> dict[float, int]:
             for block in page.blocks
             if block.kind == "heading"
             and block.lines
-            and not _sentence(block.lines, _body_height(page), _top_height(page), _coded(page))
+            and not _sentence(
+                block.lines,
+                _body_height(page),
+                _top_height(page),
+                _coded(page),
+                _opens(page, block.lines),
+            )
         },
         reverse=True,
     )
@@ -409,11 +431,13 @@ def _page(
                 out.append(Table([[[cell] for cell in row] for row in rows]))
                 spots.append(_Spot(_extent(lines)))
                 continue
-        if block.kind == "heading" and not _sentence(lines, body, top, coded):
+        if block.kind == "heading" and not _sentence(lines, body, top, coded, _opens(page, lines)):
             text = " ".join(line.text.strip() for line in lines)
             level = levels.get(round(lines[0].box.height, 1), 2)
             out.append(Heading(level, [text]))
-            spots.append(None)
+            # Where it sat: a box's title floated beside a paragraph is one
+            # of the boxes the paragraph goes on past.
+            spots.append(_Spot(_extent(lines)))
             continue
         if listing is None:
             listing = _listing([lines])
@@ -525,11 +549,19 @@ def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
         return hanging
     verse = _set_as_verse(lines)
     # Lines that each end a sentence, every one of them, are a paragraph
-    # each: running text hardly ever breaks all its lines at a sentence's end.
+    # each: running text hardly ever breaks all its lines at a sentence's
+    # end — unless it is justified, filling them all.
     if (
         len(lines) >= _OWN_LINES
         and not verse
         and all(_FULL_STOP.search(line.text.strip()) for line in lines)
+        and (
+            not _justified(lines)
+            or any(
+                right - line.box.x1 > _first_word_width(after) + 0.35 * height
+                for line, after in zip(lines, lines[1:])
+            )
+        )
     ):
         return [[line] for line in lines]
     # A dialogue's paragraphs, a line or two each: nearly every indented
@@ -718,7 +750,7 @@ def _carried_on(
     at = len(out) - 1
     while True:
         head, head_spot = out[at], placed[at]
-        if head_spot is None or not isinstance(head, (Paragraph, Table)):
+        if head_spot is None or not isinstance(head, (Paragraph, Table, Heading)):
             return False
         boxes = [where for where in placed[at + 1 :] if where is not None]
         way = (

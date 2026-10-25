@@ -141,6 +141,7 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32, rules: &[Rect]
         .iter()
         .map(|line| with_its_item(rules.split(cells_of(line, gutter), line)))
         .collect();
+    let rows = stretched_cells(rows, lines, text_height);
     let ruled = rules.above(lines, &rows);
     if log::log_enabled!(log::Level::Debug) {
         log::debug!("table scan: text height {text_height:.1}, gutter {gutter:.1}");
@@ -1153,6 +1154,53 @@ fn columns_of(rows: &[Vec<Candidate>], gutter: f32) -> Option<Vec<(f32, f32)>> {
         .then_some(columns)
 }
 
+/// A line's cells joined where they are one justified cell stretched: its
+/// first lines set their word gaps as wide as a gutter — `Bäder` at the
+/// cell's left, `und` at its right — over a line of the cell that fills it,
+/// `Freizeitanlagen der`. Two neighbouring cells that a cell of the line
+/// right under them spans, from the first's start to the second's end, are
+/// one. From the bottom up: a cell's last line is not stretched, and says
+/// where the cell ends for the lines above it.
+fn stretched_cells(
+    mut rows: Vec<Vec<Candidate>>,
+    lines: &[Line],
+    text_height: f32,
+) -> Vec<Vec<Candidate>> {
+    let near = text_height * STRETCHED_EDGE;
+    for i in (0..rows.len().saturating_sub(1)).rev() {
+        if lines[i + 1].bbox.y0 - lines[i].bbox.y1 > text_height * CONTINUATION_GAP {
+            continue;
+        }
+        let under: Vec<Rect> = rows[i + 1].iter().map(|c| c.cell.bbox).collect();
+        let mut joined: Vec<Candidate> = Vec::with_capacity(rows[i].len());
+        for candidate in std::mem::take(&mut rows[i]) {
+            if let Some(last) = joined.last_mut() {
+                let (a, b) = (last.cell.bbox, candidate.cell.bbox);
+                if under
+                    .iter()
+                    .any(|c| (c.x0 - a.x0).abs() <= near && (c.x1 - b.x1).abs() <= near)
+                {
+                    last.cell = Segment {
+                        text: format!("{} {}", last.cell.text, candidate.cell.text),
+                        bbox: a.union(&b),
+                        confidence: last.cell.confidence.min(candidate.cell.confidence),
+                    };
+                    last.words.extend(candidate.words);
+                    continue;
+                }
+            }
+            joined.push(candidate);
+        }
+        rows[i] = joined;
+    }
+    rows
+}
+
+/// How far, in text heights, a stretched cell's ends may stand off the
+/// ends of the line filling it under them: a justified line's ends are its
+/// cell's.
+const STRETCHED_EDGE: f32 = 0.25;
+
 /// A line opening with a bullet on its own, a gutter before the text — how a
 /// browser sets a list item in Chinese or Japanese, whose word gaps are few
 /// and the gutter narrow — as one cell: a list item is no row of two.
@@ -1986,6 +2034,30 @@ mod tests {
             ["1", "Wartung der Heizungsanlage im Erdgeschoss", "340,00"]
         );
         assert_eq!(table.row_text(2), ["2", "Anfahrt", "45,00"]);
+    }
+
+    #[test]
+    fn a_justified_cell_stretched_over_a_gutter_stays_whole() {
+        // `Bäder und` set justified: its two words at the cell's ends, as
+        // far apart as the gutter, over the line that fills the cell.
+        let lines = vec![
+            row(0.0, &[("Sparte", 0.0, 60.0), ("Umsatz", 200.0, 260.0)]),
+            row(18.0, &[("Gas", 0.0, 30.0), ("13,8", 200.0, 240.0)]),
+            row(36.0, &[("Strom", 0.0, 50.0), ("24,3", 200.0, 240.0)]),
+            row(
+                54.0,
+                &[
+                    ("Bäder", 0.0, 50.0),
+                    ("und", 140.0, 170.0),
+                    ("1,3", 200.0, 230.0),
+                ],
+            ),
+            row(66.0, &[("Freizeitanlagen der", 0.0, 170.0)]),
+            row(84.0, &[("Fernwärme", 0.0, 90.0), ("29,0", 200.0, 240.0)]),
+        ];
+        let table = detect(&lines, TEXT_HEIGHT).expect("a table");
+        assert_eq!(table.rows, 5);
+        assert_eq!(table.row_text(3), ["Bäder und Freizeitanlagen der", "1,3"]);
     }
 
     #[test]

@@ -230,6 +230,18 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   table cell stays in its row, a list whose items open on a hyphen (`- `)
   is a list as one of dashes is, and a sheet's totals row set off by an
   empty row stays under the columns it totals.
+- **Headings in bold, words at a line's end, tables and sheets**: a PDF's
+  section headings set in a bold face but little larger than the text, or
+  not at all — Word's and LibreOffice's second and third levels — are
+  headings, and a short line a little larger than the text is one too; a
+  box's title floated beside a paragraph no longer tears it. A compound
+  broken at its own hyphen next to a figure (`COVID-19-` over `related`,
+  `COVID-` over `19`) and a word broken at a soft hyphen are whole again. A
+  slide's title stating its point stays a heading over two or three lines.
+  A justified table cell whose first line stretches its words across the
+  gutter stays one cell, a sheet's title in a row of its own over the table
+  is no longer taken for its header, and only a row labelled as a total
+  joins the table above it.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and

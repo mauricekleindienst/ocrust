@@ -1724,6 +1724,12 @@ _PERCENT_FORMATS = {9, 10}
 #: A totals row or two set off from its table by up to this many empty rows.
 _TOTAL_ROWS = 2
 _TOTAL_GAP = 2
+#: What a totals row says it is in its first cell.
+_TOTAL_LABEL = re.compile(
+    r"(?:grand\s+|sub)?(?:total|sum|summe|zwischensumme|gesamt|insgesamt|endsumme|netto"
+    r"|brutto|mwst|ust|vat|tax|average|mean|durchschnitt|mittelwert|somme|totaal|totale|suma)",
+    re.IGNORECASE,
+)
 
 
 def _is_date_format(code: str) -> bool:
@@ -2017,6 +2023,10 @@ def _sheet_blocks(rows: dict[int, dict[int, str]], dropped: int = 0) -> list[Blo
         nonlocal table
         if not group:
             return
+        # A title in a row of its own right above the table's header.
+        while len(group) > 1 and len(rows[group[0]]) <= 1 and len(rows[group[1]]) >= 2:
+            out.append(Paragraph([next(iter(rows[group.pop(0)].values()))]))
+            table = None
         columns = sorted({c for r in group for c in rows[r]})
         if all(len(rows[r]) <= 1 for r in group):
             out.extend(Paragraph([next(iter(rows[r].values()))]) for r in group)
@@ -2026,7 +2036,11 @@ def _sheet_blocks(rows: dict[int, dict[int, str]], dropped: int = 0) -> list[Blo
             and len(group) <= _TOTAL_ROWS
             and group[0] - table[1] <= _TOTAL_GAP + 1
             and set(columns) <= set(table[0])
-            and all(any(char.isdigit() for v in rows[r].values() for char in v) for r in group)
+            and all(
+                _TOTAL_LABEL.match(rows[r][min(rows[r])].strip())
+                and any(char.isdigit() for v in rows[r].values() for char in v)
+                for r in group
+            )
         ):
             # A totals row set off by an empty row stays under the columns
             # it totals.

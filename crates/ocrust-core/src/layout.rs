@@ -1826,6 +1826,7 @@ const STACKED_OVERLAP: f32 = 0.25;
 /// Joins boxes of one baseline group into a single line, left to right.
 fn join_group(mut group: Vec<Line>) -> Option<Line> {
     let monospaced = group.iter().all(|line| line.monospaced);
+    let bold = group.iter().all(|line| line.bold);
     match group.len() {
         0 => return None,
         1 => return group.pop(),
@@ -1886,6 +1887,7 @@ fn join_group(mut group: Vec<Line>) -> Option<Line> {
         words,
         segments,
         monospaced,
+        bold,
     })
 }
 
@@ -2022,13 +2024,22 @@ fn group(
     } else {
         text_height
     };
+    let body = Body::of(&lines, text_height);
     // From the back, so the indices the detector reported still hold.
     let mut tail = lines.len();
     for found in tables.into_iter().rev() {
         let after = lines.split_off(found.end);
         let table_lines = lines.split_off(found.start);
         if !after.is_empty() {
-            blocks.extend(paragraphs(after, scale, text_height, leading, exact, cfg));
+            blocks.extend(paragraphs(
+                after,
+                scale,
+                text_height,
+                leading,
+                exact,
+                body,
+                cfg,
+            ));
         }
         blocks.push(Block {
             kind: BlockKind::Table,
@@ -2040,7 +2051,15 @@ fn group(
     }
     debug_assert!(lines.len() == tail);
     if !lines.is_empty() {
-        blocks.extend(paragraphs(lines, scale, text_height, leading, exact, cfg));
+        blocks.extend(paragraphs(
+            lines,
+            scale,
+            text_height,
+            leading,
+            exact,
+            body,
+            cfg,
+        ));
     }
     blocks.reverse();
     blocks
@@ -2086,12 +2105,14 @@ fn usual_leading<L: std::borrow::Borrow<Line>>(lines: &[L]) -> Option<f32> {
 /// `leading` is [`usual_leading`] on a page read from its own text: there a
 /// paragraph ends where the lines open up by more than their usual spacing,
 /// or change size, whatever the gap measures in absolute terms.
+#[allow(clippy::too_many_arguments)]
 fn paragraphs(
     lines: Vec<Line>,
     scale: f32,
     text_height: f32,
     leading: Option<f32>,
     exact: bool,
+    body: Body,
     cfg: &LayoutConfig,
 ) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
@@ -2118,6 +2139,9 @@ fn paragraphs(
                     let (l0, l1) = (largest_size(prev), largest_size(&line));
                     apart(s0, s1) && apart(l0, l1)
                 };
+                // So is a change between a bold face and the body's: a heading
+                // set but a little larger than its text, or not at all.
+                let reweighted = exact && !body.bold && prev.bold != line.bold;
                 // A bullet opens an item, however close it follows: a list set
                 // right under its lead-in is still a list. A dash in running
                 // text set at a line's start opens none.
@@ -2132,6 +2156,7 @@ fn paragraphs(
                     || !shares_column
                     || set_apart
                     || resized
+                    || reweighted
                     || bullet
             }
         };
@@ -2140,13 +2165,14 @@ fn paragraphs(
                 std::mem::take(&mut current),
                 text_height,
                 exact,
+                body,
                 cfg,
             ));
         }
         current.push(line);
     }
     if !current.is_empty() {
-        blocks.push(finish_block(current, text_height, exact, cfg));
+        blocks.push(finish_block(current, text_height, exact, body, cfg));
     }
     // Emitted back to front by the caller, which reverses the whole list.
     blocks.reverse();
@@ -2215,16 +2241,28 @@ fn text_size(line: &Line) -> f32 {
     heights[heights.len() / 2]
 }
 
-fn finish_block(mut lines: Vec<Line>, text_height: f32, exact: bool, cfg: &LayoutConfig) -> Block {
+fn finish_block(
+    mut lines: Vec<Line>,
+    text_height: f32,
+    exact: bool,
+    body: Body,
+    cfg: &LayoutConfig,
+) -> Block {
     if cfg.dehyphenate {
         dehyphenate(&mut lines);
     }
-    plain_block(lines, text_height, exact, cfg)
+    plain_block(lines, text_height, exact, body, cfg)
 }
 
-fn plain_block(lines: Vec<Line>, text_height: f32, exact: bool, cfg: &LayoutConfig) -> Block {
+fn plain_block(
+    lines: Vec<Line>,
+    text_height: f32,
+    exact: bool,
+    body: Body,
+    cfg: &LayoutConfig,
+) -> Block {
     Block {
-        kind: classify_block(&lines, text_height, exact, cfg),
+        kind: classify_block(&lines, text_height, exact, body, cfg),
         bbox: bounds_of(&lines),
         lines,
         table: None,
@@ -2346,7 +2384,13 @@ const EXACT_HEADING_LINES: usize = 4;
 /// recognized box would not stand out enough to be sure.
 const EXACT_HEADING_FACTOR: f32 = 1.2;
 
-fn classify_block(lines: &[Line], text_height: f32, exact: bool, cfg: &LayoutConfig) -> BlockKind {
+fn classify_block(
+    lines: &[Line],
+    text_height: f32,
+    exact: bool,
+    body: Body,
+    cfg: &LayoutConfig,
+) -> BlockKind {
     let first = match lines.first() {
         Some(l) => l,
         None => return BlockKind::Paragraph,
@@ -2361,9 +2405,26 @@ fn classify_block(lines: &[Line], text_height: f32, exact: bool, cfg: &LayoutCon
     let tall = first.quad.edge_height() > text_height * factor;
     let most_lines = if exact { EXACT_HEADING_LINES } else { 2 };
     let chars: usize = lines.iter().map(|l| l.text.chars().count()).sum();
-    let heading =
-        tall && lines.len() <= most_lines && first.text.chars().count() <= 120 && chars <= 240;
     let trimmed = first.text.trim_start();
+    // Where sizes are exact, a short line or two ending in no stop is a
+    // section's heading set but a little larger than the text — Word's and
+    // LibreOffice's styles set it at 13 points over 11 — or as large as the
+    // text in a bold face, where the text is not bold.
+    let size = first.quad.edge_height();
+    let short = lines.len() <= SHORT_HEADING_LINES
+        && chars <= 120
+        && !lines
+            .last()
+            .is_some_and(|l| l.text.trim_end().ends_with(['.', ',', ';', ':']))
+        && !captioned(trimmed);
+    let set_off = exact
+        && short
+        && ((body.settled && size > text_height * EXACT_SIZE_CHANGE)
+            || (!body.bold
+                && lines.iter().all(|l| l.bold)
+                && size >= text_height * BOLD_HEADING_SIZE));
+    let heading = set_off
+        || (tall && lines.len() <= most_lines && first.text.chars().count() <= 120 && chars <= 240);
     // `3. Punkt` and `3) Punkt`; not `12.03.2026 fand …` or `3.5 Tonnen …`,
     // whose number runs on past the dot.
     let numbered = trimmed.split_once(['.', ')']).is_some_and(|(head, rest)| {
@@ -2384,6 +2445,67 @@ fn classify_block(lines: &[Line], text_height: f32, exact: bool, cfg: &LayoutCon
     }
     BlockKind::Paragraph
 }
+
+/// How many lines a heading set off by little more than its weight or a
+/// point of size runs to at most.
+const SHORT_HEADING_LINES: usize = 2;
+/// How large, against the text, a bold heading is set at least: as large,
+/// give or take a box's rounding.
+const BOLD_HEADING_SIZE: f32 = 0.95;
+
+/// Whether a line opens a caption: `Figure 3`, `Tabelle 2:`.
+fn captioned(text: &str) -> bool {
+    let mut words = text.split_whitespace();
+    let (Some(label), Some(number)) = (words.next(), words.next()) else {
+        return false;
+    };
+    let label = label.trim_end_matches('.').to_lowercase();
+    CAPTION_LABELS.contains(&label.as_str())
+        && number.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// The words a caption opens with (see [`captioned`]).
+const CAPTION_LABELS: &[&str] = &[
+    "figure",
+    "fig",
+    "table",
+    "abbildung",
+    "abb",
+    "tabelle",
+    "tab",
+    "chart",
+    "diagramm",
+    "listing",
+    "grafik",
+];
+
+/// What a page's body text says of the lines that stand out from it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Body {
+    /// Most of its lines are set in a bold face: a bold line then says
+    /// nothing of a heading.
+    bold: bool,
+    /// It runs to a few lines at least: a line a little larger than it
+    /// stands out from text, not from a running head or a page number.
+    settled: bool,
+}
+
+impl Body {
+    fn of(lines: &[Line], text_height: f32) -> Self {
+        let body: Vec<&Line> = lines
+            .iter()
+            .filter(|l| (l.quad.edge_height() - text_height).abs() <= 0.1 * text_height)
+            .collect();
+        Body {
+            bold: !body.is_empty() && body.iter().filter(|l| l.bold).count() * 2 > body.len(),
+            settled: body.len() >= SETTLED_BODY_LINES,
+        }
+    }
+}
+
+/// How many lines in its size the body text runs to, at least, for a line
+/// a little larger to stand out from it.
+const SETTLED_BODY_LINES: usize = 3;
 
 /// Words that follow a suspended hyphen: "Vor- und Nachname", "Ein- oder
 /// Ausgang", "pre- and post-processing". The abbreviations count with their
@@ -2434,6 +2556,22 @@ pub(crate) fn continues_a_suspended_hyphen(next: &str) -> bool {
 fn dehyphenate(lines: &mut Vec<Line>) {
     let mut i = 0;
     while i + 1 < lines.len() {
+        // A line broken at a soft hyphen: a browser draws a hyphen after it,
+        // and both go where the word goes on.
+        let trimmed = lines[i].text.trim_end();
+        let mut ends = trimmed.chars().rev();
+        let soft = match (ends.next(), ends.next()) {
+            (Some('\u{00ad}'), _) => Some(trimmed.len()),
+            (Some(hyphen @ ('-' | '\u{2010}')), Some('\u{00ad}')) => {
+                Some(trimmed.len() - hyphen.len_utf8())
+            }
+            _ => None,
+        };
+        if let Some(end) = soft.filter(|_| !lines[i + 1].text.trim().is_empty()) {
+            lines[i].text.truncate(end);
+            join_hyphenated(lines, i, false);
+            continue;
+        }
         let head = lines[i].text.trim_end();
         // Only a hyphen after a letter breaks a word. One after a digit is
         // part of what was written ("2- und 3-Zimmer", "3-" / "fach"); one
@@ -2455,7 +2593,17 @@ fn dehyphenate(lines: &mut Vec<Line>) {
             || (head.ends_with(['-', '\u{2010}'])
                 && hyphen_inside_a_token(head, next)
                 && next.chars().next().is_some_and(char::is_alphanumeric)
-                && !continues_a_suspended_hyphen(next));
+                && !continues_a_suspended_hyphen(next))
+            // A compound broken at its own hyphen next to a figure: no
+            // hyphenation breaks a word there (`COVID-19-` over `related`,
+            // `COVID-` over `19`, `3-` over `fach`).
+            || (head.ends_with(['-', '\u{2010}'])
+                && head.chars().rev().nth(1).is_some_and(|c| c.is_ascii_digit())
+                && next.chars().next().is_some_and(char::is_alphabetic)
+                && !continues_a_suspended_hyphen(next))
+            || (head.ends_with(['-', '\u{2010}'])
+                && head.chars().rev().nth(1).is_some_and(char::is_alphabetic)
+                && next.chars().next().is_some_and(|c| c.is_ascii_digit()));
         if compound {
             join_hyphenated(lines, i, true);
             continue;
@@ -2485,6 +2633,7 @@ fn join_hyphenated(lines: &mut Vec<Line>, i: usize, keep_hyphen: bool) {
     head.bbox = head.bbox.union(&tail.bbox);
     head.confidence = (head.confidence + tail.confidence) * 0.5;
     head.monospaced = head.monospaced && tail.monospaced;
+    head.bold = head.bold && tail.bold;
     head.words.extend(tail.words);
 }
 
@@ -3067,6 +3216,51 @@ mod tests {
     }
 
     #[test]
+    fn a_short_bold_line_over_text_that_is_not_is_a_heading() {
+        let cfg = LayoutConfig::default();
+        let plain = Body {
+            bold: false,
+            settled: true,
+        };
+        let bold = |text: &str| {
+            let mut line = line_at(text, 0.0, 0.0, 200.0, 12.0);
+            line.bold = true;
+            line
+        };
+        assert_eq!(
+            classify_block(&[bold("1.1 Data sources")], 12.0, true, plain, &cfg),
+            BlockKind::Heading
+        );
+        for line in [
+            bold("Note: the office is closed."),
+            bold("Figure 3 The results"),
+        ] {
+            assert_eq!(
+                classify_block(&[line], 12.0, true, plain, &cfg),
+                BlockKind::Paragraph
+            );
+        }
+        let all_bold = Body {
+            bold: true,
+            settled: true,
+        };
+        assert_eq!(
+            classify_block(&[bold("Data sources")], 12.0, true, all_bold, &cfg),
+            BlockKind::Paragraph
+        );
+        // Not bold, a little larger than settled text: Word's 13 points over 11.
+        let larger = line_at("Results of the survey", 0.0, 0.0, 200.0, 14.2);
+        assert_eq!(
+            classify_block(std::slice::from_ref(&larger), 12.0, true, plain, &cfg),
+            BlockKind::Heading
+        );
+        assert_eq!(
+            classify_block(&[larger], 12.0, true, Body::default(), &cfg),
+            BlockKind::Paragraph
+        );
+    }
+
+    #[test]
     fn a_row_with_an_empty_cell_under_tight_rows_is_a_row_of_its_own() {
         // Single spacing: each line's box reaches into the next one's.
         let rows = [
@@ -3123,13 +3317,13 @@ mod tests {
         ] {
             let line = line_at(text, 0.0, 0.0, 300.0, 12.0);
             assert_eq!(
-                classify_block(&[line], 12.0, true, &cfg),
+                classify_block(&[line], 12.0, true, Body::default(), &cfg),
                 BlockKind::Paragraph
             );
         }
         let item = line_at("3. Abnahme", 0.0, 0.0, 300.0, 12.0);
         assert_eq!(
-            classify_block(&[item], 12.0, true, &cfg),
+            classify_block(&[item], 12.0, true, Body::default(), &cfg),
             BlockKind::ListItem
         );
     }
@@ -3140,11 +3334,11 @@ mod tests {
         let heading = line_at("1. Einleitung", 0.0, 0.0, 200.0, 30.0);
         let item = line_at("1. Antrag stellen", 0.0, 0.0, 200.0, 12.0);
         assert_eq!(
-            classify_block(&[heading], 12.0, false, &cfg),
+            classify_block(&[heading], 12.0, false, Body::default(), &cfg),
             BlockKind::Heading
         );
         assert_eq!(
-            classify_block(&[item], 12.0, false, &cfg),
+            classify_block(&[item], 12.0, false, Body::default(), &cfg),
             BlockKind::ListItem
         );
         // Exact sizes allow a title wrapped over three lines in a narrow column.
@@ -3159,26 +3353,35 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(classify_block(&title, 12.0, true, &cfg), BlockKind::Heading);
         assert_eq!(
-            classify_block(&title, 12.0, false, &cfg),
+            classify_block(&title, 12.0, true, Body::default(), &cfg),
+            BlockKind::Heading
+        );
+        assert_eq!(
+            classify_block(&title, 12.0, false, Body::default(), &cfg),
             BlockKind::Paragraph
         );
         // A sixteen-point section heading over twelve-point text: a heading
         // where sizes are exact, too close to call where they are recognized.
         let section = line_at("Ergebnisse", 0.0, 0.0, 200.0, 16.0);
         assert_eq!(
-            classify_block(std::slice::from_ref(&section), 12.0, true, &cfg),
+            classify_block(
+                std::slice::from_ref(&section),
+                12.0,
+                true,
+                Body::default(),
+                &cfg
+            ),
             BlockKind::Heading
         );
         assert_eq!(
-            classify_block(&[section], 12.0, false, &cfg),
+            classify_block(&[section], 12.0, false, Body::default(), &cfg),
             BlockKind::Paragraph
         );
         // A line a point larger than the text is not.
         let larger = line_at("Ergebnisse", 0.0, 0.0, 200.0, 13.0);
         assert_eq!(
-            classify_block(&[larger], 12.0, true, &cfg),
+            classify_block(&[larger], 12.0, true, Body::default(), &cfg),
             BlockKind::Paragraph
         );
     }
@@ -3916,6 +4119,36 @@ mod tests {
         assert_eq!(blocks[0].text(), "Wir bieten IT-basierte Dienste an.");
         assert!(abbreviation_before_hyphen("GPU-") && abbreviation_before_hyphen("für PDF-"));
         assert!(!abbreviation_before_hyphen("Instandhal-") && !abbreviation_before_hyphen("A-"));
+        // Next to a figure the hyphen is the compound's own; a soft hyphen,
+        // and the hyphen a browser draws after it, break a word.
+        for (head, tail, joined) in [
+            (
+                "die COVID-19-",
+                "related changes",
+                "die COVID-19-related changes",
+            ),
+            ("die COVID-", "19 pandemic", "die COVID-19 pandemic"),
+            ("die Euro-6-", "Norm", "die Euro-6-Norm"),
+            ("eine 3-", "fache Menge", "eine 3-fache Menge"),
+            ("die 2-", "und 3-Zimmer", "die 2-\nund 3-Zimmer"),
+            (
+                "die Instand\u{00ad}\u{2010}",
+                "haltung der",
+                "die Instandhaltung der",
+            ),
+            (
+                "die Straßen\u{00ad}",
+                "Beleuchtung",
+                "die StraßenBeleuchtung",
+            ),
+        ] {
+            let lines = vec![
+                line_at(head, 0.0, 0.0, 100.0, 10.0),
+                line_at(tail, 0.0, 12.0, 100.0, 22.0),
+            ];
+            let blocks = group_blocks(lines, &LayoutConfig::default());
+            assert_eq!(blocks[0].text(), joined);
+        }
     }
 
     #[test]
