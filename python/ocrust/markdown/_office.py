@@ -2042,10 +2042,19 @@ def _shaped_like(row: dict[int, str], model: dict[int, str]) -> bool:
 
 def _goes_on(group: list[int], rows: dict[int, dict[int, str]], columns: list[int]) -> bool:
     """Whether rows set off from a table go on with its rows rather than
-    open a table of their own: each fills every column the table has, and
-    the first is no header — not a row of years, dates or numbers counting
-    up (`1 2 3`, a roster's days)."""
-    if not all(set(rows[r]) == set(columns) for r in group):
+    open a table of their own: half of them at least fill every column the
+    table has, or sum under its last or under two of its columns —
+    `Subtotal`, `VAT`, `Total` — and the first is no
+    header: not a row of years, dates or numbers counting up (`1 2 3`, a
+    roster's days)."""
+    last = max(columns)
+
+    def summing(row: dict[int, str]) -> bool:
+        # A key and its value, `Invoice no. | 2026114`, sums nothing.
+        figures = sum(bool(_FIGURE.fullmatch(v.strip())) for c, v in row.items() if c != min(row))
+        return set(row) == set(columns) or last in row or figures >= 2
+
+    if sum(summing(rows[r]) for r in group) * 2 < len(group):
         return False
     first = rows[group[0]]
     values = [first[c].strip() for c in sorted(first) if c != min(first)]

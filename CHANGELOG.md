@@ -263,6 +263,16 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   OpenDocument's nested list numbers or bullets each level as its style
   says; and lines of plain text set in columns — a program's options,
   names and roles, amounts — keep their lines.
+- **Lists counted in letters and numbers, read with care**: an item opens
+  where its count goes on (`2.` after `1.`, `b)` after `a)`), after a
+  colon, a short line or an item's end (`; and`), or set in under a
+  bullet — not at `z. B.`, `d. h.`, `i. A.` or `z. Hd.`, nor at an inline
+  `(b)` or a date wrapped onto a new line (`15. Mai`, `22. Bundesliga`).
+  A paragraph opening on a bold sentence stays whole, a numbered heading
+  beside a numbered list stays a heading, and a sheet's block of totals
+  with empty cells stays under its table. In plain text, lists lettered
+  `a)` or bulleted with Outlook's `o` are lists, and mail header lines and
+  a table of contents with leader dots keep a line each.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and

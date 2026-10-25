@@ -103,6 +103,13 @@ CODE_LANGUAGES = {
 
 _BULLET = re.compile(r"^\s{0,3}([-*+•–·])\s+(.*)$")
 _ENUMERATOR = re.compile(r"^\s{0,3}(\d{1,3})[.)]\s+(.*)$")
+#: A list item's letter or roman figure, `a)`, `(b)`, `A)`, `(iv)`, `ii.` —
+#: kept in the item, Markdown having no such lists — not an abbreviation's
+#: (`z. B.`); and Outlook's `o` for a second level, set off by spaces.
+_LETTER = re.compile(
+    r"^\s{0,3}(\(?[a-zA-Z]\)|\([ivx]{1,4}\)|[ivx]{1,4}[.)]|[a-z]\.)\s+(?!\S{1,3}\.(?:\s|$))(.*)$"
+)
+_O_BULLET = re.compile(r"^\s{0,3}(o)(?:\s{2,}|\t)(.*)$")
 _FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n(.*?\r?\n)?---[ \t]*(\r?\n|\Z)", re.S)
 
 
@@ -226,12 +233,12 @@ def _chunk(lines: list[str], width: int) -> list[Block]:
     # Lines set in columns — an option list, names and roles, amounts under
     # their labels — kept as they stand, after a line leading into them.
     lead = 1 if len(lines) > 2 and lines[0].rstrip().endswith(":") else 0
-    if len(lines) - lead >= 2 and all(_COLUMN_GAP.search(line) for line in lines[lead:]):
+    if len(lines) - lead >= 2 and all(_columned(line) for line in lines[lead:]):
         listing = textwrap.dedent("\n".join(lines[lead:]))
         return [*(Paragraph([lines[0].strip()]) for _ in range(lead)), Code(listing)]
     # A line that leads into a list — `Offene Punkte:` — then the list.
     for index in range(1, len(lines)):
-        if _BULLET.match(lines[index]) or _ENUMERATOR.match(lines[index]):
+        if any(p.match(lines[index]) for p in (_BULLET, _ENUMERATOR, _LETTER, _O_BULLET)):
             rest = _list_items(lines[index:])
             lead_in = lines[index - 1].rstrip().endswith(":")
             if rest is not None and (len(lines) - index >= 2 or lead_in):
@@ -248,10 +255,32 @@ _LEAD = re.compile(r"\S+")
 _COLUMN_GAP = re.compile(r"\S(?<![.!?:])  +\S")
 
 
+def _columned(line: str) -> bool:
+    """Whether a line is set in columns: a gap of two spaces inside it, not
+    the one after a list item's marker."""
+    for marker in (_BULLET, _ENUMERATOR, _LETTER, _O_BULLET):
+        found = marker.match(line)
+        if found:
+            line = found.group(2)
+            break
+    return bool(_COLUMN_GAP.search(line))
+
+
+#: A line opening on a label and a colon: `To:`, `Date:`, `Attendees:`.
+_KEY_VALUE = re.compile(r"^\s*[^\W\d][\w .\-/()]{0,30}:(?:\s+\S|\s*$)")
+#: A line running on leader dots or rules to a page number: a contents line.
+_LEADERS = re.compile(r"(?:\.\s?){3,}\s*\d+\s*$|_{3,}\s*\d+\s*$|…\s*\d+\s*$")
+
+
 def _records(lines: list[str]) -> bool:
-    """Whether lines are records — a log, a list of names — rather than a
-    paragraph wrapped at a width: most of them begin with the same word, or
-    with a number of the same shape (a date, a time)."""
+    """Whether lines are records — a log, a list of names, a mail's header
+    lines, a table of contents — rather than a paragraph wrapped at a width:
+    most of them begin with the same word, or with a number of the same
+    shape (a date, a time), or open on a label and a colon, or run on leader
+    dots to a page number."""
+    for shape in (_KEY_VALUE, _LEADERS):
+        if len(lines) >= 2 and sum(bool(shape.search(line)) for line in lines) >= 0.8 * len(lines):
+            return True
     if len(lines) < 4:
         return False
     leads: dict[str, int] = {}
@@ -268,22 +297,26 @@ def _records(lines: list[str]) -> bool:
 
 def _list_items(lines: list[str]) -> list[Block] | None:
     first = lines[0]
-    bullet, number = _BULLET.match(first), _ENUMERATOR.match(first)
-    if not bullet and not number:
+    bullet = _BULLET.match(first) or _O_BULLET.match(first)
+    number = None if bullet else _ENUMERATOR.match(first)
+    letter = None if bullet or number else _LETTER.match(first)
+    if not bullet and not number and not letter:
         return None
-    pattern = _BULLET if bullet else _ENUMERATOR
+    # Outlook sets a second level's items with `o` under its `·` ones.
+    patterns = (_BULLET, _O_BULLET) if bullet else (_ENUMERATOR,) if number else (_LETTER,)
     groups: list[list[str]] = []
     for line in lines:
-        match = pattern.match(line)
+        match = next((found for p in patterns if (found := p.match(line))), None)
         if match:
-            groups.append([match.group(2)])
+            # A letter stays with its item: Markdown counts in figures only.
+            groups.append([f"{match.group(1)} {match.group(2)}" if letter else match.group(2)])
         elif line.startswith((" ", "\t")) and groups:
             groups[-1].append(line.strip())
         else:
             return None
-    if len(groups) < 1 or (len(groups) == 1 and len(lines) == 1 and number):
+    if len(groups) < 1 or (len(groups) == 1 and len(lines) == 1 and (number or letter)):
         # "1. Mai ist Feiertag" alone on a line is a sentence, not a list.
-        return None if number else [ListBlock(False, [[Paragraph([groups[0][0]])]])]
+        return None if number or letter else [ListBlock(False, [[Paragraph([groups[0][0]])]])]
     start = int(number.group(1)) if number else 1
     return [
         ListBlock(

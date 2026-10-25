@@ -2200,7 +2200,10 @@ fn paragraphs(
                     // A bold run that is the block so far over a line that
                     // opens a sentence is no phrase going on: a question
                     // over its answer, a CV's title over its description.
-                    let opens = line.text.trim_start().starts_with(char::is_uppercase);
+                    // A bold sentence opening a paragraph ends in its stop
+                    // and the paragraph goes on.
+                    let opens = line.text.trim_start().starts_with(char::is_uppercase)
+                        && !prev.text.trim_end().ends_with(['.', '!', ':', ';', ',']);
                     if prev.bold {
                         (short || opens) && current.iter().all(|l| l.bold) && !item
                     } else {
@@ -2221,18 +2224,43 @@ fn paragraphs(
                 // ending in a colon, a line ending short, or another item:
                 // after a full line it goes on a sentence, `am` / `2. Juni`.
                 let counted = (numbered(&line.text) || lettered(&line.text)) && {
+                    // Counted as the item the block opens with — a letter
+                    // after a letter, a number after a number.
                     let opening = &current[0].text;
-                    let listed = strip_bullet(opening).len() < opening.trim_start().len()
-                        || numbered(opening)
-                        || lettered(opening);
+                    let kin = (numbered(opening) && numbered(&line.text))
+                        || (lettered(opening) && lettered(&line.text));
                     let edge = current
                         .iter()
                         .chain([&line])
                         .map(|l| l.bbox.x1)
                         .fold(f32::MIN, f32::max);
-                    listed
-                        || prev.text.trim_end().ends_with(':')
-                        || prev.bbox.x1 + first_word_width(&line) + scale * WRAP_SPACE < edge
+                    // The item before ends where its line does: in a stop or
+                    // `; and`, or short of the column — a number bound to its
+                    // word by a no-break space, `22. Bundesliga`, goes with it.
+                    let before = prev.text.trim_end();
+                    let short = prev.bbox.x1 + first_unit_width(&line) + scale * WRAP_SPACE < edge;
+                    // The next count opens the next item, however its lines
+                    // end: `2.` after `1.`, `b)` after `a)`; `15. Mai` in
+                    // item 2 is a date.
+                    let roman_one = opening
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|m| m.trim_matches(['(', ')', '.']) == "i");
+                    let next = count_of(opening)
+                        .is_some_and(|n| count_of(&line.text) == Some(n + 1))
+                        || (roman_one && count_of(&line.text) == Some(2));
+                    // A count set in past the line before and the item's
+                    // own text is a nested item's: `1.` under a bullet.
+                    let nested = line.bbox.x0 > prev.bbox.x0 + scale * 0.5
+                        && line.bbox.x0 > current[0].bbox.x0 + scale * NESTED_INDENT;
+                    before.ends_with(':')
+                        || nested
+                        || (kin && (next || short || ends_an_item(before)))
+                        // Elsewhere — running text, an item counted `(a)`,
+                        // `(b)` inline — after a short line ending its
+                        // sentence: `am` over `22. Bundesliga`, `guests, and`
+                        // over `(c) not keep …` go on.
+                        || (short && before.ends_with(['.', ';', '!', '?']))
                 };
                 gap > scale * cfg.line_gap_factor
                     || !shares_column
@@ -2267,10 +2295,11 @@ fn paragraphs(
 /// item where a numbered block stands right before or after it: a list of
 /// bold items, `1. Plan`, `2. Build`. A section's heading heads its text.
 fn numbered_runs(blocks: &mut [Block], text_height: f32) {
+    // Another heading so numbered: a list's own items in the text's weight
+    // stand under or over a section's numbered heading.
     let numbered_at = |blocks: &[Block], i: usize| {
         blocks.get(i).is_some_and(|b| {
-            matches!(b.kind, BlockKind::ListItem | BlockKind::Heading)
-                && b.lines.first().is_some_and(|l| numbered(&l.text))
+            b.kind == BlockKind::Heading && b.lines.first().is_some_and(|l| numbered(&l.text))
         })
     };
     let items: Vec<usize> = (0..blocks.len())
@@ -2627,12 +2656,88 @@ fn lettered(text: &str) -> bool {
     let Some(inner) = inner else {
         return false;
     };
+    // `z. B.`, `d. h.`, `i. A.`, `z. Hd.`: a letter's stop over the next
+    // short word's is an abbreviation's.
+    let next = rest.split_whitespace().next().unwrap_or("");
+    if mark.ends_with('.') && next.ends_with('.') && next.chars().count() <= 4 {
+        return false;
+    }
     let roman = !inner.is_empty() && inner.len() <= 4 && inner.chars().all(|c| "ivx".contains(c));
     let letter = inner.chars().count() == 1 && inner.chars().all(|c| c.is_ascii_lowercase())
         || (inner.chars().count() == 1
             && inner.chars().all(|c| c.is_ascii_uppercase())
             && !mark.ends_with('.'));
     roman || letter
+}
+
+/// How far past an item's first line, in line heights, a nested item is
+/// set at least: further than the item's own lines go on, a marker's width.
+const NESTED_INDENT: f32 = 1.5;
+
+/// The count a line's list marker stands for: `3.` 3, `c)` 3, `(iv)` 4.
+fn count_of(text: &str) -> Option<u32> {
+    let mark = text.split_whitespace().next()?;
+    let inner = mark.trim_start_matches('(').trim_end_matches(['.', ')']);
+    if let Ok(n) = inner.parse::<u32>() {
+        return numbered(text).then_some(n);
+    }
+    if !lettered(text) {
+        return None;
+    }
+    // A run of `i`, `v` and `x` is a roman figure; one alone, a letter as
+    // often — `i` is ninth in `a` to `i`, and first among `i`, `ii`.
+    if inner.chars().count() > 1 {
+        let values: Vec<u32> = inner
+            .chars()
+            .map(|c| match c {
+                'i' => Some(1),
+                'v' => Some(5),
+                'x' => Some(10),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        let total = values.iter().enumerate().fold(0i64, |sum, (k, &v)| {
+            if values.get(k + 1).is_some_and(|&w| w > v) {
+                sum - i64::from(v)
+            } else {
+                sum + i64::from(v)
+            }
+        });
+        return u32::try_from(total).ok();
+    }
+    let letter = inner.chars().next()?.to_ascii_lowercase();
+    Some(u32::from(letter) - u32::from('a') + 1)
+}
+
+/// Whether a line ends an item of a list: in a stop, a colon or a
+/// semicolon, or in `; and` / `, oder` before the next item.
+fn ends_an_item(text: &str) -> bool {
+    let mut words = text.rsplit(char::is_whitespace);
+    let (last, before) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+    // `s.` over `o. unter …`: an abbreviation's first letter, broken.
+    let mut chars = last.chars();
+    if let (Some(letter), Some('.'), None) = (chars.next(), chars.next(), chars.next()) {
+        if letter.is_alphabetic() {
+            return false;
+        }
+    }
+    if text.ends_with(['.', ';', ':', '!', '?', ')']) {
+        return true;
+    }
+    before.ends_with([';', ','])
+        && ["and", "or", "und", "oder", "sowie", "bzw."].contains(&last.to_lowercase().as_str())
+}
+
+/// How wide the first unit of a line is that the line before could have
+/// taken: its first word, and the words a no-break space binds to it
+/// (`22.` and `Bundesliga`).
+fn first_unit_width(line: &Line) -> f32 {
+    let unit = line.text.trim_start().split(' ').next().unwrap_or("");
+    let count = unit.split_whitespace().count();
+    match (line.words.first(), line.words.get(count.max(1) - 1)) {
+        (Some(first), Some(last)) if count > 1 => last.bbox.x1 - first.bbox.x0,
+        _ => first_word_width(line),
+    }
 }
 
 /// Whether a line names an amount after its first word, `Total 1,234.50
@@ -4744,7 +4849,19 @@ mod tests {
         ] {
             assert!(lettered(item), "{item}");
         }
-        for text in ["A. Smith wrote", "i.e. the rooms", "Ab) no", "a)"] {
+        assert_eq!(count_of("3. Schritt"), Some(3));
+        assert_eq!(count_of("(c) the rooms"), Some(3));
+        assert_eq!(count_of("(iv) the keys"), Some(4));
+        assert_eq!(count_of("b) the landlord"), Some(2));
+        assert_eq!(count_of("Die Kasse"), None);
+        for text in [
+            "A. Smith wrote",
+            "i.e. the rooms",
+            "Ab) no",
+            "a)",
+            "z. B. die",
+            "i. A. Tom",
+        ] {
             assert!(!lettered(text), "{text}");
         }
         for item in ["• erste Position", "- erste Position", "a) erste Position"] {

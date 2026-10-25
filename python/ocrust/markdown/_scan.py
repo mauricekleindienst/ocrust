@@ -54,7 +54,14 @@ _ENUMERATOR = re.compile(r"^\s*(\d{1,3})([.)])\s+")
 #: A list item's letter or roman figure, as contracts count: `a)`, `(b)`,
 #: `c.`, `(iv)`, `ii.`, `A)` — kept in the item's text, Markdown having no
 #: such lists.
-_LETTERED = re.compile(r"^\s*(?:\(?[a-z]\)|\([ivx]{1,4}\)|[ivx]{1,4}[.)]|[a-z]\.|\(?[A-Z]\))\s+\S")
+_LETTERED = re.compile(
+    r"^\s*(?:\(?[a-z]\)|\([ivx]{1,4}\)|[ivx]{1,4}[.)]|[a-z]\.|\(?[A-Z]\))\s+"
+    # Not an abbreviation: `z. B.`, `d. h.`, `i. A.`, `z. Hd.`.
+    r"(?!\S{1,3}\.(?:\s|$))\S"
+)
+#: How an item of a list ends before the next: a stop, a colon, a
+#: semicolon, or `; and` / `, oder`.
+_ITEM_END = re.compile(r"(?:[.;:!?)]|[;,]\s*(?:and|or|und|oder|sowie|bzw\.))\s*$", re.IGNORECASE)
 _ENDS_SENTENCE = re.compile(r"[.!?:;…\"”»“)\]]\s*$")
 
 
@@ -1814,11 +1821,19 @@ def _left_edge(lines: list[Line], columns: _Columns) -> float:
 
 
 def _first_word_width(line: Line) -> float:
-    if line.words:
-        return line.words[0].box.width
+    """How wide a line's first word is — with the word after it where a day
+    opens the line, `22. Bundesliga`, `15. Mai`: typesetting binds the two
+    with a no-break space, and the line before could take neither."""
     text = line.text.strip()
-    word = text.split(" ", 1)[0] if text else ""
+    bound = 2 if _BOUND_DAY.match(text) else 1
+    if len(line.words) >= bound:
+        return line.words[bound - 1].box.x1 - line.words[0].box.x0
+    word = " ".join(text.split(" ")[:bound]) if text else ""
     return line.box.width * len(word) / max(len(text), 1)
+
+
+#: A day's number and the word it is bound to: `15. Mai`, `2. Bundesliga`.
+_BOUND_DAY = re.compile(r"\d{1,2}\.\s+[^\W\d_]")
 
 
 def _first_break_width(line: Line) -> float:
@@ -1910,18 +1925,18 @@ def _items(lines: list[Line], columns: _Columns) -> list[_Item]:
     any other line carries on the one before."""
     items: list[_Item] = []
     groups: list[list[Line]] = []
+    rtl = _right_to_left(lines)
+    edge = _left_edge(lines, columns) if rtl else _right_edge(lines, columns)
     for line in lines:
+        counted = _ENUMERATOR.match(line.text) or _LETTERED.match(line.text)
         if (
             not groups
             or _BULLET.match(line.text)
-            or _ENUMERATOR.match(line.text)
-            or _LETTERED.match(line.text)
+            or (counted and _item_ends(groups[-1], line, edge, rtl))
         ):
             groups.append([line])
         else:
             groups[-1].append(line)
-    rtl = _right_to_left(lines)
-    edge = _left_edge(lines, columns) if rtl else _right_edge(lines, columns)
     for group in groups:
         first = group[0].text
         numbered = _ENUMERATOR.match(first)
@@ -1940,6 +1955,68 @@ def _items(lines: list[Line], columns: _Columns) -> list[_Item]:
             )
         )
     return items
+
+
+def _item_ends(group: list[Line], line: Line, edge: float, rtl: bool) -> bool:
+    """Whether the item `group` holds ends at its last line, so that `line`,
+    opening on a number or a letter, opens the next: one counted as the
+    item is — a letter after a letter — after a stop, `; and` or a short
+    line; any other after a short line ending its sentence. A line wrapped
+    before `15. Mai` or an inline `(b)` goes on its item."""
+    before = group[-1]
+    text = before.text.strip()
+    if re.search(r"(?:^|\s)[^\W\d_]\.$", text):
+        # `s.` over `o. unter …`: an abbreviation's first letter, broken.
+        return False
+    height = before.box.height
+    if rtl:
+        nested = line.box.x1 < before.box.x1 - 0.5 * height and (
+            line.box.x1 < group[0].box.x1 - 1.5 * height
+        )
+    else:
+        nested = line.box.x0 > before.box.x0 + 0.5 * height and (
+            line.box.x0 > group[0].box.x0 + 1.5 * height
+        )
+    if nested:
+        # A count set in past the line before and the item's own text is a
+        # nested item's: `1.` under a bullet.
+        return True
+    opening = group[0].text
+    kin = bool(
+        (_ENUMERATOR.match(opening) and _ENUMERATOR.match(line.text))
+        or (_LETTERED.match(opening) and _LETTERED.match(line.text))
+    )
+    room = before.box.x0 - edge if rtl else edge - before.box.x1
+    short = room > _first_word_width(line) + 0.35 * before.box.height
+    if kin:
+        # The next count opens the next item, however its lines end: `2.`
+        # after `1.`, `b)` after `a)`; `15. Mai` in item 2 is a date.
+        first, then = _count_of(opening), _count_of(line.text)
+        following = then is not None and (
+            (first is not None and then == first + 1) or (_ROMAN_ONE.match(opening) and then == 2)
+        )
+        return following or short or bool(_ITEM_END.search(text))
+    return text.endswith(":") or (short and text.endswith((".", ";", "!", "?")))
+
+
+_MARK = re.compile(r"^\s*\(?([0-9]{1,3}|[A-Za-z]|[ivx]{2,4})[.)]")
+_ROMAN_ONE = re.compile(r"^\s*\(?i[.)]")
+
+
+def _count_of(text: str) -> int | None:
+    """The count a list marker stands for: `3.` 3, `c)` 3, `(iv)` 4."""
+    found = _MARK.match(text)
+    if not found:
+        return None
+    mark = found.group(1)
+    if mark.isdigit():
+        return int(mark)
+    if len(mark) > 1:
+        values = [{"i": 1, "v": 5, "x": 10}[c] for c in mark]
+        return sum(
+            -v if k + 1 < len(values) and values[k + 1] > v else v for k, v in enumerate(values)
+        )
+    return ord(mark.lower()) - ord("a") + 1
 
 
 def _with_text(line: Line, text: str) -> Line:
