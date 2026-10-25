@@ -26,14 +26,17 @@ from ._ir import (
     Run,
     Span,
     Table,
+    all_code,
     assemble,
     flatten,
     inline_of,
     is_empty,
+    monospaced_font,
     plain,
+    uncoded,
     verbatim,
 )
-from ._office import _set_apart, _sheet_blocks
+from ._office import _TYPED_PARAGRAPHS, _TYPED_SHARE, _set_apart, _sheet_blocks
 from ._package import (
     XML_LIMIT,
     ConversionError,
@@ -72,6 +75,25 @@ _DRAWN_SHAPES = {
 }
 
 
+def _untyped(blocks: list[Block], typed: dict[int, list[list[Inline]] | None]) -> list[Block]:
+    """`blocks` with the paragraphs typed in a monospaced font as text again
+    where nearly all of them were: a letter typed in Courier is no listing
+    (see `_office._TYPED_SHARE`)."""
+    font_paragraphs = sum(len(contents or ()) for contents in typed.values())
+    written = sum(isinstance(block, Paragraph) for block in blocks)
+    every = font_paragraphs + written
+    if every < _TYPED_PARAGRAPHS or font_paragraphs < _TYPED_SHARE * every:
+        return blocks
+    out: list[Block] = []
+    for block in blocks:
+        contents = typed.get(id(block))
+        if contents is None:
+            out.append(block)
+        else:
+            out.extend(Paragraph(uncoded(content)) for content in contents)
+    return out
+
+
 class _Styles:
     """Which automatic and named styles are bold, italic, struck, or lists."""
 
@@ -98,6 +120,11 @@ class _Styles:
                         fmt.add("emph")
                     if (attr(props, "text-line-through-style") or "none") != "none":
                         fmt.add("strike")
+                    # A span set in a monospaced font is code: how a word of
+                    # it is written where no style is called for code.
+                    font = attr(props, "font-name") or attr(props, "font-family")
+                    if attr(style, "family") == "text" and monospaced_font(font):
+                        fmt.add("code")
                 self.text[name] = frozenset(fmt)
             for list_style in descendants(root, "list-style"):
                 first = next(iter(list_style), None)
@@ -144,6 +171,9 @@ class _Reader:
     ) -> list[Block]:
         out: list[Block] = []
         code_run: Code | None = None
+        #: The paragraphs typed wholly in a monospaced font, by the code
+        #: block they went into.
+        typed: dict[int, list[list[Inline]] | None] = {}
         for node in container:
             name = local(node.tag)
             if name in ("h", "p") and _hidden_paragraph(node):
@@ -162,14 +192,23 @@ class _Reader:
                 extras: list[Block] = []
                 content = self.inlines(node, extras)
                 style = self.styles.name(attr(node, "style-name"))
-                if style in ("preformatted text", "source text"):
+                in_font = all_code(content)
+                if style in ("preformatted text", "source text") or in_font:
                     # A line of code each: one block for the lines in a row,
                     # blank ones and indentation kept.
                     text = verbatim(content)
-                    if out and out[-1] is code_run:
+                    going_on = bool(out) and out[-1] is code_run
+                    lines = typed.pop(id(code_run), None) if going_on else []
+                    started = going_on or bool(text.strip())
+                    if going_on and code_run is not None:
                         out[-1] = code_run = Code(code_run.text + "\n" + text)
-                    elif text.strip():
+                    elif started:
                         out.append(code_run := Code(text))
+                    if started and code_run is not None:
+                        # A block with a line of a code style in it stays code.
+                        typed[id(code_run)] = (
+                            [*lines, content] if in_font and lines is not None else None
+                        )
                 elif not is_empty(content):
                     if style in ("title",):
                         out.append(Heading(1, content))
@@ -213,7 +252,7 @@ class _Reader:
                 out.extend(self.blocks(node, list_style, depth))
             elif name == "frame":
                 out.extend(self.frame(node))
-        return out
+        return _untyped(out, typed)
 
     def inlines(self, element: Element, extras: list[Block]) -> list[Inline]:
         runs: list[Run] = []

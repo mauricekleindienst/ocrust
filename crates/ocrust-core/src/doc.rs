@@ -94,6 +94,11 @@ pub struct Line {
     /// for running text.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<Segment>,
+    /// Whether the page's text layer sets the whole line in a monospaced
+    /// font — code, a program's output, a letter typed on a typewriter.
+    /// Never set for text read from an image.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub monospaced: bool,
 }
 
 impl Line {
@@ -338,6 +343,7 @@ mod tests {
             margin: 0.0,
             words: Vec::new(),
             segments: Vec::new(),
+            monospaced: false,
         }
     }
 

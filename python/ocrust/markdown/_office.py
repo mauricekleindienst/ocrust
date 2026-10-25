@@ -46,16 +46,19 @@ from ._ir import (
     Run,
     Span,
     Table,
+    all_code,
     assemble,
     body_of,
     flatten,
     inline_of,
     is_empty,
+    monospaced_font,
     nest,
     relabel,
     strip,
     subscript,
     superscript,
+    uncoded,
     verbatim,
 )
 from ._package import (
@@ -437,6 +440,14 @@ class _Word:
         out: list[Block] = []
         items: list[_Para] = []
         code: list[str] = []
+        # A letter typed in Courier throughout is no listing: where nearly
+        # all the paragraphs are set wholly in a monospaced font, its words
+        # are text like any other. A how-to's prose is in a text font.
+        paras = [e for e in entries if isinstance(e, _Para) and not is_empty(e.content)]
+        typed = sum(all_code(e.content) for e in paras)
+        if len(paras) >= _TYPED_PARAGRAPHS and typed >= _TYPED_SHARE * len(paras):
+            for entry in paras:
+                entry.content = uncoded(entry.content)
 
         def flush() -> None:
             if items:
@@ -456,7 +467,9 @@ class _Word:
                     flush()
                 items.append(entry)
                 continue
-            if entry.style in _CODE_STYLES:
+            # Word has no code style in most documents: a paragraph typed
+            # wholly in a monospaced font is one line of a listing.
+            if entry.style in _CODE_STYLES or (not entry.heading and all_code(entry.content)):
                 if items:
                     out.extend(_nest_items(items))
                     items.clear()
@@ -603,6 +616,8 @@ class _Word:
             fmt.add("emph")
         if _on(child(rpr, "strike")) or _on(child(rpr, "dstrike")):
             fmt.add("strike")
+        if monospaced_font(self._font(rpr)):
+            fmt.add("code")
         vert = attr(child(rpr, "vertAlign"), "val") if child(rpr, "vertAlign") is not None else None
         frozen = frozenset(fmt)
 
@@ -686,6 +701,21 @@ class _Word:
             runs.append(("(", fmt, state.link or link))
             runs.extend(reading)
             runs.append((")", fmt, state.link or link))
+
+    def _font(self, rpr: Element | None) -> str | None:
+        """The font a run is set in: its own, else its character style's,
+        else its paragraph style's."""
+        own = _fonts_of(rpr)
+        if own:
+            return own
+        style = child(rpr, "rStyle")
+        sids = [attr(style, "val") or ""] if style is not None else []
+        for sid in [*sids, self.paragraph_style]:
+            for each in self.styles.chain(sid):
+                font = _fonts_of(child(each, "rPr"))
+                if font:
+                    return font
+        return None
 
     def _hidden(self, rpr: Element | None) -> bool:
         """Whether a run is hidden text: by its own formatting, else by its
@@ -1160,6 +1190,22 @@ def _formula(runs: list[Run], node: Element, link: str) -> None:
         # Two formulas that touch would be joined into one.
         runs.append((" ", frozenset(), link))
     runs.append((Span(kind, [tex]), frozenset(), link))
+
+
+#: How many paragraphs with text a document has at least for its font to
+#: say it was typed rather than written with listings in it.
+_TYPED_PARAGRAPHS = 3
+#: How many of them, at least, are set wholly in a monospaced font then.
+_TYPED_SHARE = 0.9
+
+
+def _fonts_of(rpr: Element | None) -> str | None:
+    """The Latin font a run's properties name: `w:rFonts`, as Word writes it
+    for text in a Latin script."""
+    fonts = child(rpr, "rFonts")
+    if fonts is None:
+        return None
+    return attr(fonts, "ascii") or attr(fonts, "hAnsi")
 
 
 def _set_apart(content: list[Inline]) -> list[Inline]:

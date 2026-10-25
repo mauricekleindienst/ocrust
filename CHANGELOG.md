@@ -181,6 +181,19 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   heading. A paragraph goes on in the next column into its key figures, a
   Japanese one over the column break whatever script it starts in, and text
   beside a picture runs on under it without hard breaks.
+- **Code told by its font**: a PDF's text layer now says which lines are set
+  in a monospaced font (`Line.monospaced`), so a one-line command, a short
+  function, SQL with a clause a line and a shell session are code blocks,
+  while typed letters and mails naming links stay text; commands of any tool
+  are code. In Word and LibreOffice documents, paragraphs and words set in
+  Consolas, Courier and the like are code blocks and inline code, unless the
+  whole document is typed in such a font.
+- **Paragraphs, verse and references**: short paragraphs indented the
+  book's way are never torn; a poem's lines keep a line each wherever it
+  stands; reference lists keep their entries apart with or without space
+  between them and over a column break, and a page range broken at its dash
+  stays whole. A dash at a line's start or end stays a dash in its sentence,
+  and a sentence set larger than a page of notes is no heading.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and

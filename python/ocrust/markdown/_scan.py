@@ -10,6 +10,7 @@ and where a paragraph carried on over a page break.
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
 import statistics
 import unicodedata
@@ -76,8 +77,11 @@ _UNSPACED = re.compile(
 
 def _glue(before: str, after: str) -> str:
     """What joins two lines of one paragraph: a space, or nothing between
-    two characters of Chinese or Japanese, which set no spaces between words."""
+    two characters of Chinese or Japanese, which set no spaces between
+    words, or within a range of figures broken at its dash: `1–` over `35`."""
     if before and after and _UNSPACED.match(before[-1]) and _UNSPACED.match(after[0]):
+        return ""
+    if re.search(r"\d[–-]$", before) and after[:1].isdigit():
         return ""
     return " "
 
@@ -112,6 +116,25 @@ def _heading_key(text: str) -> str:
     """A heading's identity: its words as they are, numbers included — the
     chapters "Kapitel 1" and "Kapitel 2" are two headings."""
     return " ".join(text.lower().split())
+
+
+def _sentence(lines: Sequence[Line]) -> bool:
+    """Whether a block set larger than the page's commonest size reads as a
+    sentence of running text, no heading: eight words and more ending in a
+    full stop, and no section's number before them. A page with more lines
+    in a smaller size — notes, a listing — makes its running text the
+    larger."""
+    text = " ".join(line.text.strip() for line in lines)
+    words = re.findall(r"[^\W\d_]+", text)
+    return (
+        len(words) >= _SENTENCE_WORDS
+        and bool(re.search(r"[^.]\.[\"'”’)]*$", text))
+        and not re.match(r"^(?:§\s*)?\d+(?:\.\d+)*\.?\s", text)
+    )
+
+
+#: How many words a sentence set large has at least to be running text.
+_SENTENCE_WORDS = 8
 
 
 def _repeated_headings(pages: Sequence[Page]) -> set[str]:
@@ -209,7 +232,7 @@ def _heading_levels(pages: Sequence[Page]) -> dict[float, int]:
             round(block.lines[0].box.height, 1)
             for page in pages
             for block in page.blocks
-            if block.kind == "heading" and block.lines
+            if block.kind == "heading" and block.lines and not _sentence(block.lines)
         },
         reverse=True,
     )
@@ -250,7 +273,10 @@ def _page(
         else:
             lines = [ln for ln in block.lines if kept(ln)]
         if lines and any(line.text.strip() for line in lines):
-            blocks.append((block, lines))
+            if block.kind == "paragraph":
+                blocks.extend((block, run) for run in _by_font(lines))
+            else:
+                blocks.append((block, lines))
 
     columns = _Columns(
         _column_edges([(b, ls) for b, ls in blocks if b.kind == "paragraph"]),
@@ -278,7 +304,7 @@ def _page(
                 out.append(Table([[[cell] for cell in row] for row in rows]))
                 spots.append(_Spot(_extent(lines)))
                 continue
-        if block.kind == "heading":
+        if block.kind == "heading" and not _sentence(lines):
             text = " ".join(line.text.strip() for line in lines)
             level = levels.get(round(lines[0].box.height, 1), 2)
             out.append(Heading(level, [text]))
@@ -296,12 +322,29 @@ def _page(
         else:
             right = _right_edge(lines, columns)
             for part in _indented_paragraphs(lines, right):
-                out.append(Paragraph(_joined(part, right)))
+                # A verse's line breaks are kept wherever its column ends.
+                edge = math.inf if _set_as_verse(part) else right
+                out.append(Paragraph(_joined(part, edge)))
                 spots.append(
                     _Spot(_extent(part), part[0], part[-1], right, _leading(part), len(part))
                 )
     flush_list()
     return _join_across_columns(out, spots)
+
+
+def _by_font(lines: list[Line]) -> list[list[Line]]:
+    """A paragraph block's lines cut where whole lines change between a
+    monospaced font and a text font: a command set between two sentences
+    with no more space around it than they keep. A typed page is set in
+    one font throughout; a word of code in a sentence leaves the line in
+    the text font."""
+    runs: list[list[Line]] = []
+    for line in lines:
+        if runs and runs[-1][-1].monospaced == line.monospaced:
+            runs[-1].append(line)
+        else:
+            runs.append([line])
+    return runs
 
 
 def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
@@ -312,10 +355,10 @@ def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
     height = statistics.median(line.box.height for line in lines)
     left = min(line.box.x0 for line in lines)
     flush = [abs(line.box.x0 - left) <= _FLUSH * height for line in lines]
-    hanging = _hanging_entries(lines, flush, left, height)
+    hanging = _hanging_entries(lines, flush, left, right, height)
     if hanging is not None:
         return hanging
-    if len(lines) < 3 or sum(flush) * 5 < len(lines) * 3:
+    if len(lines) < 3 or sum(flush) * 2 < len(lines):
         return [lines]
     # The lines beside a drop cap or a small picture set at the start of a
     # paragraph start past it, and no paragraph starts there: after a flush
@@ -345,30 +388,51 @@ def _indented_paragraphs(lines: list[Line], right: float) -> list[list[Line]]:
 
 
 def _hanging_entries(
-    lines: list[Line], flush: list[bool], left: float, height: float
+    lines: list[Line], flush: list[bool], left: float, right: float, height: float
 ) -> list[list[Line]] | None:
     """A block set with a hanging indent — a bibliography's or a glossary's
     entries, each first line flush and the lines after it indented, no space
-    between entries — cut into its entries, or None when it is none: the
-    first line flush, two lines at least indented by one amount, and half
-    the entries at least, two or more, going on in them. Paragraphs indented
-    on their first line open far more flush lines than they indent; the
-    lines beside a drop cap all go on the first one."""
+    between entries — cut into its entries, or None when it is none: lines
+    indented by one amount, an entry at least going on in them, and nearly
+    every entry following one that ends its sentence. The
+    lines beside a drop cap all go on the first one, and the lines a
+    paragraph wraps beside floats go on mid-sentence. And an entry goes on
+    in an indented line from a full one, where a short paragraph indented on
+    its first line follows another's short last line. Indented lines before
+    the first flush one go on an entry from the column or page before, and
+    are a part of their own."""
+    if True not in flush:
+        return None
+    lead = flush.index(True)
+    body, marks = lines[lead:], flush[lead:]
     indents = [line.box.x0 - left for line, at_edge in zip(lines, flush) if not at_edge]
-    entries = sum(flush)
-    going_on = sum(at_edge and not after for at_edge, after in zip(flush, flush[1:]))
+    # Lines going on an entry from before are an entry's end.
+    entries = sum(marks) + (1 if lead else 0)
+    into = [
+        right - line.box.x1 <= _first_word_width(after) + 0.35 * height
+        for line, after, at_edge, indented in zip(body, body[1:], marks, marks[1:])
+        if at_edge and not indented
+    ]
+    going_on = len(into)
+    # Each entry but the first follows one that ends its sentence: a
+    # paragraph wrapping beside two floats goes on mid-sentence.
+    ended = [
+        bool(_ENDS_SENTENCE.search(before.text.strip()))
+        for before, at_edge in zip(lines, flush[1:])
+        if at_edge
+    ]
     if (
-        not flush[0]
-        or len(indents) < 2
+        not indents
         or entries < 2
-        or going_on < 2
-        or going_on * 2 < entries
+        or not going_on
+        or sum(ended) < _WRAPPED_SHARE * len(ended)
+        or sum(into) < _WRAPPED_SHARE * going_on
         or max(indents) - min(indents) > _FLUSH * height
         or not _INDENT_MIN * height <= min(indents) <= _INDENT_MAX * height
     ):
         return None
-    parts: list[list[Line]] = []
-    for line, at_edge in zip(lines, flush):
+    parts: list[list[Line]] = [lines[:lead]] if lead else []
+    for line, at_edge in zip(body, marks):
         if at_edge:
             parts.append([])
         parts[-1].append(line)
@@ -849,47 +913,74 @@ def _beside_picture(lines: Sequence[Line], x0: float, right: float) -> float | N
 
 def _fills(lines: Sequence[Line]) -> bool:
     """Whether a paragraph's lines fill its own width as wrapped prose
-    does: nearly every line but the last ends where the next line's first
-    word would not have fitted, and they are no verse."""
+    does (see `_full`), and they are no verse."""
+    return _full(lines) and not _verse(lines)
+
+
+def _full(lines: Sequence[Line]) -> bool:
+    """Whether nearly every line of a paragraph but the last ends where the
+    next line's first word would not have fitted in its own width."""
     x1 = max(line.box.x1 for line in lines)
     pairs = list(zip(lines, lines[1:]))
     full = sum(
         x1 - line.box.x1 <= _first_word_width(after) + 0.5 * line.box.height
         for line, after in pairs
     )
-    return full >= _WRAPPED_SHARE * len(pairs) and not _verse(lines)
+    return full >= _WRAPPED_SHARE * len(pairs)
+
+
+def _set_as_verse(lines: Sequence[Line]) -> bool:
+    """Whether a paragraph is verse, each line ending where its verse does:
+    three lines at least that end as verses do (see `_verse_share`), two
+    in three of them — or half, where they leave room a word would have
+    fitted in. A poem's lines, as long as one another, may each look full;
+    prose with long words ends many lines on a comma, but fills them."""
+    if len(lines) < _BESIDE_PICTURE_LINES:
+        return False
+    share = _verse_share(lines)
+    return share >= _VERSE_SHARE or (share >= 0.5 and not _full(lines))
+
+
+#: How many of a block's line ends are a verse's, at least, for it to be
+#: verse however full its lines are.
+_VERSE_SHARE = 2 / 3
 
 
 def _verse(lines: Sequence[Line]) -> bool:
-    """Whether lines end where verses do, half of them at least: on a comma
-    or a semicolon, or before a capital that starts no sentence — a
-    sentence ending at a line's end says less, prose does that too — or
-    whether, like a song's, they have no stops at all. Chinese or Japanese
-    wraps anywhere, not as verse."""
+    """Whether lines end where verses do, half of them at least (see
+    `_verse_share`)."""
+    return _verse_share(lines) >= 0.5
+
+
+def _verse_share(lines: Sequence[Line]) -> float:
+    """How many of a block's line ends are a verse's: on a comma or a
+    semicolon, or before a little word's capital that starts no sentence —
+    a sentence ending at a line's end says less, prose does that too. All
+    of them where, like a song's, the lines have no stops at all; none in
+    Chinese or Japanese, which wraps anywhere."""
     if _unspaced(lines):
-        return False
+        return 0.0
     if not any(mark in line.text for line in lines for mark in ",.;:!?"):
-        return True
-    # German capitalizes its nouns: there, and where the language is not
-    # known, only a little word's capital tells a verse.
-    nouns = _language(" ".join(line.text for line in lines)) in ("de", None)
+        return 1.0
     pairs = list(zip(lines, lines[1:]))
     verse = 0.0
     for line, after in pairs:
         end = line.text.rstrip()[-1:]
         if end in ".!?":
             verse += 0.5
-        elif end in ",;:" or _verse_capital(after.text, nouns):
+        elif end in ",;:" or _verse_capital(after.text):
             verse += 1
-    return verse * 2 >= len(pairs)
+    return verse / max(len(pairs), 1)
 
 
-def _verse_capital(text: str, nouns: bool) -> bool:
+def _verse_capital(text: str) -> bool:
+    """Whether a line opens on a little word set in a capital, as a verse
+    does: `And`, `Die`. A noun's or a name's capital, at a line's start in
+    any running text, says nothing."""
     words = text.split()
     if not words or not words[0][:1].isupper():
         return False
-    word = words[0].strip("\"'„“‚«»(").lower()
-    return not nouns or word in _VERSE_LITTLE
+    return words[0].strip("\"'„“‚«»(").lower() in _VERSE_LITTLE
 
 
 #: Little words a verse may start with, in any of the languages told apart,
@@ -978,10 +1069,16 @@ def _agree(told: list[float]) -> bool:
 
 def _monospaced(lines: Sequence[Line]) -> float | None:
     """The advance per character of lines set in a monospaced font, or None:
-    what they say of it — four things at least — agrees. A text font's
-    words and lines are as wide as their letters make them, never the same
-    per character."""
+    the page's text layer says the font is one, or what the lines say of it
+    — four things at least — agrees. A text font's words and lines are as
+    wide as their letters make them, never the same per character; a line
+    or two of code says too little of it, but its font says enough."""
     told = _told(lines)
+    if lines and all(line.monospaced for line in lines):
+        if told:
+            return told[len(told) // 2]
+        longest = max(lines, key=lambda line: len(line.text.strip()))
+        return longest.box.width / max(len(longest.text.strip()), 1)
     if len(told) < _MONO_SAMPLES or not _agree(told):
         return None
     return told[len(told) // 2]
@@ -1023,31 +1120,44 @@ def _listing(parts: list[list[Line]]) -> str | None:
 def _code_like(lines: Sequence[Line], indents: Sequence[int]) -> bool:
     """Whether monospaced lines read as code rather than a typed letter's
     address, a note or a poem. Half of them commands, a configuration's
-    keys, a program's records or statements, a database's, comments, or lines
-    with flags or paths make them code whatever else they say. Code's
-    symbols, a few levels of indent (a letter's date and closing stand far
-    to the right), or commands named in lower case with their arguments do
-    only where the lines are no running text and no sentences."""
+    keys, a program's records or statements, a database's, or comments in
+    code's own marks make them code whatever else they say. Lines with
+    flags, paths or links, comments in marks prose also writes (`-- `,
+    `* `), code's symbols, a few levels of indent (a letter's date and
+    closing stand far to the right), commands named in lower case with
+    their arguments — or a tool's name again and again — or, in a font the
+    page says is monospaced, any line that is plainly code, do only where
+    the lines are no running text and no sentences."""
     texts = [line.text.strip() for line in lines]
 
-    def half(pattern: re.Pattern[str]) -> bool:
-        return sum(bool(pattern.search(text)) for text in texts) * 2 >= len(texts)
+    def half(*patterns: re.Pattern[str]) -> bool:
+        hits = sum(any(pattern.search(text) for pattern in patterns) for text in texts)
+        return hits * 2 >= len(texts)
 
-    if any(
-        half(pattern)
-        for pattern in (
-            _COMMAND,
-            _CONFIG_KEY,
-            _RECORD,
-            _STATEMENT,
-            _SOURCE,
-            _COMMENT,
-            _FLAG_OR_PATH,
-        )
+    strong = (_COMMAND, _RECORD, _STATEMENT, _SOURCE, _CODE_COMMENT, _PROMPT)
+    # A configuration has two keys at least: a line `note: …` alone is a note.
+    if sum(bool(_CONFIG_KEY.search(text)) for text in texts) >= 2:
+        strong = (*strong, _CONFIG_KEY)
+    # A listing's comments go with its code — `-- Create the tables` over
+    # SQL — or stand as a part of their own; a `* ` is a bullet as often.
+    comments = [bool(_COMMENT.search(text)) and not text.startswith("* ") for text in texts]
+    if (
+        half(*strong)
+        or all(comments)
+        or (any(p.search(t) for p in strong for t in texts) and half(*strong, _COMMENT))
     ):
         return True
     if _prose(lines) or _wordy(lines):
         return False
+    if half(_COMMENT) or half(_FLAG_OR_PATH):
+        return True
+    # Set in a font the page says is monospaced, a prompt or a command among
+    # the lines makes the rest a session's output.
+    plain = (_COMMAND, _RECORD, _STATEMENT, _SOURCE, _CODE_COMMENT, _PROMPT)
+    if all(line.monospaced for line in lines) and any(
+        pattern.search(text) for pattern in plain for text in texts
+    ):
+        return True
     chars = [c for text in texts for c in text if not c.isspace()]
     symbols = sum(c in _CODE_SYMBOLS for c in chars)
     words = [token for text in texts for token in text.split()]
@@ -1055,9 +1165,14 @@ def _code_like(lines: Sequence[Line], indents: Sequence[int]) -> bool:
         any(token.lower().strip(".,;:!?\"'()") in stop for stop in _STOPWORDS.values())
         for token in words
     )
+    names = [match.group(0).strip() for text in texts if (match := _LOWER_NAME.match(text))]
+    tool = Counter(name for name in names if name not in _VERSE_LITTLE).most_common(1)
     named = (
         half(_LOWER_NAME)
-        and any(_ARGUMENT.search(text) for text in texts)
+        and (
+            any(_ARGUMENT.search(text) for text in texts)
+            or (bool(tool) and tool[0][1] >= 2 and tool[0][1] * 2 >= len(texts))
+        )
         and little < _COMMAND_LITTLE * max(len(words), 1)
     )
     return (
@@ -1079,6 +1194,13 @@ _CONFIG_KEY = re.compile(
 _CODE_INDENT = 16
 #: A comment in code, or a script's first line: `# …`, `// …`, `-- …`.
 _COMMENT = re.compile(r"^(?:#!|#\s|//|--\s|/\*|\*\s|;\s|%\s|REM\s|rem\s)")
+#: A shell's or an interpreter's prompt opening a line: `$ ls`, `>>> import
+#: math`, `PS C:\\> dir`, `user@host:~$ sudo …`, `(venv) $ pip …`.
+_PROMPT = re.compile(
+    r"^(?:\(\S+\) )?(?:\$|>>>|PS [A-Za-z]:\\[^>]*>|[\w.-]+@[\w.-]+:[^\s$#]*[$#])(?:\s|$)"
+)
+#: A comment in marks only code writes: `#!/bin/sh`, `# …`, `// …`, `/* …`.
+_CODE_COMMENT = re.compile(r"^(?:#!|#\s|//|/\*)")
 #: An argument a command is given: a flag, a path, a name with a dot or a
 #: figure in it, a setting.
 _ARGUMENT = re.compile(r"\s-{1,2}[A-Za-z]|/|\w\.\w|\w\d|\d\w|=")
@@ -1097,9 +1219,11 @@ _FLAG_OR_PATH = re.compile(
     r"|[\w.-]+/[\w./-]*\.[A-Za-z]\w{0,4}\b"
     r"|\b[A-Za-z]:\\"
 )
-#: A database's statement: `CREATE DATABASE shop`, `SELECT * FROM kunden`.
+#: A database's statement: `CREATE DATABASE shop`, `SELECT * FROM kunden` —
+#: or a clause of one set on its own line: `WHERE country = 'DE'`.
 _STATEMENT = re.compile(
-    r"^(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|GRANT|REVOKE|USE|SHOW|WITH)\s"
+    r"^(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|GRANT|REVOKE|USE|SHOW|WITH"
+    r"|FROM|WHERE|(?:ORDER|GROUP) BY|(?:LEFT |RIGHT |INNER |OUTER )?JOIN|HAVING|LIMIT|VALUES)\s"
 )
 #: A program's statement: `import os`, `from pathlib import Path`,
 #: `def main():`, `#include <stdio.h>`, `const app = express();`.
@@ -1192,8 +1316,17 @@ def _with_listings(
                     > 0.05 * height
                     or min(_start(line) for line in more) < left - 0.5 * height
                     # Lines right under a part, cut from it at a change of indent,
-                    # go on in it whatever they say: `- Anna` in a YAML list.
-                    or not (_listing_part(more) or gap < 0.5 * height)
+                    # go on in it whatever they say: `- Anna` in a YAML list;
+                    # so do lines in the listing's monospaced font indented
+                    # past its edge after a blank line: a commit's message.
+                    or not (
+                        _listing_part(more)
+                        or gap < 0.5 * height
+                        or (
+                            all(line.monospaced for part in [*run, more] for line in part)
+                            and min(_start(line) for line in more) > left + height
+                        )
+                    )
                     or not _agree(_told([line for part in [*run, more] for line in part]))
                 ):
                     break

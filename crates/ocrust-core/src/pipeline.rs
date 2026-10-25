@@ -694,6 +694,7 @@ impl Engine {
                 det_score: det.score,
                 words,
                 segments: Vec::new(),
+                monospaced: false,
             });
         }
 
@@ -801,6 +802,7 @@ impl Engine {
                 det_score: det.score,
                 words,
                 segments: Vec::new(),
+                monospaced: false,
             };
             stamps.push(Block {
                 kind: BlockKind::Stamp,

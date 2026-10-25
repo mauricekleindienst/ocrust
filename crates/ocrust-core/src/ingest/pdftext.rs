@@ -97,6 +97,8 @@ struct TextGlyph {
     /// is in the order it is read, and a bracket in it faces the way it
     /// reads, where the one drawn in text read right to left is mirrored.
     actual: bool,
+    /// Whether the glyph's font is monospaced (see [`FontFacts::monospaced`]).
+    monospaced: bool,
 }
 
 impl TextGlyph {
@@ -608,6 +610,8 @@ struct Letter {
     size: f64,
     /// Whether `text` is as it is read (see [`TextGlyph::actual`]).
     actual: bool,
+    /// Whether the glyph's font is monospaced.
+    monospaced: bool,
 }
 
 /// What a run is made of, left to right.
@@ -709,6 +713,7 @@ impl Run {
                 origin: glyph.origin,
                 size: glyph.size(),
                 actual: glyph.actual,
+                monospaced: glyph.monospaced,
             }));
         }
         self.last_origin = glyph.origin;
@@ -1105,6 +1110,14 @@ impl Run {
         for word in &words {
             bbox = bbox.union(&word.bbox);
         }
+        // Set in a monospaced font: every letter of it.
+        let mut letters = self.pieces.iter().filter_map(|piece| match piece {
+            Piece::Char(letter) => Some(letter.monospaced),
+            _ => None,
+        });
+        let monospaced = letters
+            .next()
+            .is_some_and(|first| first && letters.all(|m| m));
         Some(Line {
             text,
             confidence: 1.0,
@@ -1115,6 +1128,7 @@ impl Run {
             margin: 1.0,
             words,
             segments,
+            monospaced,
         })
     }
 }
@@ -1980,6 +1994,8 @@ struct Collector {
     unnamed: HashMap<u128, (usize, Vec<(usize, char)>)>,
     /// What the page's fonts do not say with each glyph they draw.
     facts: FontFacts,
+    /// Whether each font is monospaced, by font.
+    monospaced: HashMap<u128, bool>,
     /// The tag of every marked-content sequence begun, in the order the
     /// interpreter began them (see [`marked_content`]).
     marked: Vec<Vec<u8>>,
@@ -2159,6 +2175,7 @@ fn stand_in(glyphs: &[TextGlyph], advanced: &[bool], text: &str) -> Option<TextG
         up: base.up,
         text,
         actual: true,
+        monospaced: glyphs.iter().all(|g| g.monospaced),
     })
 }
 
@@ -2464,6 +2481,19 @@ impl<'a> Device<'a> for Collector {
                 }
             }
         }
+        let monospaced = match glyph {
+            Glyph::Outline(g) => {
+                let key = g.font_cache_key();
+                let named = &self.facts.monospaced;
+                *self.monospaced.entry(key).or_insert_with(|| {
+                    named.contains(&key)
+                        || g.font_data().is_some_and(|data| {
+                            data.is_monospace || monospaced_name(data.postscript_name.as_deref())
+                        })
+                })
+            }
+            Glyph::Type3(_) => false,
+        };
         self.drawn.push((self.open.clone(), advanced));
         self.layer.glyphs.push(TextGlyph {
             text,
@@ -2473,6 +2503,7 @@ impl<'a> Device<'a> for Collector {
             visible: !matches!(draw_mode, GlyphDrawMode::Invisible),
             mapped,
             actual: false,
+            monospaced,
         });
     }
 
@@ -2512,6 +2543,11 @@ struct FontFacts {
     /// Of each ZapfDingbats font, by its cache key: the code each of its
     /// glyphs is drawn for, by glyph id (see [`dingbat_codes`]).
     dingbats: HashMap<u128, HashMap<u32, u8>>,
+    /// The fonts, by cache key, whose dictionary says they are monospaced:
+    /// the descriptor's `FixedPitch` flag, or a monospaced face's name — the
+    /// standard Courier has no descriptor, and hayro hands over no name
+    /// for a Type1 font's glyphs.
+    monospaced: HashSet<u128>,
 }
 
 impl FontFacts {
@@ -2562,6 +2598,9 @@ fn font_facts<'a>(page: &Page<'a>, cache: &InterpreterCache<'a>) -> FontFacts {
             };
             if !seen.insert(font.cache_key()) {
                 continue;
+            }
+            if fixed_pitch(&font) {
+                facts.monospaced.insert(font.cache_key());
             }
             let subtype = font.get::<Name<'_>>(b"Subtype");
             if subtype.as_ref().is_some_and(|s| s.as_str() == "Type3") {
@@ -2618,6 +2657,54 @@ fn type3_widths(font: &Dict<'_>, into: &mut HashMap<String, Vec<f64>>) {
         }
     }
 }
+
+/// Whether a font's dictionary says it is monospaced: its descriptor's
+/// `FixedPitch` flag — a composite font's in its descendant's — or its name.
+fn fixed_pitch(font: &Dict<'_>) -> bool {
+    let descriptor = font.get::<Dict<'_>>(b"FontDescriptor").or_else(|| {
+        font.get::<Array<'_>>(b"DescendantFonts")?
+            .iter::<Dict<'_>>()
+            .next()?
+            .get::<Dict<'_>>(b"FontDescriptor")
+    });
+    let flagged = descriptor
+        .and_then(|d| d.get::<u32>(b"Flags"))
+        .is_some_and(|flags| flags & FIXED_PITCH_FLAG != 0);
+    let name = font.get::<Name<'_>>(b"BaseFont");
+    flagged || monospaced_name(name.as_ref().map(|n| n.as_str()))
+}
+
+/// The `FixedPitch` bit of a font descriptor's `Flags`.
+const FIXED_PITCH_FLAG: u32 = 1;
+
+/// Whether a font's name is that of a monospaced face: Courier, Consolas,
+/// Menlo, Monaco, Inconsolata, Lucida Console, a typewriter's, a code font
+/// (`Source Code Pro`, `Fira Code`) or any `…Mono…` — but no Monotype face.
+fn monospaced_name(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    // A subset's tag, `ABCDEF+`, is no part of the face's name.
+    let face = name.split_once('+').map_or(name.as_str(), |(_, face)| face);
+    let face = face.trim_start_matches("monotype");
+    MONOSPACED_FACES.iter().any(|known| face.contains(known))
+}
+
+/// What the names of monospaced faces hold (see [`monospaced_name`]).
+const MONOSPACED_FACES: &[&str] = &[
+    "mono",
+    "courier",
+    "consolas",
+    "menlo",
+    "monaco",
+    "inconsolata",
+    "lucidaconsole",
+    "lucida console",
+    "typewriter",
+    "fixedsys",
+    "code",
+];
 
 /// Whether `font` is ZapfDingbats — the standard font or one embedded under
 /// its name — without a `ToUnicode` map to say what its glyphs are.
@@ -2793,6 +2880,7 @@ fn form_boxes(page: &Page<'_>, initial: Affine) -> Vec<TextGlyph> {
             visible: true,
             mapped: true,
             actual: false,
+            monospaced: false,
         });
     }
     boxes
@@ -3041,6 +3129,7 @@ pub(crate) fn read<'a>(page: &'a Page<'a>, cache: &InterpreterCache<'a>, scale: 
         fonts: HashMap::new(),
         unnamed: HashMap::new(),
         facts: font_facts(page, cache),
+        monospaced: HashMap::new(),
         marked: Vec::new(),
         open: Vec::new(),
         drawn: Vec::new(),
@@ -3071,6 +3160,7 @@ mod tests {
             visible: true,
             mapped: true,
             actual: false,
+            monospaced: false,
         }
     }
 
@@ -3444,6 +3534,7 @@ mod tests {
                 visible: true,
                 mapped: true,
                 actual: false,
+                monospaced: false,
             });
         }
         let texts: Vec<String> = layer(glyphs)
@@ -3470,6 +3561,17 @@ mod tests {
             SymbolFont::Dingbats
         );
         assert_eq!(symbol_font(Some("SymbolMT")), SymbolFont::Symbol);
+        for name in [
+            "ABCDEF+LiberationMono",
+            "Courier-Bold",
+            "Consolas",
+            "SourceCodePro-Regular",
+        ] {
+            assert!(monospaced_name(Some(name)), "{name}");
+        }
+        for name in ["ABCDEF+LiberationSerif", "MonotypeCorsiva", "Helvetica"] {
+            assert!(!monospaced_name(Some(name)), "{name}");
+        }
         // A scan's hidden text, a page of it.
         let mut glyphs: Vec<TextGlyph> = (0..20)
             .flat_map(|row| word("Zeile des Vertrags", 100.0, 100.0 + 30.0 * row as f64, 20.0))
@@ -3946,6 +4048,7 @@ mod tests {
             fonts: HashMap::new(),
             unnamed: HashMap::new(),
             facts: FontFacts::default(),
+            monospaced: HashMap::new(),
             marked: vec![b"Span".to_vec()],
             open: Vec::new(),
             drawn: vec![(vec![0], true), (vec![0], true)],

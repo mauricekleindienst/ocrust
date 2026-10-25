@@ -162,6 +162,9 @@ class Line:
     #: The detector's boxes this line was merged from, left to right. Empty for a
     #: line that came from one box, which is the ordinary case for running text.
     segments: Sequence[Segment] = field(default_factory=tuple)
+    #: Whether a PDF's own text sets the whole line in a monospaced font: code,
+    #: a program's output, a typed letter. Never set for text read by OCR.
+    monospaced: bool = False
 
     @classmethod
     def _from_json(cls, data: dict[str, Any]) -> Line:
@@ -174,6 +177,7 @@ class Line:
             words=tuple(Word._from_json(w) for w in data.get("words", ())),
             polygon=tuple((p["x"], p["y"]) for p in data["quad"]["points"]),
             segments=tuple(Segment._from_json(s) for s in data.get("segments", ())),
+            monospaced=data.get("monospaced", False),
         )
 
 

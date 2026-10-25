@@ -454,9 +454,20 @@ def assemble(runs: list[Run]) -> list[Inline]:
             after = runs[index + 1] if index + 1 < len(runs) else None
             if before and after and before[2] == after[2] == link:
                 runs[index] = (item, before[1] & after[1], link)
-    out: list[Inline] = []
+    # Code is one span however many runs it was typed in.
+    merged: list[Run] = []
     for item, fmt, link in runs:
+        if merged and "code" in fmt and isinstance(item, str):
+            last, last_fmt, last_link = merged[-1]
+            if isinstance(last, str) and last_fmt == fmt and last_link == link:
+                merged[-1] = (last + item, fmt, link)
+                continue
+        merged.append((item, fmt, link))
+    out: list[Inline] = []
+    for item, fmt, link in merged:
         wrapped: Inline = item
+        if "code" in fmt and isinstance(item, str) and item.strip():
+            wrapped = Span("code", [item])
         for kind in reversed(_NESTING):
             if kind in fmt:
                 wrapped = Span(kind, [wrapped])
@@ -464,6 +475,59 @@ def assemble(runs: list[Run]) -> list[Inline]:
             wrapped = Span("link", [wrapped], link)
         out.append(wrapped)
     return normalize(out)
+
+
+def monospaced_font(name: str | None) -> bool:
+    """Whether a font's name is that of a monospaced face — Courier,
+    Consolas, Menlo, Monaco, Inconsolata, Lucida Console, a typewriter's, a
+    code font (`Source Code Pro`, `Fira Code`) or any `…Mono…` — the font
+    code is set in where a document has no style for it. No Monotype face
+    is one by its foundry's name."""
+    if not name:
+        return False
+    face = name.lower().removeprefix("monotype")
+    return bool(_MONOSPACED_FACE.search(face))
+
+
+_MONOSPACED_FACE = re.compile(
+    r"mono|courier|consolas|menlo|monaco|inconsolata|lucida ?console|typewriter|fixedsys|code"
+)
+
+
+def uncoded(content: list[Inline]) -> list[Inline]:
+    """Inline content with its code spans as plain text."""
+    out: list[Inline] = []
+    for item in content:
+        if isinstance(item, Span) and item.kind == "code":
+            out.extend(uncoded(item.children))
+        elif isinstance(item, Span):
+            out.append(Span(item.kind, uncoded(item.children), item.url))
+        else:
+            out.append(item)
+    return normalize(out)
+
+
+def all_code(content: list[Inline]) -> bool:
+    """Whether every word of inline content is code: a paragraph typed
+    wholly in a monospaced font."""
+    seen = False
+
+    def walk(items: list[Inline], inside: bool) -> bool:
+        nonlocal seen
+        for item in items:
+            if isinstance(item, Span):
+                if not walk(item.children, inside or item.kind == "code"):
+                    return False
+            elif isinstance(item, str):
+                if item.strip():
+                    if not inside:
+                        return False
+                    seen = True
+            elif not isinstance(item, Break):
+                return False
+        return True
+
+    return walk(content, False) and seen
 
 
 def body_of(note: Note) -> list[Block]:

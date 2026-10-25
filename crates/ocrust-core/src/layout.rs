@@ -1440,6 +1440,7 @@ const STACKED_OVERLAP: f32 = 0.25;
 
 /// Joins boxes of one baseline group into a single line, left to right.
 fn join_group(mut group: Vec<Line>) -> Option<Line> {
+    let monospaced = group.iter().all(|line| line.monospaced);
     match group.len() {
         0 => return None,
         1 => return group.pop(),
@@ -1499,6 +1500,7 @@ fn join_group(mut group: Vec<Line>) -> Option<Line> {
         det_score: det_sum / count,
         words,
         segments,
+        monospaced,
     })
 }
 
@@ -1731,8 +1733,10 @@ fn paragraphs(
                     apart(s0, s1) && apart(l0, l1)
                 };
                 // A bullet opens an item, however close it follows: a list set
-                // right under its lead-in is still a list.
-                let bullet = strip_bullet(&line.text).len() < line.text.trim_start().len();
+                // right under its lead-in is still a list. A dash in running
+                // text set at a line's start opens none.
+                let bullet = strip_bullet(&line.text).len() < line.text.trim_start().len()
+                    && !dash_goes_on(&current, &line, scale);
                 gap > scale * cfg.line_gap_factor
                     || !shares_column
                     || set_apart
@@ -1864,6 +1868,31 @@ pub(crate) fn strip_bullet(line: &str) -> &str {
     rest.trim_start()
 }
 
+/// Whether `line`, opening on a dash, goes on the sentence of the paragraph
+/// `current` ends with rather than opening a list item: a spaced dash in
+/// running text — `Unsere Partner in Spanien` over `– und später auch in
+/// Italien – unterstützten …` — set flush under a line whose sentence is
+/// open, the word after it in lower case, in a block that is no list.
+fn dash_goes_on(current: &[Line], line: &Line, scale: f32) -> bool {
+    let (Some(first), Some(prev)) = (current.first(), current.last()) else {
+        return false;
+    };
+    let text = line.text.trim_start();
+    let dash = text.starts_with(['–', '—']) || text.starts_with("- ");
+    let listed = strip_bullet(&first.text).len() < first.text.trim_start().len();
+    dash && !listed
+        && strip_bullet(text)
+            .chars()
+            .next()
+            .is_some_and(char::is_lowercase)
+        && !prev.text.trim_end().ends_with(['.', '!', '?', ':', ';'])
+        && (line.bbox.x0 - prev.bbox.x0).abs() <= scale * DASH_FLUSH
+}
+
+/// How far off the line above, in line heights, a line opening on a dash
+/// may start and still be flush with it: a list's items are indented.
+const DASH_FLUSH: f32 = 0.5;
+
 /// Lines a heading may run to on a page read from its own text, where sizes
 /// are exact: a title set large in a narrow column wraps more than twice.
 const EXACT_HEADING_LINES: usize = 4;
@@ -1958,10 +1987,11 @@ fn dehyphenate(lines: &mut Vec<Line>) {
     let mut i = 0;
     while i + 1 < lines.len() {
         let head = lines[i].text.trim_end();
-        // A hyphen after a digit never breaks a word: "2- und 3-Zimmer",
-        // "3-" / "fach" — the hyphen is part of what was written.
+        // Only a hyphen after a letter breaks a word. One after a digit is
+        // part of what was written ("2- und 3-Zimmer", "3-" / "fach"); one
+        // after a space or another hyphen is a dash ("Italy -", "agreed --").
         let ends_hyphen = head.ends_with(['-', '\u{2010}', '\u{00ad}'])
-            && !head.chars().rev().nth(1).is_some_and(char::is_numeric);
+            && head.chars().rev().nth(1).is_some_and(char::is_alphabetic);
         let next = lines[i + 1].text.trim_start();
         let next_starts_lower = next.chars().next().is_some_and(|c| c.is_lowercase());
         // "E-Mail-" over "Adresse", "IT-" over "basierten": the hyphen is the
@@ -3085,6 +3115,54 @@ mod tests {
         ];
         let blocks = group_blocks(lines, &LayoutConfig::default());
         assert_eq!(blocks[0].text(), "Zusammenfassung folgt");
+    }
+
+    #[test]
+    fn a_dash_after_a_space_is_no_broken_word() {
+        for (head, tail) in [
+            ("and Italy -", "supported it"),
+            ("all agreed --", "plan it"),
+        ] {
+            let lines = vec![
+                line_at(head, 0.0, 0.0, 100.0, 10.0),
+                line_at(tail, 0.0, 12.0, 100.0, 22.0),
+            ];
+            let blocks = group_blocks(lines, &LayoutConfig::default());
+            assert_eq!(blocks[0].text(), format!("{head}\n{tail}"));
+        }
+    }
+
+    #[test]
+    fn a_dash_in_running_text_at_a_lines_start_opens_no_list_item() {
+        let lines = vec![
+            line_at("Unsere Partner in Spanien", 0.0, 0.0, 300.0, 12.0),
+            line_at(
+                "– und später auch in Italien – halfen.",
+                0.0,
+                14.0,
+                300.0,
+                26.0,
+            ),
+        ];
+        let blocks = group_blocks(lines, &LayoutConfig::default());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Paragraph);
+        // After a lead-in that ends its sentence, or indented, dashes open items.
+        let lines = vec![
+            line_at("Zu klären:", 0.0, 0.0, 300.0, 12.0),
+            line_at("– der Brandschutz", 0.0, 14.0, 250.0, 26.0),
+            line_at("– die Abnahme", 0.0, 28.0, 250.0, 40.0),
+        ];
+        let blocks = group_blocks(lines, &LayoutConfig::default());
+        let kinds: Vec<BlockKind> = blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                BlockKind::Paragraph,
+                BlockKind::ListItem,
+                BlockKind::ListItem
+            ]
+        );
     }
 
     #[test]
