@@ -51,6 +51,10 @@ _PAGE_NUMBER = re.compile(
 )
 _BULLET = re.compile(r"^\s*(?:[•◦▪▫●○■□►▶➢➤✓✔·‣⁃]\s*|[-–—*]\s+)")
 _ENUMERATOR = re.compile(r"^\s*(\d{1,3})([.)])\s+")
+#: A list item's letter or roman figure, as contracts count: `a)`, `(b)`,
+#: `c.`, `(iv)`, `ii.`, `A)` — kept in the item's text, Markdown having no
+#: such lists.
+_LETTERED = re.compile(r"^\s*(?:\(?[a-z]\)|\([ivx]{1,4}\)|[ivx]{1,4}[.)]|[a-z]\.|\(?[A-Z]\))\s+\S")
 _ENDS_SENTENCE = re.compile(r"[.!?:;…\"”»“)\]]\s*$")
 
 
@@ -129,10 +133,10 @@ _SLUG = re.compile(r"[a-z\d]+(?:-[a-z\d]+){2,}(?![\w-])")
 _PATH_DOT = re.compile(r"(?:(?<!\S)(?:\w+://|~|\.{0,2}/)\S*|\S*/\S*/\S*)[A-Za-z]\.$")
 
 
-#: A letter's closing, which the sender's name follows: a short line
-#: ending in a comma, or one of the usual formulas.
+#: A letter's closing, which the sender's name follows: one of the usual
+#: formulas. A salutation, `Dear parents,`, opens the letter's text.
 _CLOSING = re.compile(
-    r"^[^.!?]{0,40},$|^(?:(?:kind|best|warm|warmest|many)\s+)?regards\W*$"
+    r"^(?:(?:kind|best|warm|warmest|many)\s+)?regards\W*$"
     r"|^(?:yours\s+)?(?:sincerely|faithfully|truly)\W*$|^mit\s+freundlichen\s+grü(?:ß|ss)en\W*$"
     r"|^(?:viele|beste|liebe|herzliche|freundliche|schöne)\s+grü(?:ß|ss)e\W*$"
     r"|^hochachtungsvoll\W*$|^cordialement\W*$|^met\s+vriendelijke\s+groet(?:en)?\W*$",
@@ -1907,7 +1911,12 @@ def _items(lines: list[Line], columns: _Columns) -> list[_Item]:
     items: list[_Item] = []
     groups: list[list[Line]] = []
     for line in lines:
-        if not groups or _BULLET.match(line.text) or _ENUMERATOR.match(line.text):
+        if (
+            not groups
+            or _BULLET.match(line.text)
+            or _ENUMERATOR.match(line.text)
+            or _LETTERED.match(line.text)
+        ):
             groups.append([line])
         else:
             groups[-1].append(line)

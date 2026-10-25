@@ -7,6 +7,7 @@ import csv
 import io
 import re
 import sys
+import textwrap
 from typing import Any
 
 from ._context import Context
@@ -222,6 +223,12 @@ def _chunk(lines: list[str], width: int) -> list[Block]:
     items = _list_items(lines)
     if items is not None:
         return items
+    # Lines set in columns — an option list, names and roles, amounts under
+    # their labels — kept as they stand, after a line leading into them.
+    lead = 1 if len(lines) > 2 and lines[0].rstrip().endswith(":") else 0
+    if len(lines) - lead >= 2 and all(_COLUMN_GAP.search(line) for line in lines[lead:]):
+        listing = textwrap.dedent("\n".join(lines[lead:]))
+        return [*(Paragraph([lines[0].strip()]) for _ in range(lead)), Code(listing)]
     # A line that leads into a list — `Offene Punkte:` — then the list.
     for index in range(1, len(lines)):
         if _BULLET.match(lines[index]) or _ENUMERATOR.match(lines[index]):
@@ -236,6 +243,9 @@ def _chunk(lines: list[str], width: int) -> list[Block]:
 
 
 _LEAD = re.compile(r"\S+")
+#: A gap of two spaces and more between a line's columns, not after a
+#: sentence's stop, which some typists follow with two.
+_COLUMN_GAP = re.compile(r"\S(?<![.!?:])  +\S")
 
 
 def _records(lines: list[str]) -> bool:

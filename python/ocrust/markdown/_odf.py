@@ -96,7 +96,8 @@ class _Styles:
     def __init__(self, *roots: Element | None) -> None:
         self.text: dict[str, frozenset[str]] = {}
         self.parent: dict[str, str] = {}
-        self.ordered_lists: set[str] = set()
+        #: The levels, from 1, each list style numbers rather than bullets.
+        self.ordered_levels: dict[str, set[int]] = {}
         self.paragraph_names: dict[str, str] = {}
         for root in roots:
             if root is None:
@@ -123,9 +124,11 @@ class _Styles:
                         fmt.add("code")
                 self.text[name] = frozenset(fmt)
             for list_style in descendants(root, "list-style"):
-                first = next(iter(list_style), None)
-                if first is not None and local(first.tag) == "list-level-style-number":
-                    self.ordered_lists.add(attr(list_style, "name") or "")
+                levels = self.ordered_levels.setdefault(attr(list_style, "name") or "", set())
+                for level in list_style:
+                    if local(level.tag) == "list-level-style-number":
+                        with contextlib.suppress(ValueError):
+                            levels.add(int(attr(level, "level") or 1))
 
     def formatting(self, name: str | None) -> frozenset[str]:
         seen: set[str] = set()
@@ -215,7 +218,9 @@ class _Reader:
                 out.extend(extras)
             elif name == "list":
                 style = attr(node, "style-name") or list_style
-                ordered = style in self.styles.ordered_lists
+                # Each level of a list style numbers or bullets its own way:
+                # bullets under a numbered step.
+                ordered = depth + 1 in self.styles.ordered_levels.get(style or "", set())
                 start = 1
                 if (attr(node, "continue-numbering") or "") == "true" or attr(
                     node, "continue-list"

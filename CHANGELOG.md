@@ -251,6 +251,18 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   a note's raised number is no longer torn before it. `1-` over `or 2-room`
   keeps its space, a heading at the head of the next column is not passed,
   and Word's `Strong` and `Emphasis` character styles are bold and italic.
+- **Numbered headings, lettered lists and columns of plain text**: a
+  numbered section heading set bold or a little larger (`1. Introduction`)
+  is a heading again, and only bold numbered lines one after another make
+  a list; a heading may name a version (`version 2.10`) or end in `!`
+  (`Save the date!`), and a heading under a salutation stays one. A larger
+  lead paragraph over the text no longer passes for the body, a bold
+  question over its answer stays apart from it, and a sheet's second table
+  headed by day numbers or dates stays a table of its own. Lists counted
+  `a)`, `(b)`, `c.` or `ii.` are lists, their letters kept; an
+  OpenDocument's nested list numbers or bullets each level as its style
+  says; and lines of plain text set in columns — a program's options,
+  names and roles, amounts — keep their lines.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and

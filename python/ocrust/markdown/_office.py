@@ -1741,8 +1741,9 @@ _PERCENT_FORMATS = {9, 10}
 _TOTAL_GAP = 2
 #: A cell holding a figure: an amount, a count, a share, a date.
 _FIGURE = re.compile(r"[-+−(]?\s*[€$£]?\s*\d[\d.,'’\s/:]*\s*(?:%|[€$£]|[A-Z]{3})?\)?")
-#: A row of years heads a table of its own.
+#: A row of years or dates heads a table of its own.
 _YEAR = re.compile(r"(?:19|20)\d\d")
+_DAY = re.compile(r"\d{1,2}\.\d{1,2}\.(?:\d{2,4})?|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:/\d{2,4})?")
 
 
 def _is_date_format(code: str) -> bool:
@@ -2039,6 +2040,24 @@ def _shaped_like(row: dict[int, str], model: dict[int, str]) -> bool:
     return figures > 0
 
 
+def _goes_on(group: list[int], rows: dict[int, dict[int, str]], columns: list[int]) -> bool:
+    """Whether rows set off from a table go on with its rows rather than
+    open a table of their own: each fills every column the table has, and
+    the first is no header — not a row of years, dates or numbers counting
+    up (`1 2 3`, a roster's days)."""
+    if not all(set(rows[r]) == set(columns) for r in group):
+        return False
+    first = rows[group[0]]
+    values = [first[c].strip() for c in sorted(first) if c != min(first)]
+    if all(_YEAR.fullmatch(v) or _DAY.fullmatch(v) for v in values):
+        return False
+    counted = [int(v) for v in values if v.isdigit()]
+    return not (
+        len(counted) == len(values) >= 2
+        and all(b - a == 1 for a, b in zip(counted, counted[1:], strict=False))
+    )
+
+
 def _sheet_blocks(rows: dict[int, dict[int, str]], dropped: int = 0) -> list[Block]:
     """A sheet's cells as tables, split where whole rows are empty.
 
@@ -2067,11 +2086,7 @@ def _sheet_blocks(rows: dict[int, dict[int, str]], dropped: int = 0) -> list[Blo
             and group[0] - table[1] <= _TOTAL_GAP + 1
             and set(columns) <= set(table[0])
             and all(_shaped_like(rows[r], rows[table[1]]) for r in group)
-            and not all(
-                _YEAR.fullmatch(v.strip())
-                for c, v in rows[group[0]].items()
-                if c != min(rows[group[0]])
-            )
+            and (len(group) == 1 or _goes_on(group, rows, table[0]))
         ):
             # Rows set off by an empty row in the table's shape — a totals
             # row, a balance, the next months — stay under its columns.

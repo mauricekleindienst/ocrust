@@ -252,7 +252,7 @@ fn body_text_height(
             .filter(|l| !same(size(l), height) && size(l) < height)
             .collect();
         notes.iter().all(|l| l.bbox.y0 >= bottom - 0.5 * height)
-            && notes.iter().any(|l| opens_a_note(&l.text))
+            && notes.iter().any(|l| opens_a_note(l))
     };
     let body = sizes
         .iter()
@@ -269,17 +269,29 @@ fn body_text_height(
     Some(body)
 }
 
-/// Whether a line opens a note on its number: `¹ See …`, `12 Ibid.`.
-fn opens_a_note(text: &str) -> bool {
-    let mut words = text.split_whitespace();
+/// Whether a line opens a note on its raised number: `¹ See …`, or a
+/// figure set smaller than the words after it. A line of the text opening
+/// on a figure in its size — `12 members voted` — opens none.
+fn opens_a_note(line: &Line) -> bool {
+    let mut words = line.text.split_whitespace();
     let (Some(mark), Some(_)) = (words.next(), words.next()) else {
         return false;
     };
-    mark.chars().count() <= 3
-        && mark
-            .chars()
-            .all(|c| c.is_ascii_digit() || "¹²³⁴⁵⁶⁷⁸⁹⁰*†‡".contains(c))
+    let raised = mark.chars().all(|c| "¹²³⁴⁵⁶⁷⁸⁹⁰*†‡".contains(c));
+    let small = mark.chars().all(|c| c.is_ascii_digit())
+        && match (line.words.first(), line.words.get(1)) {
+            (Some(number), Some(word)) => {
+                number.bbox.height() < RAISED_MARK * word.bbox.height()
+                    || number.bbox.y1 < word.bbox.y1 - (1.0 - RAISED_MARK) * word.bbox.height()
+            }
+            _ => false,
+        };
+    mark.chars().count() <= 3 && (raised || small)
 }
+
+/// How much smaller than its words, or how much higher, a note's number
+/// is set: a superscript's size is two thirds of the text's or so.
+const RAISED_MARK: f32 = 0.85;
 
 fn median_height(lines: &[Line]) -> f32 {
     if lines.is_empty() {
@@ -2177,10 +2189,23 @@ fn paragraphs(
                         .map(|l| l.bbox.x1)
                         .fold(f32::MIN, f32::max);
                     let short = prev.bbox.x1 + first_word_width(&line) + scale * WRAP_SPACE < edge;
+                    // A list item's title goes on in its description, set
+                    // under the item's text past its marker; a numbered
+                    // heading's text starts where its number does.
                     let opening = &current[0].text;
-                    let item = strip_bullet(opening).len() < opening.trim_start().len()
-                        || numbered(opening);
-                    short && (!prev.bold || (current.iter().all(|l| l.bold) && !item))
+                    let item = (strip_bullet(opening).len() < opening.trim_start().len()
+                        || numbered(opening)
+                        || lettered(opening))
+                        && line.bbox.x0 > current[0].bbox.x0 + scale * 0.5;
+                    // A bold run that is the block so far over a line that
+                    // opens a sentence is no phrase going on: a question
+                    // over its answer, a CV's title over its description.
+                    let opens = line.text.trim_start().starts_with(char::is_uppercase);
+                    if prev.bold {
+                        (short || opens) && current.iter().all(|l| l.bold) && !item
+                    } else {
+                        short
+                    }
                 };
                 // A bullet opens an item, however close it follows: a list set
                 // right under its lead-in is still a list. A dash in running
@@ -2192,12 +2217,30 @@ fn paragraphs(
                         &lines.iter().take(2).collect::<Vec<_>>(),
                         scale,
                     );
+                // So does a number or a letter, `2.`, `b)`, after a lead-in
+                // ending in a colon, a line ending short, or another item:
+                // after a full line it goes on a sentence, `am` / `2. Juni`.
+                let counted = (numbered(&line.text) || lettered(&line.text)) && {
+                    let opening = &current[0].text;
+                    let listed = strip_bullet(opening).len() < opening.trim_start().len()
+                        || numbered(opening)
+                        || lettered(opening);
+                    let edge = current
+                        .iter()
+                        .chain([&line])
+                        .map(|l| l.bbox.x1)
+                        .fold(f32::MIN, f32::max);
+                    listed
+                        || prev.text.trim_end().ends_with(':')
+                        || prev.bbox.x1 + first_word_width(&line) + scale * WRAP_SPACE < edge
+                };
                 gap > scale * cfg.line_gap_factor
                     || !shares_column
                     || set_apart
                     || resized
                     || reweighted
                     || bullet
+                    || counted
             }
         };
         if starts_new {
@@ -2214,9 +2257,35 @@ fn paragraphs(
     if !current.is_empty() {
         blocks.push(finish_block(current, text_height, exact, body, cfg));
     }
+    numbered_runs(&mut blocks, text_height);
     // Emitted back to front by the caller, which reverses the whole list.
     blocks.reverse();
     blocks
+}
+
+/// A numbered heading set off by its weight or a point of size is a list
+/// item where a numbered block stands right before or after it: a list of
+/// bold items, `1. Plan`, `2. Build`. A section's heading heads its text.
+fn numbered_runs(blocks: &mut [Block], text_height: f32) {
+    let numbered_at = |blocks: &[Block], i: usize| {
+        blocks.get(i).is_some_and(|b| {
+            matches!(b.kind, BlockKind::ListItem | BlockKind::Heading)
+                && b.lines.first().is_some_and(|l| numbered(&l.text))
+        })
+    };
+    let items: Vec<usize> = (0..blocks.len())
+        .filter(|&i| {
+            let block = &blocks[i];
+            block.kind == BlockKind::Heading
+                && block.lines.first().is_some_and(|l| {
+                    numbered(&l.text) && l.quad.edge_height() <= text_height * EXACT_HEADING_FACTOR
+                })
+                && ((i > 0 && numbered_at(blocks, i - 1)) || numbered_at(blocks, i + 1))
+        })
+        .collect();
+    for i in items {
+        blocks[i].kind = BlockKind::ListItem;
+    }
 }
 
 /// Whether `line` is the next line of the paragraph `current` holds so far,
@@ -2456,26 +2525,32 @@ fn classify_block(
     // LibreOffice's styles set it at 13 points over 11 — or as large as the
     // text in a bold face, where the text is not bold.
     let size = first.quad.edge_height();
+    // A bold line set as large as the text says less of itself than one set
+    // larger: a warning ending in `!`, a total, are bold lines too.
     let short = lines.len() <= SHORT_HEADING_LINES
         && chars <= 120
-        && !text.ends_with(['.', ',', ';', ':', '!'])
-        && !captioned(trimmed)
-        && !priced(&text);
+        && !text.ends_with(['.', ',', ';', ':'])
+        && !captioned(trimmed);
     let set_off = exact
         && short
         && ((body.settled && size > text_height * EXACT_SIZE_CHANGE)
             || (!body.bold
                 && lines.iter().all(|l| l.bold)
-                && size >= text_height * BOLD_HEADING_SIZE));
+                && size >= text_height * BOLD_HEADING_SIZE
+                && !(text.ends_with('!') && urged(&text))
+                && !priced(&text)));
     let large =
         tall && lines.len() <= most_lines && first.text.chars().count() <= 120 && chars <= 240;
     let heading = set_off || large;
-    // A number in front of a large line numbers a chapter, not a list item;
-    // one in front of a line in the text's size, bold or not, an item.
+    // A number in front of a heading numbers a section, not a list item —
+    // unless the next block is numbered too (see `numbered_runs`).
     // A hyphen opens an item as a dash does, spaced from its text: `- Brot`,
     // not `-5 °C`; in a monospaced font it is code's, a YAML list's.
     let hyphen = trimmed.starts_with("- ") && !first.monospaced;
-    if trimmed.starts_with(BULLETS) || hyphen || (numbered(trimmed) && !large) {
+    if trimmed.starts_with(BULLETS)
+        || hyphen
+        || ((numbered(trimmed) || lettered(trimmed)) && !heading)
+    {
         return BlockKind::ListItem;
     }
     if heading {
@@ -2505,21 +2580,85 @@ fn numbered(text: &str) -> bool {
         })
 }
 
+/// Whether a line ending in `!` urges or warns rather than heads: a
+/// sentence of more than five words, one with a colon in it, or one asking
+/// or forbidding — `Please bring your identity card!`, `Do not switch off
+/// …!`. `Save the date!` and `We are hiring!` head what follows.
+fn urged(text: &str) -> bool {
+    let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+    let first = words
+        .first()
+        .map_or("", |w| w.trim_matches(|c: char| !c.is_alphabetic()));
+    words.len() > 5
+        || text.contains(':')
+        || [
+            "please",
+            "do",
+            "don't",
+            "never",
+            "attention",
+            "warning",
+            "caution",
+            "note",
+            "bitte",
+            "achtung",
+            "vorsicht",
+            "hinweis",
+            "warnung",
+            "nicht",
+        ]
+        .contains(&first)
+}
+
+/// Whether a line opens with a list item's letter or roman figure, as
+/// contracts and regulations count: `a)`, `(b)`, `c.`, `(iv)`, `ii.`, `A)`.
+/// A capital with a stop is an initial, `A. Smith`.
+fn lettered(text: &str) -> bool {
+    let Some((mark, rest)) = text.trim_start().split_once(char::is_whitespace) else {
+        return false;
+    };
+    if rest.trim().is_empty() {
+        return false;
+    }
+    let inner = mark.strip_prefix('(').map_or_else(
+        || mark.strip_suffix([')', '.']),
+        |opened| opened.strip_suffix(')'),
+    );
+    let Some(inner) = inner else {
+        return false;
+    };
+    let roman = !inner.is_empty() && inner.len() <= 4 && inner.chars().all(|c| "ivx".contains(c));
+    let letter = inner.chars().count() == 1 && inner.chars().all(|c| c.is_ascii_lowercase())
+        || (inner.chars().count() == 1
+            && inner.chars().all(|c| c.is_ascii_uppercase())
+            && !mark.ends_with('.'));
+    roman || letter
+}
+
 /// Whether a line names an amount after its first word, `Total 1,234.50
-/// EUR`: a total, a price, no heading. A section's number comes first.
+/// EUR`: a figure with cents and a currency, or thousands set apart. A
+/// version or a section's number — `version 2.10` — is none.
 fn priced(text: &str) -> bool {
+    let currency = text.contains(['€', '$', '£'])
+        || text
+            .split(|c: char| !c.is_alphabetic())
+            .any(|word| CURRENCIES.contains(&word));
     text.split_whitespace().skip(1).any(|word| {
         let word = word.trim_matches(|c: char| !c.is_ascii_digit());
         let mut parts = word.rsplitn(2, ['.', ',']);
         let (cents, units) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-        cents.len() == 2
+        let cents_ok = cents.len() == 2
             && cents.chars().all(|c| c.is_ascii_digit())
             && units
                 .chars()
                 .next_back()
-                .is_some_and(|c| c.is_ascii_digit())
+                .is_some_and(|c| c.is_ascii_digit());
+        cents_ok && (currency || units.contains(['.', ',']))
     })
 }
+
+/// Currencies an amount is named in (see [`priced`]).
+const CURRENCIES: &[&str] = &["EUR", "USD", "GBP", "CHF", "Euro", "Dollar"];
 
 /// Whether a line opens a caption: `Figure 3`, `Tabelle 2:`.
 fn captioned(text: &str) -> bool {
@@ -4597,7 +4736,18 @@ mod tests {
 
     #[test]
     fn bullets_become_list_items() {
-        for item in ["• erste Position", "- erste Position"] {
+        for item in [
+            "a) the tenant",
+            "(b) the landlord",
+            "c. the rooms",
+            "(iv) the keys",
+        ] {
+            assert!(lettered(item), "{item}");
+        }
+        for text in ["A. Smith wrote", "i.e. the rooms", "Ab) no", "a)"] {
+            assert!(!lettered(text), "{text}");
+        }
+        for item in ["• erste Position", "- erste Position", "a) erste Position"] {
             let lines = vec![line_at(item, 0.0, 0.0, 100.0, 10.0)];
             let blocks = group_blocks(lines, &LayoutConfig::default());
             assert_eq!(blocks[0].kind, BlockKind::ListItem, "{item}");
