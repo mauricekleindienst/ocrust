@@ -24,6 +24,18 @@ def test_runtime_info_finds_onnxruntime():
     assert "ONNX Runtime" in str(info["onnxruntime_loaded"]), info
 
 
+def test_the_runtime_is_found_without_importing_its_python_binding():
+    """Importing `onnxruntime` loads a second copy of the runtime beside the
+    one the extension loads; on macOS the two clash and recognition reads
+    garbage."""
+    import subprocess
+    import sys
+
+    code = "import sys, ocrust; ocrust.runtime_info(); print('onnxruntime' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False", out.stdout + out.stderr
+
+
 def test_library_is_found_under_every_platform_spelling(tmp_path, monkeypatch):
     """Linux, macOS and Windows version the library's file name differently.
 

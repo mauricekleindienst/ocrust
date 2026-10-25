@@ -7,9 +7,11 @@ before the first call. No system packages, no PATH surgery.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import sys
+from importlib import metadata
 from pathlib import Path
 
 __all__ = [
@@ -75,17 +77,42 @@ def find_onnxruntime() -> Path | None:
         if value and Path(value).exists():
             return Path(value)
 
-    try:
-        import onnxruntime  # noqa: PLC0415  (optional dependency, imported lazily)
-    except Exception:
-        return None
-
-    roots = [Path(p) for p in getattr(onnxruntime, "__path__", [])]
-    for root in roots:
+    for root in _package_dirs("onnxruntime"):
         for directory in (root / "capi", root):
             found = library_in(directory)
             if found is not None:
                 return found
+    return None
+
+
+def _package_dirs(name: str) -> list[Path]:
+    """Where an installed package lives, found without importing it.
+
+    Importing ``onnxruntime`` loads the runtime its Python binding links in;
+    the extension then loads the shared library beside it, a second copy in
+    one process. On macOS the two clash — the runtime's Objective-C classes
+    are defined twice — and recognition reads garbage.
+    """
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ValueError):
+        return []
+    if spec is None or not spec.submodule_search_locations:
+        return []
+    return [Path(p) for p in spec.submodule_search_locations]
+
+
+#: The distributions that install the ``onnxruntime`` package.
+_ORT_DISTRIBUTIONS = ("onnxruntime", "onnxruntime-gpu", "onnxruntime-directml")
+
+
+def _onnxruntime_version() -> str | None:
+    """The installed ``onnxruntime``'s version, read from its metadata."""
+    for distribution in _ORT_DISTRIBUTIONS:
+        try:
+            return metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            continue
     return None
 
 
@@ -125,10 +152,5 @@ def runtime_report() -> dict[str, object]:
         "onnxruntime_dylib": str(dylib) if dylib else None,
         "models_dir": str(models) if models else None,
     }
-    try:
-        import onnxruntime  # noqa: PLC0415
-
-        report["onnxruntime_version"] = onnxruntime.__version__
-    except Exception:
-        report["onnxruntime_version"] = None
+    report["onnxruntime_version"] = _onnxruntime_version()
     return report

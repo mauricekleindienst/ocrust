@@ -194,6 +194,10 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   between them and over a column break, and a page range broken at its dash
   stays whole. A dash at a line's start or end stays a dash in its sentence,
   and a sentence set larger than a page of notes is no heading.
+- **One ONNX Runtime per process**: ocrust finds the `onnxruntime` package's
+  library without importing its Python binding, which loaded a second copy
+  of the runtime; with onnxruntime 1.31 on Apple Silicon the two clashed and
+  text was recognized as garbage.
 - **Short columns, CVs and pull quotes**: a short two-column section is read
   column by column with its heading and the section after it in place, also
   when one column holds a single line; a CV's label of two lines beside its
