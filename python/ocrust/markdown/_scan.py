@@ -1959,44 +1959,53 @@ def _items(lines: list[Line], columns: _Columns) -> list[_Item]:
 
 def _item_ends(group: list[Line], line: Line, edge: float, rtl: bool) -> bool:
     """Whether the item `group` holds ends at its last line, so that `line`,
-    opening on a number or a letter, opens the next: one counted as the
-    item is — a letter after a letter — after a stop, `; and` or a short
-    line; any other after a short line ending its sentence. A line wrapped
-    before `15. Mai` or an inline `(b)` goes on its item."""
+    opening on a number or a letter, opens the next — by where the count
+    stands. Left of the item's marker it goes back out to an outer list; at
+    the marker it opens the next item, counted on (`2.` after `1.`) or after
+    a stop, `; and` or a short line; set in, where the item's own lines go
+    on, it opens a list under the item only counting from its first — `a.`,
+    `i.`, `1.` — after an item that ended. A wrapped `3. Quartal`, `15. Mai`
+    or inline `(b)` goes on its item."""
     before = group[-1]
     text = before.text.strip()
     if re.search(r"(?:^|\s)[^\W\d_]\.$", text):
         # `s.` over `o. unter …`: an abbreviation's first letter, broken.
         return False
-    height = before.box.height
-    if rtl:
-        nested = line.box.x1 < before.box.x1 - 0.5 * height and (
-            line.box.x1 < group[0].box.x1 - 1.5 * height
-        )
-    else:
-        nested = line.box.x0 > before.box.x0 + 0.5 * height and (
-            line.box.x0 > group[0].box.x0 + 1.5 * height
-        )
-    if nested:
-        # A count set in past the line before and the item's own text is a
-        # nested item's: `1.` under a bullet.
+    if text.endswith(":"):
         return True
+    height = before.box.height
     opening = group[0].text
+    room = before.box.x0 - edge if rtl else edge - before.box.x1
+    short = room > _first_word_width(line) + 0.35 * height
+    ended = short or bool(_ITEM_END.search(text))
+    listed = bool(_BULLET.match(opening) or _ENUMERATOR.match(opening) or _LETTERED.match(opening))
+    if not listed:
+        return short and text.endswith((".", ";", "!", "?"))
+    at = (group[0].box.x1 - line.box.x1) if rtl else (line.box.x0 - group[0].box.x0)
+    if at < -_MARKER_ALIGN * height:
+        return True
+    then = _count_of(line.text)
+    if at > _MARKER_ALIGN * height:
+        return (then == 1 or bool(_ROMAN_ONE.match(line.text))) and ended
     kin = bool(
         (_ENUMERATOR.match(opening) and _ENUMERATOR.match(line.text))
         or (_LETTERED.match(opening) and _LETTERED.match(line.text))
     )
-    room = before.box.x0 - edge if rtl else edge - before.box.x1
-    short = room > _first_word_width(line) + 0.35 * before.box.height
-    if kin:
-        # The next count opens the next item, however its lines end: `2.`
-        # after `1.`, `b)` after `a)`; `15. Mai` in item 2 is a date.
-        first, then = _count_of(opening), _count_of(line.text)
-        following = then is not None and (
-            (first is not None and then == first + 1) or (_ROMAN_ONE.match(opening) and then == 2)
+    first = _count_of(opening)
+    following = (
+        kin
+        and then is not None
+        and (
+            (first is not None and then == first + 1)
+            or (bool(_ROMAN_ONE.match(opening)) and then == 2)
         )
-        return following or short or bool(_ITEM_END.search(text))
-    return text.endswith(":") or (short and text.endswith((".", ";", "!", "?")))
+    )
+    return following or ended
+
+
+#: How far off a list's marker, in line heights, the next item's marker may
+#: stand and still be at its level.
+_MARKER_ALIGN = 0.3
 
 
 _MARK = re.compile(r"^\s*\(?([0-9]{1,3}|[A-Za-z]|[ivx]{2,4})[.)]")

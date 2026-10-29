@@ -1208,7 +1208,10 @@ fn with_its_item(mut row: Vec<Candidate>) -> Vec<Candidate> {
     const BULLETS: &[&str] = &[
         "•", "◦", "▪", "▫", "●", "○", "■", "□", "‣", "∙", "·", "-", "–", "*",
     ];
-    if row.len() >= 2 && BULLETS.contains(&row[0].cell.text.trim()) {
+    // So is a count set apart by a tab — Word's `1.<tab>Budget` — where it
+    // and the item's text are all the line holds.
+    let counted = row.len() == 2 && list_count(row[0].cell.text.trim());
+    if row.len() >= 2 && (BULLETS.contains(&row[0].cell.text.trim()) || counted) {
         let bullet = row.remove(0);
         let item = &mut row[0];
         item.cell.text = format!("{} {}", bullet.cell.text.trim(), item.cell.text);
@@ -1216,6 +1219,20 @@ fn with_its_item(mut row: Vec<Candidate>) -> Vec<Candidate> {
         item.words.splice(0..0, bullet.words);
     }
     row
+}
+
+/// Whether a cell holds a list item's count and nothing else: `1.`, `2)`,
+/// `a.`, `(b)`, `iv.`.
+fn list_count(text: &str) -> bool {
+    let inner = text.strip_prefix('(').map_or_else(
+        || text.strip_suffix(['.', ')']),
+        |opened| opened.strip_suffix(')'),
+    );
+    inner.is_some_and(|inner| {
+        (!inner.is_empty() && inner.len() <= 3 && inner.chars().all(|c| c.is_ascii_digit()))
+            || (inner.chars().count() == 1 && inner.chars().all(|c| c.is_ascii_alphabetic()))
+            || (!inner.is_empty() && inner.len() <= 4 && inner.chars().all(|c| "ivx".contains(c)))
+    })
 }
 
 /// A run's rows whole: each with the cells of the lines that carry it on,

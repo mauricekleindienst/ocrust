@@ -2011,6 +2011,12 @@ fn group(
     if lines.is_empty() {
         return Vec::new();
     }
+    let mut lines = lines;
+    if exact {
+        for line in &mut lines {
+            o_bullet(line);
+        }
+    }
     let scale = median_height(&lines);
     let text_height = median_text_height(&lines);
     let leading = if exact { usual_leading(&lines) } else { None };
@@ -2038,7 +2044,6 @@ fn group(
     };
 
     let mut blocks: Vec<Block> = Vec::new();
-    let mut lines = lines;
     // The detector promises runs in order that never overlap; a run that
     // breaks the promise is left as text rather than trusted with indices.
     let mut reach = 0usize;
@@ -2246,21 +2251,35 @@ fn paragraphs(
                         .split_whitespace()
                         .next()
                         .is_some_and(|m| m.trim_matches(['(', ')', '.']) == "i");
-                    let next = count_of(opening)
-                        .is_some_and(|n| count_of(&line.text) == Some(n + 1))
-                        || (roman_one && count_of(&line.text) == Some(2));
-                    // A count set in past the line before and the item's
-                    // own text is a nested item's: `1.` under a bullet.
-                    let nested = line.bbox.x0 > prev.bbox.x0 + scale * 0.5
-                        && line.bbox.x0 > current[0].bbox.x0 + scale * NESTED_INDENT;
-                    before.ends_with(':')
-                        || nested
-                        || (kin && (next || short || ends_an_item(before)))
-                        // Elsewhere — running text, an item counted `(a)`,
-                        // `(b)` inline — after a short line ending its
-                        // sentence: `am` over `22. Bundesliga`, `guests, and`
-                        // over `(c) not keep …` go on.
-                        || (short && before.ends_with(['.', ';', '!', '?']))
+                    let count = count_of(&line.text);
+                    let next = count_of(opening).is_some_and(|n| count == Some(n + 1))
+                        || (roman_one && count == Some(2));
+                    let listed = strip_bullet(opening).len() < opening.trim_start().len()
+                        || numbered(opening)
+                        || lettered(opening);
+                    let ended = short || ends_an_item(before);
+                    // Where the count stands says which item it opens. Left
+                    // of the block's marker it goes back out to an outer
+                    // list; at the marker it opens the next item of this one;
+                    // set in, where the item's own lines go on, it opens a
+                    // list under the item only counting from its first —
+                    // `a.`, `i.`, `1.` — after an item that ended: a wrapped
+                    // `3. Quartal` or `(b)` there is the item's text.
+                    let tolerance = scale * MARKER_ALIGN;
+                    let at = line.bbox.x0 - current[0].bbox.x0;
+                    if before.ends_with(':') || (listed && at < -tolerance) {
+                        true
+                    } else if listed && at > tolerance {
+                        (count == Some(1) || line_roman_one(&line.text)) && ended
+                    } else if kin {
+                        next || ended
+                    } else if listed {
+                        ended
+                    } else {
+                        // Running text, an inline `(c)` after `guests, and`, a
+                        // date after `am`: a short line ending its sentence.
+                        short && before.ends_with(['.', ';', '!', '?'])
+                    }
                 };
                 gap > scale * cfg.line_gap_factor
                     || !shares_column
@@ -2295,11 +2314,13 @@ fn paragraphs(
 /// item where a numbered block stands right before or after it: a list of
 /// bold items, `1. Plan`, `2. Build`. A section's heading heads its text.
 fn numbered_runs(blocks: &mut [Block], text_height: f32) {
-    // Another heading so numbered: a list's own items in the text's weight
+    // Another numbered block set bold — a heading so numbered, or an item
+    // with its bold title over its text: a list's items in the text's weight
     // stand under or over a section's numbered heading.
     let numbered_at = |blocks: &[Block], i: usize| {
         blocks.get(i).is_some_and(|b| {
-            b.kind == BlockKind::Heading && b.lines.first().is_some_and(|l| numbered(&l.text))
+            matches!(b.kind, BlockKind::Heading | BlockKind::ListItem)
+                && b.lines.first().is_some_and(|l| l.bold && numbered(&l.text))
         })
     };
     let items: Vec<usize> = (0..blocks.len())
@@ -2419,7 +2440,7 @@ fn bounds_of(lines: &[Line]) -> Rect {
 ///
 /// Shared with the Markdown exporter so that the classifier and the renderer can
 /// never disagree about what a bullet is.
-pub(crate) const BULLETS: [char; 6] = ['•', '‣', '·', '–', '—', '*'];
+pub(crate) const BULLETS: [char; 7] = ['•', '◦', '‣', '·', '–', '—', '*'];
 
 /// Strips one leading bullet and the space behind it.
 ///
@@ -2670,9 +2691,41 @@ fn lettered(text: &str) -> bool {
     roman || letter
 }
 
-/// How far past an item's first line, in line heights, a nested item is
-/// set at least: further than the item's own lines go on, a marker's width.
-const NESTED_INDENT: f32 = 1.5;
+/// Word's second level of bullets, an `o` in Courier New set apart by a
+/// tab, written as the white bullet it stands for — an `o` opening a
+/// sentence stands a word space from the next.
+fn o_bullet(line: &mut Line) {
+    let height = line.bbox.height();
+    let apart = match (line.words.first(), line.words.get(1)) {
+        (Some(o), Some(next)) => o.text == "o" && next.bbox.x0 - o.bbox.x1 > O_BULLET_GAP * height,
+        _ => false,
+    };
+    if !apart || !line.text.trim_start().starts_with("o ") {
+        return;
+    }
+    let at = line.text.find('o').unwrap_or(0);
+    line.text.replace_range(at..at + 1, "◦");
+    line.words[0].text = "◦".into();
+    if let Some(first) = line.segments.first_mut().filter(|s| s.text.trim() == "o") {
+        first.text = "◦".into();
+    }
+}
+
+/// How far, in line heights, Word's `o` bullet stands from its text at
+/// least: a tab, where a word space is a quarter of a line.
+const O_BULLET_GAP: f32 = 0.6;
+
+/// How far off a list's marker, in line heights, the next item's marker
+/// may stand and still be at its level.
+const MARKER_ALIGN: f32 = 0.3;
+
+/// Whether a line opens on the roman figure one, `i.` or `(i)`: a sub-list's
+/// first item as often as the ninth letter's.
+fn line_roman_one(text: &str) -> bool {
+    text.split_whitespace()
+        .next()
+        .is_some_and(|m| m.trim_matches(['(', ')', '.']) == "i")
+}
 
 /// The count a line's list marker stands for: `3.` 3, `c)` 3, `(iv)` 4.
 fn count_of(text: &str) -> Option<u32> {

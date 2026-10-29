@@ -266,8 +266,9 @@ def _columned(line: str) -> bool:
     return bool(_COLUMN_GAP.search(line))
 
 
-#: A line opening on a label and a colon: `To:`, `Date:`, `Attendees:`.
-_KEY_VALUE = re.compile(r"^\s*[^\W\d][\w .\-/()]{0,30}:(?:\s+\S|\s*$)")
+#: A line opening on a label and a colon: `To:`, `Date:`, `Attendees:` —
+#: a capital and four words at most, no stop: `week. Next steps:` is prose.
+_KEY_VALUE = re.compile(r"^\s*[A-ZÄÖÜ][\w\-/()]*(?: [\w\-/()]+){0,3}:(?:\s+\S|\s*$)")
 #: A line running on leader dots or rules to a page number: a contents line.
 _LEADERS = re.compile(r"(?:\.\s?){3,}\s*\d+\s*$|_{3,}\s*\d+\s*$|…\s*\d+\s*$")
 
@@ -278,8 +279,11 @@ def _records(lines: list[str]) -> bool:
     most of them begin with the same word, or with a number of the same
     shape (a date, a time), or open on a label and a colon, or run on leader
     dots to a page number."""
-    for shape in (_KEY_VALUE, _LEADERS):
-        if len(lines) >= 2 and sum(bool(shape.search(line)) for line in lines) >= 0.8 * len(lines):
+    # Header lines come three and more, `From:`, `To:`, `Subject:`; two may be
+    # a sentence wrapped before `Next steps:`.
+    for shape, least in ((_KEY_VALUE, 3), (_LEADERS, 2)):
+        matched = sum(bool(shape.search(line)) for line in lines)
+        if len(lines) >= least and matched >= 0.8 * len(lines):
             return True
     if len(lines) < 4:
         return False

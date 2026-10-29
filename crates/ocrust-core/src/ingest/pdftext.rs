@@ -656,6 +656,19 @@ struct Run {
     tracking: f64,
 }
 
+/// Whether a word is a list item's marker: `1.`, `2)`, `a.`, `(b)`, `iv.`.
+fn list_marker(word: &str) -> bool {
+    let inner = word.strip_prefix('(').map_or_else(
+        || word.strip_suffix(['.', ')']),
+        |opened| opened.strip_suffix(')'),
+    );
+    inner.is_some_and(|inner| {
+        (!inner.is_empty() && inner.len() <= 3 && inner.chars().all(|c| c.is_ascii_digit()))
+            || (inner.chars().count() == 1 && inner.chars().all(|c| c.is_ascii_alphabetic()))
+            || (!inner.is_empty() && inner.len() <= 4 && inner.chars().all(|c| "ivx".contains(c)))
+    })
+}
+
 /// How large a letter is set, against the largest of its word, to count
 /// toward how tall the word stands: a raised mark is smaller.
 const RAISED_SIZE: f64 = 0.9;
@@ -1174,9 +1187,14 @@ impl Run {
                 (fixed + usize::from(m), all + 1)
             });
         let monospaced = letters > 0 && fixed as f32 >= MONOSPACED_SHARE * letters as f32;
-        // Set in a bold face: nearly every letter or figure of it.
-        let (heavy, written) = self
-            .pieces
+        // Set in a bold face: nearly every letter or figure of it, a list's
+        // marker aside — a browser draws `1.` before a bold item in the
+        // text's weight.
+        let marker = spans
+            .first()
+            .filter(|(range, _, _)| list_marker(&read(range.clone())))
+            .map_or(0, |(range, _, _)| range.end);
+        let (heavy, written) = self.pieces[marker..]
             .iter()
             .filter_map(|piece| match piece {
                 Piece::Char(letter) if letter.text.chars().any(char::is_alphanumeric) => {

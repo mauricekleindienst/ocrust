@@ -273,6 +273,16 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   with empty cells stays under its table. In plain text, lists lettered
   `a)` or bulleted with Outlook's `o` are lists, and mail header lines and
   a table of contents with leader dots keep a line each.
+- **Lists by where their markers stand**: whether a counted line opens an
+  item is read from where its marker stands against the list's first
+  marker — further left it closes a sub-list (`2.` after `a.`, `b.`),
+  under the item's text it is a word of the item (`im` / `3. Quartal`),
+  set in it opens a sub-list only where a count starts over. Word's `o`
+  sub-bullets and numbers set off by a tab (`1.` → `Budget cut`) are list
+  items, bold items over their regular markers stay a list rather than
+  headings, and a line counted on its own cell stays with its text. In
+  plain text, lines with a colon in them are kept apart only where most of
+  at least three lines are `Key: value` pairs.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and
