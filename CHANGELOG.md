@@ -283,6 +283,18 @@ PDF is now read from its own text: exact, and in milliseconds a page.
   headings, and a line counted on its own cell stays with its text. In
   plain text, lines with a colon in them are kept apart only where most of
   at least three lines are `Key: value` pairs.
+- **Lists set without space, and columns a heading runs over**: a list set
+  right under a one-line lead-in, or set in under one ending in no stop, is
+  a list; the paragraph set right under a list, at its marker or left of
+  it, is a paragraph of its own; a sub-list counting on from the item
+  before (`(c)` under `2.`) and items counted in roman figures set right
+  (`viii.`, `ix.`) are items, and nest by where their text starts. An
+  item's count set lighter than its bold title keeps the item a list item
+  with its description, and a section's numbered heading over such a list
+  stays a heading; a table counted down its first column (`No. | Task`)
+  stays a table. A heading set larger than its narrow column, run on over
+  the gutter, no longer turns the columns into a table. In plain text, two
+  header lines such as `Subject:` and `Date:` keep a line each.
 - **Formulas from office documents**: Word's and PowerPoint's equations
   become TeX — fractions, roots, sums and integrals with their limits,
   matrices, brackets — instead of being flattened into their characters, and

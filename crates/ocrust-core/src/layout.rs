@@ -1434,55 +1434,104 @@ fn column_corridors(lines: &[Line], sheet: Sheet<'_>, cfg: &LayoutConfig) -> Vec
         (cfg.column_corridor_gap_factor, cfg.column_gap_min_fraction)
     };
     let min_gap = (sheet.scale * factor).max(width * fraction);
-    let gaps = find_gaps(lines, min_gap, |l| (l.bbox.x0, l.bbox.x1));
-    // The widest corridor first, then the two widest together, and so on: a page
-    // set in three columns has two corridors, and neither of them alone leaves
-    // columns of text on both sides of it.
-    for count in 1..=gaps.len().min(cfg.column_max_corridors) {
-        let mut splits: Vec<f32> = gaps[..count].iter().map(|(split, _)| *split).collect();
-        splits.sort_by(|a, b| cmp_f32(*a, *b));
-        let columns = slice_at(lines, &splits);
-        // A sidebar beside the text is far narrower than it, and sets its
-        // lines on the text's baselines where both use one size and leading.
-        // On a page read from its own text it is still told from a table:
-        // the page draws the one column and then the other, where a table
-        // draws its rows across its gutters; and each breaks its paragraphs
-        // where the other goes on, where a row's cells wrap side by side.
-        // And a sidebar is running text, as the text beside it is. A list's
-        // prices, dates or values, drawn after its items, break where an
-        // item wraps too, but hold a figure a line: they are the list's
-        // second column, each beside its item. Nor is there a sidebar where
-        // the text runs on from one side to the other: a paragraph beside a
-        // box floated left whose last line goes on under the box, at the
-        // margin, leaves a gutter down to that line.
-        let sidebar = || {
-            drawn_in_turn(lines, &splits)
-                && breaks_of_its_own(&columns, sheet.scale)
-                && columns
-                    .iter()
-                    .all(|column| running_text(column.iter().copied()))
-                && !runs_on_across(lines, &splits, sheet.scale)
-        };
-        // Nor are two sides as wide as each other columns where the text
-        // runs on from the one to the other: a box floated into the head of
-        // a paragraph, its last line gone on under the box.
-        let ok = columns.iter().all(|column| reads_as_column(column, cfg))
-            && (evenly_wide(&columns, cfg) || (sheet.exact && sidebar()))
-            && (!sheet.exact
-                || (read_in_turn(lines, &splits)
-                    && !labels_and_values(&columns, sheet.scale, cfg)
-                    && !runs_on_across(lines, &splits, sheet.scale)));
-        log::debug!(
-            "corridors {:?} of {width:.0}: {:?} lines, columns {ok}",
-            splits.iter().map(|s| *s as i32).collect::<Vec<_>>(),
-            columns.iter().map(Vec::len).collect::<Vec<_>>(),
-        );
-        if ok {
-            return splits;
+    let try_gaps = |gaps: &[(f32, f32)]| -> Option<Vec<f32>> {
+        // The widest corridor first, then the two widest together, and so on: a page
+        // set in three columns has two corridors, and neither of them alone leaves
+        // columns of text on both sides of it.
+        for count in 1..=gaps.len().min(cfg.column_max_corridors) {
+            let mut splits: Vec<f32> = gaps[..count].iter().map(|(split, _)| *split).collect();
+            splits.sort_by(|a, b| cmp_f32(*a, *b));
+            let columns = slice_at(lines, &splits);
+            // A sidebar beside the text is far narrower than it, and sets its
+            // lines on the text's baselines where both use one size and leading.
+            // On a page read from its own text it is still told from a table:
+            // the page draws the one column and then the other, where a table
+            // draws its rows across its gutters; and each breaks its paragraphs
+            // where the other goes on, where a row's cells wrap side by side.
+            // And a sidebar is running text, as the text beside it is. A list's
+            // prices, dates or values, drawn after its items, break where an
+            // item wraps too, but hold a figure a line: they are the list's
+            // second column, each beside its item. Nor is there a sidebar where
+            // the text runs on from one side to the other: a paragraph beside a
+            // box floated left whose last line goes on under the box, at the
+            // margin, leaves a gutter down to that line.
+            let sidebar = || {
+                drawn_in_turn(lines, &splits)
+                    && breaks_of_its_own(&columns, sheet.scale)
+                    && columns
+                        .iter()
+                        .all(|column| running_text(column.iter().copied()))
+                    && !runs_on_across(lines, &splits, sheet.scale)
+            };
+            // Nor are two sides as wide as each other columns where the text
+            // runs on from the one to the other: a box floated into the head of
+            // a paragraph, its last line gone on under the box.
+            let ok = columns.iter().all(|column| reads_as_column(column, cfg))
+                && (evenly_wide(&columns, cfg) || (sheet.exact && sidebar()))
+                && (!sheet.exact
+                    || (read_in_turn(lines, &splits)
+                        && !labels_and_values(&columns, sheet.scale, cfg)
+                        && !runs_on_across(lines, &splits, sheet.scale)));
+            log::debug!(
+                "corridors {:?} of {width:.0}: {:?} lines, columns {ok}",
+                splits.iter().map(|s| *s as i32).collect::<Vec<_>>(),
+                columns.iter().map(Vec::len).collect::<Vec<_>>(),
+            );
+            if ok {
+                return Some(splits);
+            }
+        }
+        None
+    };
+    if let Some(splits) = try_gaps(&find_gaps(lines, min_gap, |l| (l.bbox.x0, l.bbox.x1))) {
+        return splits;
+    }
+    // A heading set larger than its narrow column, or a long word, runs on
+    // over the gutter into the next column: the corridor is there for all
+    // lines but those few, each of them mostly on one side of it. A title
+    // set across the columns stands on both.
+    let most = (lines.len() / OVERFLOWING_SHARE).max(2);
+    try_gaps(&crossed_gaps(lines, min_gap, most)).unwrap_or_default()
+}
+
+/// Bands down the page wider than `min_gap` that at most `most` lines run
+/// over, each standing mostly on one side of the band's middle: the split
+/// there and the band's width, widest first. Only bands between lines count,
+/// not the margins.
+fn crossed_gaps(lines: &[Line], min_gap: f32, most: usize) -> Vec<(f32, f32)> {
+    let mut edges: Vec<(f32, i32)> = lines
+        .iter()
+        .flat_map(|l| [(l.bbox.x0, 1), (l.bbox.x1, -1)])
+        .collect();
+    edges.sort_by(|a, b| cmp_f32(a.0, b.0).then(a.1.cmp(&b.1)));
+    let (mut over, mut open, mut inside) = (0i32, None, false);
+    let mut found: Vec<(f32, f32)> = Vec::new();
+    for (x, step) in edges {
+        over += step;
+        if over as usize > most {
+            if let Some(start) = open.take() {
+                if x - start > min_gap {
+                    found.push((start + (x - start) * 0.5, x - start));
+                }
+            }
+            inside = true;
+        } else if inside && open.is_none() {
+            open = Some(x);
         }
     }
-    Vec::new()
+    found.retain(|(split, _)| {
+        lines
+            .iter()
+            .filter(|l| l.bbox.x0 < *split && l.bbox.x1 > *split)
+            .all(|l| (split - l.bbox.x0).min(l.bbox.x1 - split) < l.bbox.width() / 3.0)
+    });
+    found.sort_by(|a, b| cmp_f32(b.1, a.1));
+    found
 }
+
+/// How many of a page's lines, one in so many at most, may run on over a
+/// gutter: a heading or two, a long word.
+const OVERFLOWING_SHARE: usize = 20;
 
 /// Which column a line falls in, counting the corridors to its left.
 fn column_of(splits: &[f32], line: &Line) -> usize {
@@ -1862,13 +1911,17 @@ const STACKED_OVERLAP: f32 = 0.25;
 /// Joins boxes of one baseline group into a single line, left to right.
 fn join_group(mut group: Vec<Line>) -> Option<Line> {
     let monospaced = group.iter().all(|line| line.monospaced);
-    let bold = group.iter().all(|line| line.bold);
     match group.len() {
         0 => return None,
         1 => return group.pop(),
         _ => {}
     }
     group.sort_by(|a, b| cmp_f32(a.bbox.x0, b.bbox.x0));
+    // A list's count set apart by a tab before a bold title, Word's
+    // `1.<tab>Planning`, is the item's marker in the text's weight.
+    let marker = !group[0].bold && crate::table::list_count(group[0].text.trim());
+    let bold = group.iter().skip(usize::from(marker)).all(|line| line.bold);
+    let light_marker = (marker && bold) || group[0].light_marker;
 
     let mut text = String::new();
     let mut bbox = group[0].bbox;
@@ -1924,6 +1977,7 @@ fn join_group(mut group: Vec<Line>) -> Option<Line> {
         segments,
         monospaced,
         bold,
+        light_marker,
     })
 }
 
@@ -2159,6 +2213,19 @@ fn paragraphs(
     let mut blocks: Vec<Block> = Vec::new();
     let mut current: Vec<Line> = Vec::new();
 
+    // The column's lines of the text's size, to tell where its edge is.
+    let column: Vec<Rect> = lines.iter().map(|l| l.bbox).collect();
+    let column_edge = |prev: &Line| {
+        let height = prev.bbox.height();
+        column
+            .iter()
+            .filter(|b| {
+                b.horizontal_overlap(&prev.bbox) > 0.0
+                    && (b.height() - height).abs() <= EXACT_SIZE_STEP * b.height().max(height)
+            })
+            .map(|b| b.x1)
+            .fold(prev.bbox.x1, f32::max)
+    };
     let mut lines = std::collections::VecDeque::from(lines);
     while let Some(line) = lines.pop_front() {
         let starts_new = match current.last() {
@@ -2198,10 +2265,13 @@ fn paragraphs(
                     // under the item's text past its marker; a numbered
                     // heading's text starts where its number does.
                     let opening = &current[0].text;
-                    let item = (strip_bullet(opening).len() < opening.trim_start().len()
+                    // An item's count set lighter than its bold title says
+                    // the same, wherever its description is set.
+                    let item = ((strip_bullet(opening).len() < opening.trim_start().len()
                         || numbered(opening)
                         || lettered(opening))
-                        && line.bbox.x0 > current[0].bbox.x0 + scale * 0.5;
+                        && line.bbox.x0 > current[0].bbox.x0 + scale * 0.5)
+                        || current[0].light_marker;
                     // A bold run that is the block so far over a line that
                     // opens a sentence is no phrase going on: a question
                     // over its answer, a CV's title over its description.
@@ -2228,58 +2298,70 @@ fn paragraphs(
                 // So does a number or a letter, `2.`, `b)`, after a lead-in
                 // ending in a colon, a line ending short, or another item:
                 // after a full line it goes on a sentence, `am` / `2. Juni`.
+                let opening = &current[0];
+                let listed = strip_bullet(&opening.text).len() < opening.text.trim_start().len()
+                    || numbered(&opening.text)
+                    || lettered(&opening.text);
+                // The line before ends short where the column's edge has room
+                // for the line's first unit — a number bound to its word by a
+                // no-break space, `22. Bundesliga`, goes with it. The column's
+                // lines say where its edge is: a block of one line has none of
+                // its own.
+                let before = prev.text.trim_end();
+                let short =
+                    prev.bbox.x1 + first_unit_width(&line) + scale * WRAP_SPACE < column_edge(prev);
+                let ended = short || ends_an_item(before);
+                let tolerance = scale * MARKER_ALIGN;
+                let at = marker_offset(opening, &line, tolerance);
                 let counted = (numbered(&line.text) || lettered(&line.text)) && {
                     // Counted as the item the block opens with — a letter
                     // after a letter, a number after a number.
-                    let opening = &current[0].text;
-                    let kin = (numbered(opening) && numbered(&line.text))
-                        || (lettered(opening) && lettered(&line.text));
-                    let edge = current
-                        .iter()
-                        .chain([&line])
-                        .map(|l| l.bbox.x1)
-                        .fold(f32::MIN, f32::max);
-                    // The item before ends where its line does: in a stop or
-                    // `; and`, or short of the column — a number bound to its
-                    // word by a no-break space, `22. Bundesliga`, goes with it.
-                    let before = prev.text.trim_end();
-                    let short = prev.bbox.x1 + first_unit_width(&line) + scale * WRAP_SPACE < edge;
+                    let kin = (numbered(&opening.text) && numbered(&line.text))
+                        || (lettered(&opening.text) && lettered(&line.text));
                     // The next count opens the next item, however its lines
                     // end: `2.` after `1.`, `b)` after `a)`; `15. Mai` in
                     // item 2 is a date.
-                    let roman_one = opening
-                        .split_whitespace()
-                        .next()
-                        .is_some_and(|m| m.trim_matches(['(', ')', '.']) == "i");
                     let count = count_of(&line.text);
-                    let next = count_of(opening).is_some_and(|n| count == Some(n + 1))
-                        || (roman_one && count == Some(2));
-                    let listed = strip_bullet(opening).len() < opening.trim_start().len()
-                        || numbered(opening)
-                        || lettered(opening);
-                    let ended = short || ends_an_item(before);
+                    let next = count_of(&opening.text).is_some_and(|n| count == Some(n + 1))
+                        || (line_roman_one(&opening.text) && count == Some(2));
                     // Where the count stands says which item it opens. Left
                     // of the block's marker it goes back out to an outer
                     // list; at the marker it opens the next item of this one;
                     // set in, where the item's own lines go on, it opens a
-                    // list under the item only counting from its first —
-                    // `a.`, `i.`, `1.` — after an item that ended: a wrapped
-                    // `3. Quartal` or `(b)` there is the item's text.
-                    let tolerance = scale * MARKER_ALIGN;
-                    let at = line.bbox.x0 - current[0].bbox.x0;
+                    // list under the item counting from its first, `a.`,
+                    // `i.`, `1.`, after an item that ended, or counted on in
+                    // another kind, `(c)` under `2.`, after a line ending
+                    // short or ending its sentence: a wrapped `3. Quartal`
+                    // there is the item's text, as `(c)` after `guests, and`.
                     if before.ends_with(':') || (listed && at < -tolerance) {
                         true
                     } else if listed && at > tolerance {
-                        (count == Some(1) || line_roman_one(&line.text)) && ended
+                        let first = count == Some(1) || line_roman_one(&line.text);
+                        (first && ended)
+                            || (!kin
+                                && (short
+                                    || (ends_an_item(before) && before.ends_with(['.', '!', '?']))))
                     } else if kin {
                         next || ended
                     } else if listed {
                         ended
                     } else {
                         // Running text, an inline `(c)` after `guests, and`, a
-                        // date after `am`: a short line ending its sentence.
-                        short && before.ends_with(['.', ';', '!', '?'])
+                        // date after `am`: a short line ending its sentence,
+                        // or a list set in under its lead-in.
+                        short && (before.ends_with(['.', ';', '!', '?']) || at > tolerance)
                     }
+                };
+                // A line set further left than an item's marker, after the
+                // item ended, is out of the list: the paragraph after it,
+                // set without space between. So is one set at the marker
+                // after a line ending short: an item's own lines go on full.
+                let outdented = listed && !counted && {
+                    let from = line.bbox.x0 - opening.bbox.x0;
+                    // An item's bold title, its count set lighter, goes on
+                    // in its description wherever that is set.
+                    let titled = current.len() == 1 && opening.light_marker;
+                    (from < -tolerance && ended) || (from <= tolerance && short && !titled)
                 };
                 gap > scale * cfg.line_gap_factor
                     || !shares_column
@@ -2288,6 +2370,7 @@ fn paragraphs(
                     || reweighted
                     || bullet
                     || counted
+                    || outdented
             }
         };
         if starts_new {
@@ -2317,11 +2400,27 @@ fn numbered_runs(blocks: &mut [Block], text_height: f32) {
     // Another numbered block set bold — a heading so numbered, or an item
     // with its bold title over its text: a list's items in the text's weight
     // stand under or over a section's numbered heading.
-    let numbered_at = |blocks: &[Block], i: usize| {
-        blocks.get(i).is_some_and(|b| {
-            matches!(b.kind, BlockKind::Heading | BlockKind::ListItem)
-                && b.lines.first().is_some_and(|l| l.bold && numbered(&l.text))
-        })
+    // Counted on from it, its number standing where the other's does: a
+    // section's `1. Next steps` over a list of its own counting from `1.`, set
+    // in, heads it.
+    let numbered_at = |blocks: &[Block], i: usize, j: usize| {
+        let (Some(heading), Some(other)) = (blocks[i].lines.first(), blocks.get(j)) else {
+            return false;
+        };
+        let (first, then) = if i < j { (i, j) } else { (j, i) };
+        matches!(other.kind, BlockKind::Heading | BlockKind::ListItem)
+            && other.lines.first().is_some_and(|l| {
+                l.bold
+                    && numbered(&l.text)
+                    && marker_offset(heading, l, text_height * MARKER_ALIGN).abs()
+                        <= text_height * MARKER_ALIGN
+            })
+            && blocks[first]
+                .lines
+                .first()
+                .and_then(|l| count_of(&l.text))
+                .map(|n| n + 1)
+                == blocks[then].lines.first().and_then(|l| count_of(&l.text))
     };
     let items: Vec<usize> = (0..blocks.len())
         .filter(|&i| {
@@ -2330,7 +2429,7 @@ fn numbered_runs(blocks: &mut [Block], text_height: f32) {
                 && block.lines.first().is_some_and(|l| {
                     numbered(&l.text) && l.quad.edge_height() <= text_height * EXACT_HEADING_FACTOR
                 })
-                && ((i > 0 && numbered_at(blocks, i - 1)) || numbered_at(blocks, i + 1))
+                && ((i > 0 && numbered_at(blocks, i, i - 1)) || numbered_at(blocks, i, i + 1))
         })
         .collect();
     for i in items {
@@ -2597,9 +2696,12 @@ fn classify_block(
     // A hyphen opens an item as a dash does, spaced from its text: `- Brot`,
     // not `-5 °C`; in a monospaced font it is code's, a YAML list's.
     let hyphen = trimmed.starts_with("- ") && !first.monospaced;
+    // A count set lighter than the bold title after it is a list's: a
+    // heading's number is set in the heading's face.
     if trimmed.starts_with(BULLETS)
         || hyphen
-        || ((numbered(trimmed) || lettered(trimmed)) && !heading)
+        || ((numbered(trimmed) || lettered(trimmed))
+            && (!heading || (first.light_marker && !large)))
     {
         return BlockKind::ListItem;
     }
@@ -2718,6 +2820,29 @@ const O_BULLET_GAP: f32 = 0.6;
 /// How far off a list's marker, in line heights, the next item's marker
 /// may stand and still be at its level.
 const MARKER_ALIGN: f32 = 0.3;
+
+/// How far right of the list marker `opening` starts on `line`'s stands:
+/// nothing where the two markers end together, or their texts start
+/// together, within `tolerance` — a browser sets `ix.` right-aligned under
+/// `viii.`.
+fn marker_offset(opening: &Line, line: &Line, tolerance: f32) -> f32 {
+    let marked = strip_bullet(&opening.text).len() < opening.text.trim_start().len()
+        || numbered(&opening.text)
+        || lettered(&opening.text);
+    let together = |a: Option<&Word>, b: Option<&Word>, x: fn(&Word) -> f32| {
+        a.zip(b)
+            .is_some_and(|(a, b)| (x(a) - x(b)).abs() <= tolerance)
+    };
+    let (o, l) = (&opening.words, &line.words);
+    if marked
+        && (together(o.first(), l.first(), |w| w.bbox.x1)
+            || together(o.get(1), l.get(1), |w| w.bbox.x0))
+    {
+        0.0
+    } else {
+        line.bbox.x0 - opening.bbox.x0
+    }
+}
 
 /// Whether a line opens on the roman figure one, `i.` or `(i)`: a sub-list's
 /// first item as often as the ninth letter's.
@@ -2861,8 +2986,13 @@ impl Body {
             .iter()
             .filter(|l| (l.quad.edge_height() - text_height).abs() <= 0.1 * text_height)
             .collect();
+        // Bold where most of its letters are: a list's short bold titles over
+        // their descriptions leave the text as it is.
+        let letters = |l: &Line| l.text.chars().filter(|c| c.is_alphanumeric()).count();
+        let heavy: usize = body.iter().filter(|l| l.bold).map(|l| letters(l)).sum();
+        let all: usize = body.iter().map(|l| letters(l)).sum();
         Body {
-            bold: !body.is_empty() && body.iter().filter(|l| l.bold).count() * 2 > body.len(),
+            bold: all > 0 && heavy * 2 > all,
             settled: body.len() >= SETTLED_BODY_LINES,
         }
     }

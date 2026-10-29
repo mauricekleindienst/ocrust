@@ -696,6 +696,7 @@ impl Engine {
                 segments: Vec::new(),
                 monospaced: false,
                 bold: false,
+                light_marker: false,
             });
         }
 
@@ -805,6 +806,7 @@ impl Engine {
                 segments: Vec::new(),
                 monospaced: false,
                 bold: false,
+                light_marker: false,
             };
             stamps.push(Block {
                 kind: BlockKind::Stamp,

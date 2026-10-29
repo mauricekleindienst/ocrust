@@ -103,6 +103,12 @@ pub struct Line {
     /// Never set for text read from an image.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bold: bool,
+    /// Whether the line opens on a list's marker set in a lighter face than
+    /// the bold text after it — the `1.` a browser or Word sets before an
+    /// item's bold title; a heading's number is set in the heading's face.
+    /// Never set for text read from an image.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub light_marker: bool,
 }
 
 impl Line {
@@ -349,6 +355,7 @@ mod tests {
             segments: Vec::new(),
             monospaced: false,
             bold: false,
+            light_marker: false,
         }
     }
 

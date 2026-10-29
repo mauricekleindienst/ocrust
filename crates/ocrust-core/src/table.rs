@@ -141,6 +141,7 @@ pub(crate) fn find(lines: &[Line], text_height: f32, gutter: f32, rules: &[Rect]
         .iter()
         .map(|line| with_its_item(rules.split(cells_of(line, gutter), line)))
         .collect();
+    let rows = with_their_counts(rows, lines, &rules);
     let rows = stretched_cells(rows, lines, text_height);
     let ruled = rules.above(lines, &rows);
     if log::log_enabled!(log::Level::Debug) {
@@ -1208,22 +1209,56 @@ fn with_its_item(mut row: Vec<Candidate>) -> Vec<Candidate> {
     const BULLETS: &[&str] = &[
         "•", "◦", "▪", "▫", "●", "○", "■", "□", "‣", "∙", "·", "-", "–", "*",
     ];
-    // So is a count set apart by a tab — Word's `1.<tab>Budget` — where it
-    // and the item's text are all the line holds.
-    let counted = row.len() == 2 && list_count(row[0].cell.text.trim());
-    if row.len() >= 2 && (BULLETS.contains(&row[0].cell.text.trim()) || counted) {
-        let bullet = row.remove(0);
-        let item = &mut row[0];
-        item.cell.text = format!("{} {}", bullet.cell.text.trim(), item.cell.text);
-        item.cell.bbox = item.cell.bbox.union(&bullet.cell.bbox);
-        item.words.splice(0..0, bullet.words);
+    if row.len() >= 2 && BULLETS.contains(&row[0].cell.text.trim()) {
+        merge_marker(&mut row);
     }
     row
 }
 
+/// The first cell of a row joined to the second, as the marker of its text.
+fn merge_marker(row: &mut Vec<Candidate>) {
+    let marker = row.remove(0);
+    let item = &mut row[0];
+    item.cell.text = format!("{} {}", marker.cell.text.trim(), item.cell.text);
+    item.cell.bbox = item.cell.bbox.union(&marker.cell.bbox);
+    item.words.splice(0..0, marker.words);
+}
+
+/// Rows of a count set apart by a tab and the item's text — Word's
+/// `1.<tab>Budget` — as one cell each, where the rows around them are such
+/// items too and no rule runs between them: a table's `No. | Task` header,
+/// its borders, or a third column says the counts are its own.
+fn with_their_counts(
+    mut rows: Vec<Vec<Candidate>>,
+    lines: &[Line],
+    rules: &Rules,
+) -> Vec<Vec<Candidate>> {
+    let ruled = rules.above(lines, &rows);
+    let counted = |row: &[Candidate]| row.len() == 2 && list_count(row[0].cell.text.trim());
+    let mut at = 0;
+    while at < rows.len() {
+        if rows[at].len() < 2 {
+            at += 1;
+            continue;
+        }
+        let end = (at..rows.len())
+            .find(|&k| rows[k].len() < 2)
+            .unwrap_or(rows.len());
+        let items = rows[at..end].iter().all(|row| counted(row))
+            && !ruled[at..(end + 1).min(rows.len())].iter().any(|&r| r);
+        if items {
+            for row in &mut rows[at..end] {
+                merge_marker(row);
+            }
+        }
+        at = end;
+    }
+    rows
+}
+
 /// Whether a cell holds a list item's count and nothing else: `1.`, `2)`,
 /// `a.`, `(b)`, `iv.`.
-fn list_count(text: &str) -> bool {
+pub(crate) fn list_count(text: &str) -> bool {
     let inner = text.strip_prefix('(').map_or_else(
         || text.strip_suffix(['.', ')']),
         |opened| opened.strip_suffix(')'),

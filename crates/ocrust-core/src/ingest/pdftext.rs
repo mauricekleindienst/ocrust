@@ -1206,6 +1206,11 @@ impl Run {
                 (heavy + usize::from(b), all + 1)
             });
         let bold = written > 0 && heavy as f32 >= MONOSPACED_SHARE * written as f32;
+        let light_marker = bold
+            && self.pieces[..marker].iter().any(|piece| {
+                matches!(piece, Piece::Char(letter)
+                    if letter.text.chars().any(char::is_alphanumeric) && !letter.bold)
+            });
         Some(Line {
             text,
             confidence: 1.0,
@@ -1218,6 +1223,7 @@ impl Run {
             segments,
             monospaced,
             bold,
+            light_marker,
         })
     }
 }
@@ -1422,10 +1428,29 @@ fn follows(run: &Run, next: &Run) -> bool {
         return false;
     }
     let gap = (next.start - run.last_end).dot(b);
+    // A heading set larger than its narrow column runs on over the gutter
+    // to where the next column's first line starts: words set far smaller
+    // right where the larger ones end, no space between, are that column's.
+    // A note's mark after a word, a small capital's letters, are few, or
+    // follow a capital of their own.
+    if larger.size > TOUCHING_SIZES * smaller.size
+        && larger.letters() > 1
+        && smaller.letters() > TOUCHING_LETTERS
+        && !next.opens_with_space
+        && gap < SPACE_GAP_EM * size
+    {
+        return false;
+    }
     // A word drawn later carries on a line a word space away; the next
     // column, a table's next cell, can be as near as an em.
     (-0.3 * size..=MERGE_GAP_EM * run.size.min(next.size)).contains(&gap)
 }
+
+/// How much larger, as a factor, a run is set than one right after it that
+/// is the next column's rather than its own: a heading over the body.
+const TOUCHING_SIZES: f64 = 1.3;
+/// How many letters such a run has more than: a note's mark, `th`, `er`.
+const TOUCHING_LETTERS: usize = 2;
 
 /// Drops what a page draws twice in one place: fake bold, the same line
 /// drawn again a hair to the right; a text shadow, a copy of the line drawn

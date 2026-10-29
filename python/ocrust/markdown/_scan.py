@@ -1918,6 +1918,9 @@ class _Item:
     ordered: bool
     number: int
     content: list[Inline]
+    #: Where the item's text starts after its marker: the same for markers
+    #: set right, `viii.` over `ix.`, where the markers' starts are not.
+    text_x: float | None = None
 
 
 def _items(lines: list[Line], columns: _Columns) -> list[_Item]:
@@ -1952,6 +1955,9 @@ def _items(lines: list[Line], columns: _Columns) -> list[_Item]:
                 ordered=numbered is not None,
                 number=int(numbered.group(1)) if numbered else 1,
                 content=content,
+                text_x=None
+                if rtl or len(group[0].words) < 2 or not (marker or _LETTERED.match(first))
+                else group[0].words[1].box.x0,
             )
         )
     return items
@@ -1963,9 +1969,10 @@ def _item_ends(group: list[Line], line: Line, edge: float, rtl: bool) -> bool:
     stands. Left of the item's marker it goes back out to an outer list; at
     the marker it opens the next item, counted on (`2.` after `1.`) or after
     a stop, `; and` or a short line; set in, where the item's own lines go
-    on, it opens a list under the item only counting from its first — `a.`,
-    `i.`, `1.` — after an item that ended. A wrapped `3. Quartal`, `15. Mai`
-    or inline `(b)` goes on its item."""
+    on, it opens a list under the item counting from its first — `a.`, `i.`,
+    `1.` — after an item that ended, or counted on in another kind after a
+    line ending short or ending its sentence. A wrapped `3. Quartal`, `15.
+    Mai` or inline `(b)` goes on its item."""
     before = group[-1]
     text = before.text.strip()
     if re.search(r"(?:^|\s)[^\W\d_]\.$", text):
@@ -1979,18 +1986,24 @@ def _item_ends(group: list[Line], line: Line, edge: float, rtl: bool) -> bool:
     short = room > _first_word_width(line) + 0.35 * height
     ended = short or bool(_ITEM_END.search(text))
     listed = bool(_BULLET.match(opening) or _ENUMERATOR.match(opening) or _LETTERED.match(opening))
-    if not listed:
-        return short and text.endswith((".", ";", "!", "?"))
     at = (group[0].box.x1 - line.box.x1) if rtl else (line.box.x0 - group[0].box.x0)
+    if not listed:
+        # Running text's inline `(c)` or date goes on; a list set in under
+        # its lead-in opens.
+        return short and (text.endswith((".", ";", "!", "?")) or at > _MARKER_ALIGN * height)
     if at < -_MARKER_ALIGN * height:
         return True
     then = _count_of(line.text)
-    if at > _MARKER_ALIGN * height:
-        return (then == 1 or bool(_ROMAN_ONE.match(line.text))) and ended
     kin = bool(
         (_ENUMERATOR.match(opening) and _ENUMERATOR.match(line.text))
         or (_LETTERED.match(opening) and _LETTERED.match(line.text))
     )
+    if at > _MARKER_ALIGN * height:
+        # A sub-list counting from its first after an item that ended, or
+        # counted on in another kind, `(c)` under `2.`, after a line ending
+        # short or ending its sentence — not `(c)` after `guests, and`.
+        first_one = then == 1 or bool(_ROMAN_ONE.match(line.text))
+        return (first_one and ended) or (not kin and (short or text.endswith((".", "!", "?"))))
     first = _count_of(opening)
     following = (
         kin
@@ -2039,6 +2052,16 @@ def _nest(items: list[_Item]) -> list[Block]:
     few pixels — and every item ends up in a list, whatever level the first
     one sits at.
     """
+    # By where the items' texts start where those keep closer together than
+    # their markers do: a list's markers set right, `viii.` over `ix.`.
+    if all(item.text_x is not None for item in items):
+
+        def spread(xs: list[float]) -> float:
+            return sum(abs(b - a) for a, b in zip(xs, xs[1:]))
+
+        texts = [item.text_x for item in items if item.text_x is not None]
+        if spread(texts) < spread([item.x for item in items]):
+            items = [dataclasses.replace(item, x=x) for item, x in zip(items, texts)]
     step = statistics.median(
         [abs(b.x - a.x) for a, b in zip(items, items[1:]) if abs(b.x - a.x) > 4] or [1e9]
     )

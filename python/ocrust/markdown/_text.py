@@ -279,11 +279,16 @@ def _records(lines: list[str]) -> bool:
     most of them begin with the same word, or with a number of the same
     shape (a date, a time), or open on a label and a colon, or run on leader
     dots to a page number."""
-    # Header lines come three and more, `From:`, `To:`, `Subject:`; two may be
-    # a sentence wrapped before `Next steps:`.
+    # Header lines come three and more, `From:`, `To:`, `Subject:`; two, where
+    # the second's value opens as a header's does, `Date: Monday` — not on a
+    # sentence's word, as a sentence wrapped before `Next steps: we` goes on.
     for shape, least in ((_KEY_VALUE, 3), (_LEADERS, 2)):
         matched = sum(bool(shape.search(line)) for line in lines)
         if len(lines) >= least and matched >= 0.8 * len(lines):
+            return True
+    if len(lines) == 2 and all(_KEY_VALUE.match(line) for line in lines):
+        value = lines[1].split(":", 1)[1].strip()
+        if value and not value[0].islower():
             return True
     if len(lines) < 4:
         return False
